@@ -13,8 +13,8 @@ This guide maps edits; `../AGENTS.md` covers the surrounding contributor tooling
 | `safety.py` | Budget, early-stop, and authorization declarations |
 | `manifest.py` | Cross-group coherence and resolved runnable-state gate |
 | `support.py` | Exact-version applicability, support promotion, and matrix decisions |
-| `results.py` | Outcome populations, sample reasons, and result-local consistency |
-| `assessment.py` | Measurement accounting, distributions, and numerical budget assessment |
+| `results.py` | Outcome populations, required sample `submission` links, sample reasons, and result-local consistency |
+| `assessment.py` | Measurement accounting, per-submission outcome reconciliation, distributions, and numerical budget assessment |
 | `report.py` | `Evidence` binding and completeness classification, separate from qualification |
 | `__main__.py` | `SafeParser`, explicit-file loading, schema export, and closed error rendering |
 
@@ -22,6 +22,7 @@ This guide maps edits; `../AGENTS.md` covers the surrounding contributor tooling
 
 - Schema version 1 forbids extension keys and coercion. Keep finite bounds and frozen models;
   changes to accepted meaning need a schema-version review, not just a regenerated schema.
+  The README records why the required sample `submission` link kept version 1.
 - JSON Schema doesn't encode cross-field validators. Keep Python validation authoritative;
   add local checks to their owning model and cross-group checks to `Manifest.coherent`.
 - `Pending` markers aren't defaults. Preserve the exact owned decision/path checks in
