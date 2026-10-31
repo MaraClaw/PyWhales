@@ -32,6 +32,86 @@ def invoke(arguments: list[str], tmp_path: Path) -> subprocess.CompletedProcess[
     )
 
 
+def test_export_cli_when_simulation_is_reported_without_docker(tmp_path: Path) -> None:
+    simulation = tmp_path / "simulation.json"
+    simulation.write_text(run(manifest(), plan()).model_dump_json())
+    exported = invoke(
+        [
+            "export",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--input",
+            str(simulation),
+        ],
+        tmp_path,
+    )
+    assert exported.returncode == 0
+    result = json.loads(exported.stdout)
+    assert result["provenance"] == "synthetic"
+    assert result["authorization_record"] is None
+    assert all(
+        result[name] is None
+        for name in (
+            "isolation_evidence_ref",
+            "artifact_receipt_ref",
+            "cleanup_receipt_ref",
+        )
+    )
+    assert [s["submission"] for s in result["latency"][0]["samples"]] == [1, 2, 3]
+    result_path = tmp_path / "result.json"
+    result_path.write_text(exported.stdout)
+    contract = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.fleet_contract",
+            "report",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--support",
+            str(FIXTURES.parent.parent / "fleet_contract/fixtures/support-matrix.json"),
+            "--input",
+            str(result_path),
+        ],
+        env={**os.environ, "PATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert contract.returncode == 0, contract.stderr
+    assessed = json.loads(contract.stdout)
+    assert (
+        not assessed["evidence_complete"] and assessed["qualification"] == "unqualified"
+    )
+    assert {"receipts_missing", "authorization_record_mismatch"} <= set(
+        assessed["flags"]
+    )
+
+
+@pytest.mark.parametrize("defect", ["rejected", "non_synthetic", "invalid"])
+def test_export_cli_when_input_is_refused_is_safe(defect: str, tmp_path: Path) -> None:
+    declaration = json.loads(manifest().model_dump_json())
+    simulation = json.loads(run(manifest(), plan()).model_dump_json())
+    if defect == "rejected":
+        simulation.update(status="rejected", reasons=["refused"])
+    elif defect == "non_synthetic":
+        declaration["provenance"] = "operator_declared"
+        declaration["authorization"]["purpose"] = "operator_declared"
+    else:
+        simulation["private-secret"] = "private-secret"
+    manifest_path, report_path = tmp_path / "manifest.json", tmp_path / "report.json"
+    manifest_path.write_text(json.dumps(declaration))
+    report_path.write_text(json.dumps(simulation))
+    output = invoke(
+        ["export", "--manifest", str(manifest_path), "--input", str(report_path)],
+        tmp_path,
+    )
+    assert output.returncode == 2
+    assert json.loads(output.stderr)["errors"]
+    assert "private-secret" not in output.stderr
+
+
 def test_run_cli_when_docker_is_absent_writes_simulated_cleanup_report(
     tmp_path: Path,
 ) -> None:
