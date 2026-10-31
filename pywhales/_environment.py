@@ -93,7 +93,7 @@ class _ContainerEnvironment(dict[str, str]):
 def container_environment[K](
     envs: Mapping[K, object], source: ExecutionPolicySource
 ) -> tuple[list[str], dict[str, str]]:
-    """Split container assignments into CLI arguments and safe child overrides.
+    """Split container or build assignments into arguments and safe child overrides.
 
     Preserve iteration order and literal formatting for reserved, invalid, or
     colliding names. Inspect a matching frozen environment without consuming its
@@ -107,7 +107,12 @@ def container_environment[K](
         source: Originating config whose effective child environment is consulted.
 
     Returns:
-        Ordered values for repeated ``--env`` options and per-launch overrides.
+        Ordered values for repeated ``--env`` or ``--build-arg`` options and
+        per-launch overrides.
+
+    Raises:
+        ValueError: If strict_env_transport requires an entry to stay out of argv
+            but its name or value requires literal fallback. No entry is disclosed.
     """
     entries = [(key, f"{key}", f"{value}") for key, value in envs.items()]
     scope = _frozen_environment.get()
@@ -133,6 +138,10 @@ def container_environment[K](
             or reserved in _CLI_NAMES
             or reserved.startswith((*_CLI_PREFIXES, "LC_"))
         ):
+            if source.strict_env_transport:
+                raise ValueError(
+                    "strict_env_transport requires environment-only assignments"
+                )
             arguments.append(f"{name}={value}")
         else:
             arguments.append(name)

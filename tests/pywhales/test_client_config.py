@@ -470,3 +470,13 @@ def test_run_compose_command_with_env_file() -> None:
         assert isinstance(environment, dict)
         assert "A" in environment and environment["A"] == "1"
         assert "B" in environment and environment["B"] == "1"
+
+
+def test_strict_env_transport_configuration() -> None:
+    assert ClientConfig().strict_env_transport is False
+    assert (
+        DockerClient(strict_env_transport=True).client_config.strict_env_transport
+        is True
+    )
+    config = ClientConfig(strict_env_transport=True)
+    assert DockerClient(client_config=config).client_config is config
