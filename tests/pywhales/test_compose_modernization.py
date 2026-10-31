@@ -219,6 +219,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         "telemetry_observer",
         "environment",
         "default_timeout",
+        "strict_env_transport",
     ]
 
 
