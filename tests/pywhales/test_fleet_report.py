@@ -196,6 +196,37 @@ def test_supported_claim_when_review_references_are_not_authentication() -> None
     assert "independent_review_required" in report.flags
 
 
+def settle(data: dict[str, JsonValue], boundaries: set[str], submission: int) -> None:
+    """Fail one submission at the named latency boundaries of a fixture result."""
+    latencies = data["latency"]
+    assert isinstance(latencies, list)
+    for item in latencies:
+        assert isinstance(item, dict) and isinstance(item["samples"], list)
+        for sample in item["samples"]:
+            assert isinstance(sample, dict)
+            if item["boundary"] in boundaries and sample["submission"] == submission:
+                sample.update({"outcome": "failed", "seconds": 9.0})
+
+
+def test_consistent_failure_timings_when_the_full_distribution_is_retained() -> None:
+    data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
+    data["outcomes"] = {
+        "succeeded": 1,
+        "failed": 1,
+        "rejected": 0,
+        "cancelled": 0,
+        "unknown": 0,
+        "timed_out": 0,
+    }
+    settle(data, {"queue_wait", "selected_cli", "readiness"}, 1)
+
+    report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
+
+    assert report.evidence_complete
+    assert report.criteria == "failed"
+    assert report.distributions[0].percentiles[-1].seconds == 9.0
+
+
 def test_failure_timings_when_the_full_distribution_is_retained() -> None:
     data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
     data["outcomes"] = {
@@ -206,14 +237,23 @@ def test_failure_timings_when_the_full_distribution_is_retained() -> None:
         "unknown": 0,
         "timed_out": 0,
     }
-    latencies = data["latency"]
-    assert isinstance(latencies, list) and isinstance(latencies[0], dict)
-    samples = latencies[0]["samples"]
-    assert isinstance(samples, list) and isinstance(samples[0], dict)
-    samples[0].update({"outcome": "failed", "seconds": 9.0})
+    settle(data, {"queue_wait"}, 1)
 
     report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
 
-    assert report.evidence_complete
-    assert report.criteria == "failed"
+    assert not report.evidence_complete and report.criteria == "unknown"
+    assert report.qualification == "unqualified"
+    assert "submission_outcome_conflict" in report.flags
     assert report.distributions[0].percentiles[-1].seconds == 9.0
+
+
+def test_submission_outcome_when_other_boundaries_disagree_with_aggregate() -> None:
+    data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
+    settle(data, {"selected_cli"}, 2)
+
+    report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
+
+    assert not report.evidence_complete
+    assert {"submission_outcome_conflict", "outcome_samples_mismatch"} <= set(
+        report.flags
+    )
