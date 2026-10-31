@@ -40,11 +40,28 @@ names use `--env KEY`: PyWhales puts the value in that launch's child environmen
 for the CLI to forward. Empty values remain empty strings. This doesn't change
 the parent Python environment or use temporary env files.
 
-CLI-control names, including `DOCKER_*`, `COMPOSE_*`, `BUILDX_*`, `BUILDKIT_*`,
-`PATH`, `HOME`, and proxy variables, stay literal `KEY=VALUE` arguments, as do
-names colliding with the effective inherited/client environment or an active
-frozen environment snapshot. Windows case-equivalent names also stay literal.
-These assignments aren't rejected just because they need the literal form.
+By default these entries stay literal `KEY=VALUE` arguments, in their original
+order, instead of being rejected:
+
+- CLI-control names, matched case-insensitively: the prefixes `DOCKER_`,
+  `COMPOSE_`, `BUILDX_`, `BUILDKIT_`, `XDG_`, `SSH_`, `GIT_`, `OTEL_`, `LD_`,
+  `DYLD_`, `LC_`, `NODE_`, and `PYTHON`, plus names such as `PATH`, `HOME`,
+  `TMPDIR`, `TERM`, `LANG`, `TZ`, and proxy variables.
+- Invalid entries: an empty name, a name containing `=` or NUL, a value
+  containing NUL, or a non-string key.
+- Duplicate names after stringification, including names that differ only by
+  case on Windows.
+- Names colliding with the effective inherited/client environment or an active
+  frozen environment snapshot, compared case-insensitively on Windows.
+
+`DockerClient(strict_env_transport=True)` turns every entry above into a
+`ValueError` with a fixed message that discloses no name or value; one ineligible
+entry fails the whole call. See
+[Strict environment transport](client-and-errors.md#strict-environment-transport).
+The same check covers container `create`/`run`/`execute`, service `create`,
+Compose `run`/`execute`, and Buildx or Compose build args. For container `run`
+and `create`, the `pull="missing"` or `"always"` image step runs before `envs`
+are evaluated, so a strict rejection can come after an image pull.
 
 This reduces eligible values in argv; it doesn't promise that secrets never
 appear there, and a child environment isn't a secret vault. Use the application's
@@ -69,6 +86,8 @@ interpolation elsewhere in its configuration.
 | `docker.start(container, attach=True)` | `str` containing captured stdout |
 | `docker.start(container, attach=True, stream=True)` | Owned `ProcessStream` yielding `(source, bytes)` |
 | `docker.ps(all=True)` | `list[Container]`, including stopped containers |
+| `docker.wait(container)` | `int` exit code |
+| `docker.wait([container, ...])` | `list[int]` in Docker's output order; `[]` for an empty iterable, with no launch |
 
 Streaming `container.run`, `container.prune(stream_logs=True)`, and
 `service.logs(stream=True)` are also typed as closeable `ProcessStream` returns.
@@ -84,7 +103,7 @@ and attaching more than one container raises `ValueError`; an empty iterable
 returns `None` without a launch. `docker.start`, `docker.container.start`, and
 `Container.start()` share these rules and their return shapes.
 
-`run`, `execute`, `logs`, and `start` each accept a keyword-only `timeout` in
+`run`, `execute`, `logs`, `start`, and `wait` each accept a keyword-only `timeout` in
 positive finite seconds, replacing the client's `default_timeout` for that one
 launch; omitting it (`None`) inherits the client default, which is itself
 `None` (unbounded) unless set on `DockerClient(...)`. Expiry kills and reaps the
@@ -94,7 +113,17 @@ detached container or guarantee cancellation of the command inside it. See
 [Client, setup, and errors](client-and-errors.md) for the default-deadline
 contract. Image pull/inspect preflights and detached-result inspection are
 outside the selected run/execute/logs launch budget; a configured client
-default still applies separately to those launches.
+default still applies separately to those launches. `logs` inspects the
+container before its logs CLI starts, outside the deadline. Invalid `timeout`
+values are rejected before that inspection; with a valid timeout, a missing
+container raises `NoSuchContainer` before log collection.
+
+`wait` (`docker.wait(x, *, timeout=None)`, also `docker.container.wait`) blocks
+until the selected containers stop, so give anything that may keep running a
+deadline. It validates `timeout` before consuming the input: an invalid value
+raises `ValueError` even for `[]`, while a valid one with `[]` returns `[]`
+without a launch. A single reference returns an `int`, an iterable of references
+a `list[int]`. Expiry raises `DockerTimeout` without stopping the containers.
 
 `start` takes `timeout` in every mode (unattached, attached and captured, or
 streamed) and through all three entry points, validated before the container

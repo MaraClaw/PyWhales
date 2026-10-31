@@ -47,25 +47,59 @@ the parent Python process's own environment.
 
 Keep this CLI configuration distinct from container `envs={...}`. Eligible
 `envs` values use a per-launch child environment with `--env KEY`; CLI-control
-names and environment collisions stay literal `KEY=VALUE` arguments. Neither
-path is a secret vault. See
+names and environment collisions stay literal `KEY=VALUE` arguments by default.
+Neither path is a secret vault. See
 [Container environment values](containers-and-output.md#container-environment-values),
 including the Compose interpolation caveat.
 
-If passing an existing `client_config=...`, configure that object directly:
-the constructor retains it unchanged and ignores the other constructor options.
+If passing an existing `client_config=...`, configure that object directly,
+`strict_env_transport` included: the constructor retains it unchanged and
+ignores the other constructor options.
+
+## Strict Environment Transport
+
+`strict_env_transport` defaults to `False` on `DockerClient(...)` and on the
+`ClientConfig` dataclass, which you import from `pywhales.client_config`; the
+package root doesn't export it. Leaving it off keeps the literal `KEY=VALUE`
+fallback described above.
+
+```python
+from pywhales import DockerClient
+
+strict = DockerClient(strict_env_transport=True)
+```
+
+With `True`, container `envs` and Buildx or Compose `build_args` must all travel
+as name-only `--env KEY` or `--build-arg KEY`, with the value in that launch's
+child environment. An entry that would need the literal form raises a
+`ValueError` whose fixed message names no entry and shows no value, and the whole
+call fails. There's no per-call switch; the setting belongs to the client.
+
+This narrows what reaches argv. It isn't redaction or a secret vault: child
+environments, Compose interpolation, image history and provenance for build
+args, returned data, raw exception attributes, and your own logging can still
+carry values. Which entries count as literal fallbacks, and when the rejection
+happens, depends on the call. See
+[Container environment values](containers-and-output.md#container-environment-values),
+[Build arguments](buildx.md#build-arguments), and
+[Compose build and run environment](compose.md#build-and-run-environment).
 
 ## Default CLI Deadlines
 
 `DockerClient(default_timeout=30)` applies a 30-second deadline to each local
 CLI launch from that client. The default is `None`, which leaves launches
-unbounded. Where a method accepts its own `timeout`, `None` inherits the
-client default and a positive finite explicit value replaces it for the selected
-launch(es) only. Booleans, zero, negatives, and nonfinite values are invalid;
+unbounded. Where a method accepts a per-call local CLI deadline as `timeout`,
+it's keyword-only: `None` inherits the client default and a positive finite explicit
+value replaces it for the selected launch(es) only. Booleans, zero, negatives,
+and nonfinite values are invalid and raise `ValueError` before any launch;
 `None` doesn't disable a configured default. This isn't a whole-operation budget:
 preflight inspection, implicit image pulls, and postflight inspection are separate
 launches governed by their own settings. Inherited defaults are snapshotted at
 each launch, including lazy archive generators and queued transfers.
+
+Docker option timeouts are different: Compose `down`, `restart`, and `stop`
+use `timeout` for shutdown grace periods, not local CLI deadlines. See
+[Distinguish timeout meanings](compose.md#distinguish-timeout-meanings).
 
 Expiry kills and reaps the local CLI and raises `DockerTimeout`, a subclass of
 `DockerException` with the same `docker_command`/`return_code`/`stdout`/`stderr`

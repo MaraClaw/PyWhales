@@ -9,7 +9,7 @@ calls automatically.
 
 - [Bounding batch inspection](#bounding-batch-inspection)
 - [Manifest lists](#manifest-lists)
-- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
+- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
 ## Bounding Batch Inspection
@@ -166,8 +166,9 @@ inventory call. Snapshots aren't daemon transactions or total memory caps.
 ## Waiting For Convergence
 
 `pywhales.convergence` is an opt-in, read-only observer of one fixed target:
-a captured Swarm service generation (`capture_service` returns a
-`ServiceTarget`), an explicit Swarm stack (`StackTarget`), or selected Compose
+a captured Swarm service generation, including replicated and global jobs
+(`capture_service` returns a `ServiceTarget`), an explicit Swarm stack
+(`StackTarget`), or selected Compose
 services (`capture_compose` returns a `ComposeTarget`). `wait()` takes any of
 the three. Existing mutating calls never invoke it automatically; capture and
 wait yourself after submitting the change you want to confirm. Choose the
@@ -203,25 +204,73 @@ possibly-changing discovery.
 
 `capture_service(client, service_id, *, policy, timeout, cancel=None, approved_node_ids=None)`
 returns a `ServiceTarget`, or a typed `Failure`/`Deadline`/`Cancelled`
-outcome. It records the service's version and a fingerprint of its desired
-task template and mode at that instant. Replicated services need an explicit
-nonnegative replica count; Global services need `approved_node_ids`, a
-nonempty tuple of distinct node IDs, at capture time, since there's no
-automatic discovery of "eligible" nodes.
+outcome. It records the service's version, its job iteration for job modes, and
+a fingerprint of its desired task template and mode at that instant. Replicated
+services need an explicit nonnegative replica count; Global services need
+`approved_node_ids`, a nonempty tuple of distinct node IDs, at capture time,
+since there's no automatic discovery of "eligible" nodes. Supplying
+`approved_node_ids` for a Replicated or ReplicatedJob service is `unsupported`.
 
 Use an authorized service's actual immutable ID in place of the placeholder.
-Keep the target's originating `ClientConfig` stable while waiting. Unsupported
-job modes and malformed service/task data fail closed.
+Keep the target's originating `ClientConfig` stable while waiting. Replicated,
+Global, ReplicatedJob, and GlobalJob modes are supported; any other mode or a
+non-container runtime is `Failure(reason="unsupported")`, and malformed
+service/task data fails closed.
 
 `wait(target, *, policy, timeout, poll_interval, cancel=None)` accepts a
 `ServiceTarget`, a `StackTarget(services=(...))`, or a `ComposeTarget` and
-returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For Swarm targets,
-only current desired-running tasks count; a changed service version or template
-fingerprint returns `superseded`; `paused`/`failed`/rollback states are
-terminal `update_failed` failures. Snapshot collection isn't an atomic Swarm
-transaction, so a final generation recheck reduces, but can't remove, races
-from concurrent changes. A successful result proves the captured
+returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For ordinary
+(Replicated and Global) Swarm targets, only current desired-running tasks count;
+a changed service `Version` or template fingerprint returns `superseded`;
+`paused`/`failed`/rollback `UpdateStatus` states are terminal `update_failed`
+failures. Jobs follow their own rules, described next. Snapshot collection isn't
+an atomic Swarm transaction, so a final generation recheck reduces, but can't
+remove, races from concurrent changes. A successful result proves the captured
 task-generation conditions, not application health or readiness.
+
+### Swarm Jobs
+
+`capture_service` and `wait` handle `ReplicatedJob` and `GlobalJob` services
+without any extra parameter. Neither the version string nor `capture_service`'s
+signature shows that, so check that the installed `ServiceTarget.mode`
+annotation lists `replicated_job` and `global_job` (see
+[Usage validation](validation.md)). Ordinary Replicated and Global services
+keep the rules above.
+
+Capture:
+
+- A ReplicatedJob service takes no `approved_node_ids`. `MaxConcurrent` defaults
+  to 1 and `TotalCompletions` defaults to `MaxConcurrent`; both must be positive
+  integers, and any other key in the job mode is `unsupported`.
+- A GlobalJob service needs `approved_node_ids` like a Global service, and its
+  job mode must be empty.
+- The service must report a job status. The captured iteration is
+  `JobStatus.JobIteration.Index`, read as 0 when `Index` is missing; a service
+  without `JobStatus` is `Failure(reason="malformed")`. Capture also records the
+  template's `RestartPolicy.Condition`.
+
+Waiting:
+
+- Only tasks whose `JobIteration` equals the captured iteration count. Tasks from
+  other iterations, or with no iteration, are stale and ignored.
+- A matching task counts once its state is `complete`; any other state stays
+  pending, and desired state isn't consulted. A ReplicatedJob succeeds when
+  `TotalCompletions` distinct zero-based completion slots (`0` through
+  `TotalCompletions - 1`) are complete. A GlobalJob succeeds when every approved
+  node has a completed task; completions on other nodes don't count.
+- If the captured restart condition is exactly `none`, a matching task that is
+  `failed` or `rejected` ends the wait with `Failure(reason="completion_failed")`.
+  It carries the service ID but no state or cause. With any other or a missing
+  condition those tasks simply aren't counted, and the wait stays pending until
+  the deadline.
+- The generation fence is the template and mode fingerprint plus the job
+  iteration, with no service `Version` check. A changed fingerprint or a new
+  iteration is `superseded`; a `Version` bump alone isn't.
+- `UpdateStatus` isn't completion evidence and is ignored for jobs, so it can't
+  produce `update_failed` or an ongoing-update blocker.
+
+As with ordinary services, `Success` proves the captured conditions, not that
+the job's work was correct.
 
 ### Compose Project
 
@@ -317,8 +366,15 @@ can outlast it. `poll_interval` is also positive finite seconds.
 complete polling cycle, not live state at expiry; it's absent when capture
 expired or no cycle finished. It holds `captured_services` plus counts of
 affected services per reason, each service counted at most once per reason and
-reasons allowed to overlap. For Compose the long-running readiness counters are
-`non_running_containers`, `restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
+reasons allowed to overlap. Swarm counters are `missing_ready_slots`,
+`duplicate_slots`, `stale_templates`, `non_running_tasks`, `invalid_task_shape`,
+`ongoing_updates`, `missing_ready_nodes`, `duplicate_node_assignments`,
+`missing_node_assignments`, and `outside_approved_nodes`. A job wait fills only
+`missing_ready_slots` (a ReplicatedJob short of `TotalCompletions`) and
+`missing_ready_nodes` (a GlobalJob with an approved node not yet complete), each
+counting affected services rather than tasks or nodes. For Compose the
+long-running readiness counters are `non_running_containers`,
+`restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
 configured healthcheck that isn't `healthy`, including still `starting` or not
 yet reported). A restarting or paused container also counts as non-running.
 `unfinished_completion_containers` counts affected completion services, not

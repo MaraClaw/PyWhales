@@ -83,16 +83,17 @@ integer seconds; `restart` and `stop` also accept a `timedelta`, truncated to
 whole seconds. These launches can still raise `DockerTimeout` if the client's
 separate `default_timeout` expires.
 
-`run`, `logs`, `pull`, `push`, `watch`, and `events` instead accept a
-keyword-only `timeout` in positive finite seconds that replaces the client's
-`default_timeout` for that one local CLI launch; `None` inherits it. Expiry
-kills and reaps the local Compose CLI and raises `DockerTimeout`, which keeps
-whatever output was captured; it does not stop services, undo pulled or pushed
-layers, or guarantee that daemon-side or registry work stops. `pull`, `push`,
-and `watch` validate it before the empty-selection no-op: an invalid value
-raises `ValueError` even for `services=[]`, while a valid one with `[]` returns
-`None` without a launch. A returned stream's deadline keeps advancing while
-nothing consumes it, so drain it or close it on early exit.
+`build`, `execute`, `run`, `logs`, `pull`, `push`, `watch`, and `events`
+instead accept a keyword-only `timeout` in positive finite seconds that replaces
+the client's `default_timeout` for that one local CLI launch; `None` inherits it.
+`execute` applies it to detached, TTY, and captured calls alike. Expiry kills and
+reaps the local Compose CLI and raises `DockerTimeout`, which keeps whatever
+output was captured; it does not stop services, undo built, pulled or pushed
+layers, or guarantee that daemon-side or registry work stops. `build`, `pull`,
+`push`, and `watch` validate it before the empty-selection no-op: an invalid
+value raises `ValueError` even for `services=[]`, while a valid one with `[]`
+returns `None` without a launch. A returned stream's deadline keeps advancing
+while nothing consumes it, so drain it or close it on early exit.
 
 Don't confuse the two: `compose.up(wait_timeout=60)` is a third, separate
 concept, the Compose-side `--wait-timeout` bound on service readiness, not a
@@ -121,10 +122,29 @@ potentially unbounded, so use `stream=True` with a deliberate stop boundary.
 Both methods accept `envs={"GREETING": "hello", "EMPTY": ""}` for container
 values. Eligible values travel through the per-launch CLI environment and
 `--env KEY`, so they can also affect `${NAME}` interpolation elsewhere in the
-Compose configuration. Reserved or colliding names stay literal `KEY=VALUE`;
-see [Container environment values](containers-and-output.md#container-environment-values).
+Compose configuration. Reserved or colliding names stay literal `KEY=VALUE` unless strict mode rejects
+them; see [Container environment values](containers-and-output.md#container-environment-values).
 Client `environment=...` is separate CLI configuration, not a replacement for
 `envs`, and no temporary env files are created for this forwarding.
+
+## Build And Run Environment
+
+`build(build_args={...})` shares the same transport as `run` and `execute`
+`envs`. An eligible build arg is passed as name-only `--build-arg KEY`, with its
+value in the Compose CLI's child environment. Compose reads that environment for
+`${KEY}` interpolation, so the value can also change interpolated settings and
+name-only `environment:` entries of services, not just the build. Don't reuse a
+build arg name for an unrelated variable the Compose file interpolates.
+
+Reserved or colliding names stay literal `KEY=VALUE` arguments by default. With
+`DockerClient(strict_env_transport=True)` they raise a value-free `ValueError`
+instead; see [Strict environment transport](client-and-errors.md#strict-environment-transport).
+Every `build` branch (blocking and `stream_logs=True`) and every `execute` branch
+(detached, TTY, captured) forwards the same child environment.
+
+`build(services=[])` is a validated no-op: it checks `timeout` and the
+`quiet`/`stream_logs` conflict, then returns `None` without a launch. It never
+evaluates `build_args`, so strict mode raises nothing for an empty selection.
 
 ## Plugin Features and Previews
 
