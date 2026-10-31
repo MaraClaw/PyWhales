@@ -28,7 +28,8 @@ uv run --offline --locked python -m scripts.fleet_contract report \
   --input scripts/fleet_contract/fixtures/incomplete-result.json
 ```
 
-Replace `incomplete-result.json` with `synthetic-result.json` to inspect a
+The fake harness can export a synthetic result for the same report; see
+`scripts/fleet_harness/AGENTS.md`. Replace `incomplete-result.json` with `synthetic-result.json` to inspect a
 structurally complete fictional result. Neither command contacts Docker. A
 successful validation/report returns 0; invalid input, arguments or unreadable
 files return 2. `report` takes a result plus the two explicitly named contracts;
@@ -92,6 +93,8 @@ Runtime checks reject:
   maintainer approval reference. References are not authenticated.
 - Result counts above declared populations, subpopulations above parent counts,
   duplicate observations and samples larger than their declared population.
+- Samples without an integer `submission`, a `submission` outside
+  1..`populations.all_submissions`, or two samples for one submission in a boundary.
 - Sample reasons contradicting measured/excluded state, stability windows longer
   than elapsed time, and pending decision markers presented as observed versions.
 
@@ -141,6 +144,16 @@ not qualify any Docker combination.
 
 ## Result And Report Semantics
 
+**Schema-version decision: version 1 does not move for the required `submission`
+link.** This is a deliberate choice, not an oversight. The version constant is
+shared by the manifest, support matrix and result, and none of the other groups
+changed. The checked-in fictional fixtures are updated here. Existing version 1
+results without links must be migrated before they can be read.
+Fail-closed parsing carries the change: a result without links is rejected by the
+strict models (`missing` at `$.latency.N.samples.M.submission`), never reinterpreted.
+Link violations report fixed codes with field names and indices only. If results
+written before this change ever need to stay readable, version the result then.
+
 Result files bind manifest revision, support row, observed versions,
 authorization reference, run namespace and safe endpoint aliases. They retain
 population counts, all terminal outcomes, raw per-outcome seconds, exclusion
@@ -152,8 +165,14 @@ cleanup, not the manifest's deliberately protected/borrowed retained assets.
 `succeeded`, `failed`, `rejected`, `cancelled`, `unknown` and `timed_out` are
 mutually exclusive terminal categories. Timed-out observations are not counted
 again as failed/unknown. Their sum must not exceed all submissions. A short sum
-is allowed as incomplete evidence and flagged, never success. Queue samples must
-account for every declared outcome; non-queue samples use their own explicit
+is allowed as incomplete evidence and flagged, never success. Every sample carries
+a required integer `submission` (1..`populations.all_submissions`, unique within a
+boundary), linking a submission's samples across boundaries. The assessment
+reconciles those links: a submission whose outcome differs between boundaries is
+flagged `submission_outcome_conflict`, and the linked outcomes must reproduce the
+aggregate counts or `outcome_samples_mismatch` is flagged. Both are missing
+evidence, so a submission cannot fail at queue wait yet succeed at every later
+boundary in a complete result. Non-queue samples use their own explicit
 launched/readiness/fault populations. Excluded and missing seconds are retained,
 not zero-filled or silently removed from the denominator. A genuine measured
 zero differs from unavailable `null`.
@@ -204,7 +223,8 @@ does not authorize a real fault or live run.
 ```bash
 uv run --offline --locked pytest tests/pywhales/test_fleet_contract.py \
   tests/pywhales/test_fleet_report.py tests/pywhales/test_fleet_cli.py \
-  tests/pywhales/test_fleet_invariants.py \
+  tests/pywhales/test_fleet_invariants.py tests/pywhales/test_fleet_harness.py \
+  tests/pywhales/test_fleet_harness_cli.py \
   tests/pywhales/test_docker_overhead_benchmark.py \
   tests/pywhales/test_client_config.py tests/pywhales/test_docker_client.py \
   -m 'not docker' -q
