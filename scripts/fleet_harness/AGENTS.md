@@ -41,6 +41,10 @@ It builds on `../fleet_contract/`; read that package's guide and README before c
 Run from the repository root with `uv run --offline --locked python -m scripts.fleet_harness`:
 
 - `run --manifest M --input PLAN` emits a simulation report.
+- `export --manifest M --input REPORT` converts a fake run report to a synthetic
+  contract result. Rejected reports and non-synthetic manifests are refused;
+  authorization and receipt references remain absent. Feed the result to
+  `python -m scripts.fleet_contract report --manifest M --support S --input RESULT`.
 - `decide --input EXPERIMENT` emits a no-go decision over prerecorded inputs.
 - `schema --kind {manifest,plan,experiment}` exports the selected input schema.
 
