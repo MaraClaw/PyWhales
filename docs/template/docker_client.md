@@ -16,6 +16,34 @@ paused or an archive producer is blocked. The timeout is reported when caller
 execution resumes; arbitrary Python iterator code cannot be interrupted. This
 does not guarantee descendant cleanup or roll back daemon-side operations.
 
+Compose `build` (blocking or streamed), Compose `execute` (captured, TTY or detached),
+and container `wait` (also `docker.wait`) accept keyword-only `timeout`. Invalid
+values, including booleans, zero, negative and nonfinite numbers, fail before
+lookup or inspection, even for empty selections. Log inspection preflights remain
+outside the selected launch budget. Compose `down`, `restart` and `stop` timeouts
+are shutdown grace periods, not local CLI deadlines.
+
+## Assignment values and argv
+
+Container `envs` and Buildx/Compose `build_args` use name-only `--env KEY` or
+`--build-arg KEY` for eligible names, with values in that child's environment.
+Empty and multiline values are supported without changing `os.environ`. Eligibility
+uses one effective-environment snapshot: existing ambient/client names, reserved
+CLI/runtime names or prefixes, invalid names/values, non-string keys and Windows
+case-equivalent duplicates retain ordered literal `KEY=value` fallback by default.
+
+`DockerClient(strict_env_transport=True)` (also a `ClientConfig` setting) refuses
+every literal fallback with a value-free `ValueError`. Build args reject before
+executable lookup or builder inspection. Reserved prefixes include `PYTHON`, so
+`PYTHON_VERSION` is intentionally rejected in strict mode. `buildx.bake` `--set`
+is unchanged. This reduces process-argument exposure; child environments, image
+history/provenance, returned output and caller logs can still disclose values.
+Use build secrets for secrets, not build args.
+
+Compose also uses the child environment for `${VAR}` interpolation and name-only
+service `environment` entries. Transported values can therefore affect project
+configuration beyond the selected build argument or container assignment.
+
 ## Sub-commands
 
 * [`docker.buildx`](sub-commands/buildx.md)
