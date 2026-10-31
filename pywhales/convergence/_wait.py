@@ -27,8 +27,8 @@ from pywhales.convergence._types import (
     Success,
 )
 from pywhales.convergence._wire import (
-    fingerprint,
     inspect_service,
+    same_generation,
     target_from_wire,
 )
 from pywhales.docker_client import DockerClient
@@ -218,16 +218,15 @@ def wait(
                         latest = inspect_service(
                             service.client_config, service.service_id
                         )
-                        if (
-                            latest.version.index != service.version
-                            or fingerprint(latest) != service.fingerprint
-                        ):
+                        if not same_generation(service, latest):
                             return Failure(
                                 reason="superseded", service_id=service.service_id
                             )
                         update = (
                             latest.update.state if latest.update is not None else None
                         )
+                        if service.mode in {"replicated_job", "global_job"}:
+                            update = None
                         if update in {
                             "paused",
                             "rollback_started",

@@ -22,6 +22,16 @@ class Version(BaseModel):
     index: int = Field(alias="Index", ge=0)
 
 
+class JobIteration(BaseModel):
+    model_config = ConfigDict(strict=True)
+    index: int = Field(default=0, alias="Index", ge=0)
+
+
+class JobStatus(BaseModel):
+    model_config = ConfigDict(strict=True)
+    iteration: JobIteration = Field(alias="JobIteration")
+
+
 class Spec(BaseModel):
     model_config = ConfigDict(strict=True)
     mode: dict[str, JsonValue] = Field(alias="Mode")
@@ -39,6 +49,7 @@ class ServiceWire(BaseModel):
     version: Version = Field(alias="Version")
     spec: Spec = Field(alias="Spec")
     update: UpdateStatus | None = Field(default=None, alias="UpdateStatus")
+    job_status: JobStatus | None = Field(default=None, alias="JobStatus")
 
 
 class TaskStatus(BaseModel):
@@ -55,6 +66,7 @@ class TaskWire(BaseModel):
     desired: str = Field(alias="DesiredState", min_length=1)
     status: TaskStatus = Field(alias="Status")
     spec: dict[str, JsonValue] | None = Field(default=None, alias="Spec")
+    job_iteration: JobIteration | None = Field(default=None, alias="JobIteration")
 
 
 class ContainerHealth(BaseModel):
@@ -131,6 +143,18 @@ def fingerprint(service: ServiceWire) -> str:
     return hashlib.sha256(generation.encode()).hexdigest()
 
 
+def same_generation(target: ServiceTarget, service: ServiceWire) -> bool:
+    """Compare the generation fence appropriate to the captured mode."""
+    if fingerprint(service) != target.fingerprint:
+        return False
+    if target.mode in {"replicated_job", "global_job"}:
+        return (
+            service.job_status is not None
+            and service.job_status.iteration.index == target.job_iteration
+        )
+    return service.version.index == target.version
+
+
 def inspect_service(config: ClientConfig, service_id: str) -> ServiceWire:
     """Inspect exactly one immutable service ID."""
     payload = run([*config.docker_cmd, "service", "inspect", service_id])
@@ -176,6 +200,9 @@ def target_from_wire(
 ) -> ServiceTarget | Failure:
     """Capture a supported generation, or reject an unsupported mode."""
     mode = service.spec.mode
+    total_completions = 0
+    job_iteration = None
+    restart_condition = None
     if set(mode) == {"Replicated"} and isinstance(mode["Replicated"], dict):
         replicated = mode["Replicated"]
         replicas = replicated.get("Replicas")
@@ -194,9 +221,40 @@ def target_from_wire(
     ):
         replicas = 0
         captured_mode = "global"
+    elif set(mode) == {"ReplicatedJob"} and isinstance(mode["ReplicatedJob"], dict):
+        job = mode["ReplicatedJob"]
+        maximum = job.get("MaxConcurrent", 1)
+        total = job.get("TotalCompletions", maximum)
+        if (
+            set(job) - {"MaxConcurrent", "TotalCompletions"}
+            or type(maximum) is not int
+            or maximum < 1
+            or type(total) is not int
+            or total < 1
+            or approved_node_ids is not None
+        ):
+            return Failure(reason="unsupported", service_id=service.id)
+        replicas = 0
+        total_completions = total
+        captured_mode = "replicated_job"
+    elif (
+        set(mode) == {"GlobalJob"}
+        and mode["GlobalJob"] == {}
+        and approved_node_ids is not None
+    ):
+        replicas = 0
+        captured_mode = "global_job"
     else:
         return Failure(reason="unsupported", service_id=service.id)
     template = service.spec.template
+    if captured_mode in {"replicated_job", "global_job"}:
+        if service.job_status is None:
+            return Failure(reason="malformed", service_id=service.id)
+        job_iteration = service.job_status.iteration.index
+        restart = template.get("RestartPolicy")
+        condition = restart.get("Condition") if isinstance(restart, dict) else None
+        if isinstance(condition, str):
+            restart_condition = condition
     container = template.get("ContainerSpec")
     image = container.get("Image") if isinstance(container, dict) else None
     if not isinstance(image, str) or image == "":
@@ -213,4 +271,7 @@ def target_from_wire(
         replicas=replicas,
         mode=captured_mode,
         approved_node_ids=approved_node_ids,
+        job_iteration=job_iteration,
+        total_completions=total_completions,
+        restart_condition=restart_condition,
     )

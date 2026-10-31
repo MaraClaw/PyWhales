@@ -12,7 +12,9 @@ from pywhales.convergence import (
     DeadlineDetail,
     Failure,
     Outcome,
+    ServiceTarget,
     capture_compose,
+    capture_service,
     wait,
 )
 from pywhales.inventory import InspectionPolicy
@@ -60,3 +62,15 @@ def _check_completion_contract(
             ],
         )
     assert_type(DeadlineDetail(1).unfinished_completion_containers, int)
+
+
+def _check_job_contract(client: DockerClient, policy: InspectionPolicy) -> None:
+    captured = capture_service(client, "service", policy=policy, timeout=1.0)
+    if isinstance(captured, ServiceTarget):
+        assert_type(
+            captured.mode,
+            Literal["replicated", "global", "replicated_job", "global_job"],
+        )
+        assert_type(captured.job_iteration, int | None)
+        assert_type(captured.total_completions, int)
+        assert_type(captured.restart_condition, str | None)

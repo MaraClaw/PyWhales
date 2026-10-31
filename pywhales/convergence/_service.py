@@ -8,9 +8,9 @@ from pywhales.client_config import ParsingError
 from pywhales.convergence._types import DeadlineDetail, Failure, ServiceTarget
 from pywhales.convergence._wire import (
     canonical,
-    fingerprint,
     inspect_service,
     inspect_task,
+    same_generation,
 )
 from pywhales.enums import TaskState
 from pywhales.utils import run
@@ -79,12 +79,12 @@ def summarize(
 def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
     """Inspect a captured generation and count blockers only on desired-running tasks."""
     service = inspect_service(target.client_config, target.service_id)
-    if (
-        service.version.index != target.version
-        or fingerprint(service) != target.fingerprint
-    ):
+    if not same_generation(target, service):
         return Failure(reason="superseded", service_id=target.service_id)
     state = service.update.state if service.update is not None else None
+    is_job = target.mode in {"replicated_job", "global_job"}
+    if is_job:
+        state = None
     if state in {
         "paused",
         "rollback_started",
@@ -121,6 +121,27 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
         task = inspect_task(target.client_config, task_id)
         if task.service_id != target.service_id:
             raise ParsingError("Task service identity mismatch")
+        if is_job:
+            if (
+                task.job_iteration is None
+                or task.job_iteration.index != target.job_iteration
+            ):
+                continue
+            if (
+                task.status.state in {"failed", "rejected"}
+                and target.restart_condition == "none"
+            ):
+                return Failure(reason="completion_failed", service_id=target.service_id)
+            if task.status.state == "complete":
+                if (
+                    target.mode == "replicated_job"
+                    and task.slot is not None
+                    and 0 <= task.slot < target.total_completions
+                ):
+                    slots.add(task.slot)
+                if target.mode == "global_job" and task.node_id in approved:
+                    ready_nodes.add(task.node_id)
+            continue
         if task.desired not in TaskState or task.status.state not in TaskState:
             raise ParsingError("Unknown task state")
         if task.desired != "running":
@@ -156,14 +177,17 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
         if task.status.state == "running" and matching:
             slots.add(task.slot)
     return ServiceObservation(
-        missing_ready_slots=target.mode == "replicated"
-        and len(slots) < target.replicas,
+        missing_ready_slots=(
+            target.mode == "replicated" and len(slots) < target.replicas
+        )
+        or (target.mode == "replicated_job" and len(slots) < target.total_completions),
         duplicate_slots=duplicate,
         stale_templates=stale,
         non_running_tasks=non_running,
         invalid_task_shape=invalid,
         ongoing_updates=state == "updating",
-        missing_ready_nodes=target.mode == "global" and ready_nodes != approved,
+        missing_ready_nodes=target.mode in {"global", "global_job"}
+        and ready_nodes != approved,
         duplicate_node_assignments=duplicate_nodes,
         missing_node_assignments=missing_assignment,
         outside_approved_nodes=outside_nodes,

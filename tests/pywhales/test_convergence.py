@@ -236,7 +236,7 @@ def test_update_progress_state(
     "mode",
     [
         {"Global": {}},
-        {"ReplicatedJob": {"MaxConcurrent": 1}},
+        {"ReplicatedJob": {"MaxConcurrent": 0}},
         {"GlobalJob": {}},
         {},
         {"Replicated": {}},
@@ -803,6 +803,132 @@ def global_service(identity: str = "service-a") -> dict[str, Any]:
     snapshot = service(identity)
     snapshot["Spec"]["Mode"] = {"Global": {}}
     return snapshot
+
+
+def job_service(*, global_job: bool = False, iteration: int = 1) -> dict[str, Any]:
+    snapshot = service()
+    snapshot["Spec"]["Mode"] = (
+        {"GlobalJob": {}} if global_job else {"ReplicatedJob": {"TotalCompletions": 2}}
+    )
+    snapshot["JobStatus"] = {"JobIteration": {"Index": iteration} if iteration else {}}
+    return snapshot
+
+
+def job_task(
+    identity: str, slot: int, iteration: int, state: str = "complete"
+) -> dict[str, Any]:
+    current = task(identity, slot=slot)
+    current["JobIteration"] = {"Index": iteration} if iteration else {}
+    current["Status"]["State"] = state
+    current["DesiredState"] = "shutdown"
+    return current
+
+
+@pytest.mark.parametrize("global_job", [False, True])
+def test_job_current_iteration_completes_via_fake_cli(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, global_job: bool
+) -> None:
+    snapshot = job_service(global_job=global_job, iteration=0)
+    first, second = job_task("a", 0, 0), job_task("b", 1, 0)
+    first["NodeID"], second["NodeID"] = "node-a", "node-b"
+    snapshot["UpdateStatus"] = {"State": "failed"}
+    store(tmp_path, [snapshot], [first, second])
+    target = (
+        capture_global(fake_cli, policy) if global_job else capture(fake_cli, policy)
+    )
+    assert isinstance(wait(target, policy=policy, timeout=5, poll_interval=1), Success)
+
+
+@pytest.mark.parametrize("stage", [1, 2])
+def test_job_rerun_supersedes_at_cycle_or_final_recheck(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, stage: int
+) -> None:
+    snapshot = job_service()
+    store(tmp_path, [snapshot], [job_task("a", 0, 1), job_task("b", 1, 1)])
+    target = capture(fake_cli, policy)
+    changed = job_service(iteration=2)
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["sequences"] = {"service-a": [snapshot] * stage + [changed]}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert isinstance(result, Failure) and result.reason == "superseded"
+
+
+def test_job_version_bump_is_not_a_new_generation(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    snapshot = job_service()
+    store(tmp_path, [snapshot], [job_task("a", 0, 1), job_task("b", 1, 1)])
+    target = capture(fake_cli, policy)
+    snapshot["Version"]["Index"] += 1
+    store(tmp_path, [snapshot], [job_task("a", 0, 1), job_task("b", 1, 1)])
+    assert isinstance(wait(target, policy=policy, timeout=5, poll_interval=1), Success)
+
+
+@pytest.mark.parametrize(
+    "condition,expected",
+    [
+        ("none", "failure"),
+        ("any", "deadline"),
+        (None, "deadline"),
+        ("future", "deadline"),
+    ],
+)
+def test_job_failures_and_stale_tasks(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    condition: str | None,
+    expected: str,
+) -> None:
+    snapshot = job_service()
+    if condition is not None:
+        snapshot["Spec"]["TaskTemplate"]["RestartPolicy"] = {"Condition": condition}
+    store(tmp_path, [snapshot], [job_task("a", 0, 1, "failed"), job_task("old", 1, 0)])
+    result = wait(capture(fake_cli, policy), policy=policy, timeout=2, poll_interval=5)
+    if expected == "failure":
+        assert isinstance(result, Failure) and result.reason == "completion_failed"
+    else:
+        assert isinstance(result, Deadline) and result.detail == DeadlineDetail(
+            1, missing_ready_slots=1
+        )
+
+
+def test_job_retry_replacement_same_slot_is_not_duplicate(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store(
+        tmp_path,
+        [job_service()],
+        [job_task("a", 0, 1, "failed"), job_task("b", 0, 1), job_task("c", 1, 1)],
+    )
+    assert isinstance(
+        wait(capture(fake_cli, policy), policy=policy, timeout=5, poll_interval=1),
+        Success,
+    )
+
+
+def test_global_job_stale_completion_does_not_count(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    first, stale = job_task("a", 0, 1), job_task("b", 0, 0)
+    first["NodeID"], stale["NodeID"] = "node-a", "node-b"
+    store(tmp_path, [job_service(global_job=True)], [first, stale])
+    result = wait(
+        capture_global(fake_cli, policy), policy=policy, timeout=2, poll_interval=5
+    )
+    assert isinstance(result, Deadline)
+    assert result.detail == DeadlineDetail(1, missing_ready_nodes=1)
+
+
+def test_job_without_status_is_malformed(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    snapshot = job_service()
+    del snapshot["JobStatus"]
+    store(tmp_path, [snapshot], [])
+    result = capture_service(fake_cli, "service-a", policy=policy, timeout=2)
+    assert isinstance(result, Failure) and result.reason == "malformed"
 
 
 def global_task(

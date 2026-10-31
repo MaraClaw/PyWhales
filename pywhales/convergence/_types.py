@@ -16,16 +16,19 @@ class ServiceTarget:
     fingerprint: str
     template: str = field(repr=False)
     replicas: int
-    mode: Literal["replicated", "global"] = "replicated"
+    mode: Literal["replicated", "global", "replicated_job", "global_job"] = "replicated"
     approved_node_ids: tuple[str, ...] | None = field(default=None, repr=False)
+    job_iteration: int | None = None
+    total_completions: int = 0
+    restart_condition: str | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid or mode-inconsistent node membership."""
         nodes = self.approved_node_ids
-        if self.mode == "replicated" and nodes is None:
+        if self.mode in {"replicated", "replicated_job"} and nodes is None:
             return
         if (
-            self.mode != "global"
+            self.mode not in {"global", "global_job"}
             or type(nodes) is not tuple
             or not nodes
             or any(type(node) is not str or not node for node in nodes)
