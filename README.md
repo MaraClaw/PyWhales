@@ -43,6 +43,75 @@ image = docker.build(".", tags="my-app:latest", load=True)
 docker.compose.up(detach=True)
 ```
 
+## Common tasks
+
+These examples use `alpine`, publish no ports, and clean up after themselves. The first run pulls the image if it isn't local. Commands are argv lists, not shell strings: a string raises `TypeError`.
+
+### Run a detached container safely
+
+```python
+from pywhales import docker
+
+with docker.run("alpine", ["sleep", "300"], detach=True, stop_timeout=1) as container:
+    state = container.state
+    if state is not None:
+        print(state.running)  # True
+```
+
+`detach=True` returns a `Container` handle instead of output. Leaving the `with` block, normally or through an exception, stops the container if it's running and removes it along with its anonymous volumes. A container that's already gone isn't an error. `stop_timeout=1` caps the shutdown grace period at one second, so cleanup doesn't wait on `sleep`. Nothing is published to the host unless you pass `publish`.
+
+### Execute a command
+
+```python
+from pywhales import docker
+
+with docker.run("alpine", ["sleep", "300"], detach=True, stop_timeout=1) as container:
+    print(container.execute(["echo", "hello"]))  # hello
+    print(container.execute(["pwd"], workdir="/tmp"))  # /tmp
+```
+
+`execute()` returns the command's stdout as a `str` with one trailing newline removed. Stderr isn't returned, but a failed command keeps it on the exception. `docker.execute(container, [...])` does the same and also accepts a container name.
+
+### Stream output and close it
+
+```python
+from pywhales import docker
+
+with docker.run("alpine", ["sleep", "300"], detach=True, stop_timeout=1) as container:
+    with container.execute(
+        ["sh", "-c", "echo out; echo err >&2"], stream=True
+    ) as output:
+        for source, payload in output:
+            print(source, payload.decode(errors="replace"), end="")
+
+# stdout out
+# stderr err
+```
+
+With `stream=True` you get an iterator of `(source, payload)` pairs. `source` is `"stdout"` or `"stderr"`, and `payload` is `bytes`: one line per record, newline included, so decode it yourself. The two sources can arrive in either order. The non-streaming call returns a decoded `str` instead.
+
+The `with` block closes the local `docker` process on every exit path, including `break` and exceptions. A bare `break` doesn't close the stream. Closing affects only the local CLI: a command still running in the container isn't stopped, and the outer block removes the container.
+
+### Catch CLI failures
+
+```python
+from pywhales import DockerException, docker
+from pywhales.exceptions import DockerTimeout
+
+with docker.run("alpine", ["sleep", "300"], detach=True, stop_timeout=1) as container:
+    try:
+        container.execute(["sh", "-c", "exit 3"], timeout=10)
+    except DockerTimeout:
+        print("The local docker CLI exceeded 10 seconds")
+    except DockerException as error:
+        print(f"{type(error).__name__}: exit code {error.return_code}")
+        # DockerException: exit code 3
+```
+
+A failing CLI call raises `DockerException`. Subclasses such as `NoSuchContainer` and `DockerTimeout` derive from it, so list them first. `return_code` is the exit code of the local `docker` process, which `docker exec` takes from the command itself. A stream raises the same exceptions when iteration reaches the end of a failed command.
+
+The exception message shows the exit code but withholds the command and output. `docker_command`, `stdout` and `stderr` hold raw values that can include secrets, so log them only on purpose. `timeout` bounds only the local CLI. On expiry PyWhales kills and reaps it, but the command in the container may keep running. See [Exceptions](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/exceptions.md) for the full list.
+
 ## Custom configuration
 
 `docker` is a shared default client. Create your own `DockerClient` to change its settings:
