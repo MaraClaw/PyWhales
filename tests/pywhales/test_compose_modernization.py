@@ -247,7 +247,7 @@ def test_build_retains_positional_slots_when_modern_options_are_added(
         "plain",
         "build",
         "--build-arg",
-        "VERSION=1",
+        "VERSION",
         "--no-cache",
         "--pull",
         "--ssh",
@@ -260,6 +260,7 @@ def test_build_retains_positional_slots_when_modern_options_are_added(
         "--push",
         "web",
     ]
+    assert command.call_args.kwargs["env"]["VERSION"] == "1"
 
 
 @pytest.mark.parametrize("attestation", [False, True, "mode=max"])

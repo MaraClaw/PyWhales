@@ -19,6 +19,7 @@ from pywhales.utils import (
     format_time_arg,
     run,
     stream_stdout_and_stderr,
+    validate_timeout,
 )
 
 type SystemEventsFilter = tuple[str, str]
@@ -120,8 +121,8 @@ class SystemCLI(DockerCLICaller):
                 order and repeated keys, and an iterator is read once. The
                 default adds none. For example, `filters={"type": "container"}`
                 or `filters=[("event", "start"), ("event", "die")]`.
-            timeout: Positive finite seconds for the local CLI, or None for no
-                deadline. Timing starts at launch and continues while iteration
+            timeout: Positive finite seconds for the local CLI, or None to inherit
+                the client default. Timing starts at launch and continues while iteration
                 pauses. Expiry kills and reaps the CLI while preserving captured
                 output; natural post-exit pipe draining is unchanged.
 
@@ -146,6 +147,7 @@ class SystemCLI(DockerCLICaller):
                 withholds the payload and chains no cause, raw mode chains the
                 original error.
         """
+        validate_timeout(timeout)
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command(
             [

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -242,6 +243,36 @@ def test_overlay_change_invalidates_endpoint_binding() -> None:
     client.client_config.environment["TEST_ENV_CLIENT"] = "second"
     with pytest.raises(PolicyError):
         binding.validate(client)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_compose_build_values_are_visible_to_project_environment(
+    stream: bool, tmp_path: Path
+) -> None:
+    driver = tmp_path / "compose.py"
+    record = tmp_path / "project.json"
+    driver.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from string import Template\n"
+        "project = {'image': Template('${APP_BUILD_VALUE}:latest').substitute(os.environ), "
+        "'environment': {name: os.environ[name] for name in ['APP_BUILD_VALUE']}}\n"
+        "Path(sys.argv[1]).write_text(json.dumps(project))\n"
+    )
+    client = DockerClient(
+        client_call=[sys.executable, str(driver), str(record)],
+        strict_env_transport=True,
+    )
+    result = client.compose.build(
+        build_args={"APP_BUILD_VALUE": "build-input"}, stream_logs=stream
+    )
+    if result is not None:
+        with result:
+            list(result)
+    assert json.loads(record.read_text()) == {
+        "image": "build-input:latest",
+        "environment": {"APP_BUILD_VALUE": "build-input"},
+    }
 
 
 def test_safe_diagnostics_hide_client_overlay(

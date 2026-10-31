@@ -375,6 +375,10 @@ def test_subscription_deadlines_are_keyword_only_in_every_overload(
         client.service.logs,
         client.compose.events,
         client.system.events,
+        client.compose.build,
+        client.compose.execute,
+        client.container.wait,
+        client.wait,
     ):
         for variant in (method, *get_overloads(method)):
             parameter = signature(variant).parameters["timeout"]

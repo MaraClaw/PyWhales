@@ -130,6 +130,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = ...,
         sbom: bool | str | None = ...,
         push: bool = ...,
+        timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
     @overload
@@ -151,6 +152,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = ...,
         sbom: bool | str | None = ...,
         push: bool = ...,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -172,6 +174,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
+        timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
     def build(
@@ -192,6 +195,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
+        timeout: float | None = None,
     ) -> ProcessStream | None:
         """Build services declared in the configured Compose project.
 
@@ -201,7 +205,10 @@ class ComposeCLI(DockerCLICaller):
         Args:
             services: Services to build. `None` selects all services; `[]` skips
                 execution after validating the output-mode combination.
-            build_args: Build-time variable names and values for services.
+            build_args: Build-time variable names and values for services. Eligible
+                values use the child environment, also affecting Compose interpolation
+                and name-only service environment entries. Ineligible entries stay
+                literal unless strict_env_transport rejects them before lookup.
             cache: Set to `False` if you don't want to use the cache to build your images
             progress: Set type of progress output (auto, tty, plain, json, quiet).
                 Overrides `compose_progress` for this call only; `None` uses the
@@ -224,6 +231,9 @@ class ComposeCLI(DockerCLICaller):
             sbom: Add an SBOM attestation (`True`), disable it (`False`), or pass
                 attestation parameters. `None` leaves the CLI default unchanged.
             push: Push the built service images.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated even for an empty selection.
+                A stream's deadline advances while consumption pauses.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
@@ -231,8 +241,12 @@ class ComposeCLI(DockerCLICaller):
             `print=True` does not change this result shape.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, timeout is
+                invalid, or strict_env_transport rejects a literal assignment.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped. Daemon-side build work is not guaranteed to stop.
         """
+        validate_timeout(timeout)
         if quiet and stream_logs:
             raise ValueError(
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
@@ -241,12 +255,13 @@ class ComposeCLI(DockerCLICaller):
 
         if services == []:
             return
+        build_arguments, child_env = container_environment(
+            build_args, self.client_config
+        )
         full_cmd = Command(
             [*self.client_config.get_compose_command(progress=progress), "build"]
         )
-        full_cmd.add_args_iterable_or_single(
-            "--build-arg", format_mapping_for_cli(build_args)
-        )
+        full_cmd.add_args_iterable("--build-arg", build_arguments)
         full_cmd.add_flag("--no-cache", not cache)
         full_cmd.add_flag("--pull", pull)
         full_cmd.add_flag("--quiet", quiet)
@@ -272,9 +287,9 @@ class ComposeCLI(DockerCLICaller):
         else:
             pass  # passing nothing means all services are built
         if stream_logs:
-            return stream_stdout_and_stderr(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, env=child_env, timeout=timeout)
         else:
-            run(full_cmd, capture_stdout=False)
+            run(full_cmd, env=child_env, capture_stdout=False, timeout=timeout)
 
     @overload
     def config(self, return_json: Literal[False] = ...) -> ComposeConfig: ...
@@ -507,6 +522,8 @@ class ComposeCLI(DockerCLICaller):
         privileged: bool = False,
         user: str | None = None,
         workdir: str | Path | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str | None:
         """Execute a command in a running container.
 
@@ -521,14 +538,20 @@ class ComposeCLI(DockerCLICaller):
             privileged: If `True`, run the command in privileged mode.
             user: The username to use inside the container.
             workdir: The working directory inside the container.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Applies to detached, TTY and captured calls.
 
         Returns:
             Captured stdout when `detach=False` and `tty=False`; otherwise `None`.
             With the default `tty=True`, output goes to the caller's terminal.
 
         Raises:
+            ValueError: Timeout is boolean, nonfinite, zero or negative.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without guaranteeing container-command termination.
             DockerException: The local Compose CLI exits unsuccessfully.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_compose_cmd, "exec"])
         full_cmd.add_flag("--detach", detach)
         env_arguments, child_env = container_environment(envs, self.client_config)
@@ -540,11 +563,17 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--workdir", workdir)
         full_cmd += [service, *command]
         if detach:
-            run(full_cmd, env=child_env)
+            run(full_cmd, env=child_env, timeout=timeout)
         elif tty:
-            run(full_cmd, env=child_env, capture_stdout=False, capture_stderr=False)
+            run(
+                full_cmd,
+                env=child_env,
+                capture_stdout=False,
+                capture_stderr=False,
+                timeout=timeout,
+            )
         else:
-            return run(full_cmd, env=child_env)
+            return run(full_cmd, env=child_env, timeout=timeout)
 
     def kill(
         self,
@@ -648,7 +677,7 @@ class ComposeCLI(DockerCLICaller):
             stream: Return an owned stream of `("stdout", bytes)` and
                 `("stderr", bytes)` records instead of collecting text.
             timeout: Positive finite seconds from local logs CLI launch, or `None`
-                for no deadline. Timing continues while consumption pauses.
+                to inherit the client default. Timing continues while consumption pauses.
                 Expiry raises `DockerTimeout` without stopping services or changing
                 post-exit pipe draining.
 
@@ -662,6 +691,7 @@ class ComposeCLI(DockerCLICaller):
                 and reaped.
             DockerException: The local logs CLI exits unsuccessfully.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_compose_cmd, "logs", "--no-color"])
         full_cmd.add_simple_arg("--tail", tail)
         full_cmd.add_flag("--follow", follow)
@@ -1132,7 +1162,7 @@ class ComposeCLI(DockerCLICaller):
                 may differ from the Python host; avoid exposing sensitive paths.
             workdir: Working directory inside the container
             timeout: Positive finite seconds from local CLI launch, or `None`
-                for no deadline. Timing advances even when a returned stream is
+                to inherit the client default. Timing advances even when a returned stream is
                 not consumed. This is not a Compose shutdown or health-wait timeout.
 
         Returns:
@@ -1372,7 +1402,7 @@ class ComposeCLI(DockerCLICaller):
         Args:
             services: Service names to filter events. Empty input selects all services.
             timeout: Positive finite seconds from local events CLI launch, or
-                `None` for no deadline. Timing advances while consumption pauses.
+                `None` to inherit the client default. Timing advances while consumption pauses.
                 Expiry raises `DockerTimeout` without stopping services or changing
                 post-exit pipe draining.
 
@@ -1391,6 +1421,7 @@ class ComposeCLI(DockerCLICaller):
                 withholds the payload and chains no cause, raw mode chains the
                 original error.
         """
+        validate_timeout(timeout)
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
         parser = JsonOutputParser("compose event", self.client_config.raw_diagnostics)

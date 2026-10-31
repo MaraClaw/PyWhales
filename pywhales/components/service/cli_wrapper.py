@@ -529,8 +529,8 @@ class ServiceCLI(DockerCLICaller):
             truncate: Allow Docker to truncate IDs in formatted output.
             stream: Return a closeable stream when True; otherwise collect decoded
                 stdout and stderr records into one string in arrival order.
-            timeout: Positive finite seconds for the local logs CLI, or None for
-                no deadline. Timing starts at launch and continues while iteration
+            timeout: Positive finite seconds for the local logs CLI, or None to
+                inherit the client default. Timing starts at launch and continues while iteration
                 pauses. Expiry kills and reaps the local CLI, preserving captured
                 output; natural post-exit pipe draining is unchanged.
 
@@ -548,6 +548,7 @@ class ServiceCLI(DockerCLICaller):
             BufferError: If a record or retained stderr history exceeds the
                 configured stream buffer budget.
         """
+        validate_timeout(timeout)
         # first we verify that the service exists and raise an exception if not.
         self.inspect(str(service))
 
