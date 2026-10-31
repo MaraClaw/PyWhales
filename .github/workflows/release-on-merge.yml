@@ -32,15 +32,3 @@ jobs:
           PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id }}
           PUBLISHER_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: uv run --locked python -m scripts.delivery release --run-id "$PUBLISHER_RUN_ID"
-
-  pages:
-    needs: release
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
-      pages: write
-      id-token: write
-    uses: ./.github/workflows/gh-pages.yml
-    with:
-      publisher_run_id: ${{ format('{0}', github.event.workflow_run.id) }}
