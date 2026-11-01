@@ -47,7 +47,8 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
-`max_total_references`, `max_total_response_bytes`, and `max_total_stream_bytes` default to `None`,
+`max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`, and
+`max_total_stdin_bytes` default to `None`,
 leaving aggregate accounting unbounded. The illustrative limits above aren't
 a universal sizing recommendation. `observation()`
 is a context manager applying those limits, plus an optional absolute
@@ -58,7 +59,7 @@ doesn't automatically propagate to worker threads you spawn inside it.
 
 The scope's restrictions belong to the shared synchronous captured path (the
 path list/inspect-style calls use). Inside a scope, that path rejects `tty`,
-uncaptured output, and `input` with `ValueError`, and charges the captured
+uncaptured output, and `input` without a stdin budget with `ValueError`, and charges the captured
 stdout/stderr bytes to the response budgets. Streams and archive transfers
 follow a separate launch lifecycle, described under the limits below. Don't use
 `observation()` as a general command sandbox.
@@ -159,6 +160,17 @@ Overflow stops and reaps the local CLI and delivers `ObservationLimitError` with
 reason `total_stream` once. Archive watchdog drains and the stderr read that
 selects a Docker exception are uncharged. Leaving the field unset changes no
 stream or archive accounting.
+
+Set `max_total_stdin_bytes` to a strictly positive integer to bound uploads across
+captured `run(input=...)` calls and archive loads. Bytes and cooperative byte
+iterables are accepted; stdout and stderr drain during captured uploads. Only
+bytes accepted by successful local pipe writes count, including partial writes,
+against every enclosing shared account. Empty input consumes nothing and exact
+budget EOF succeeds; excess input raises `ObservationLimitError` with reason
+`total_stdin`. Upload accounts remain attached to launched transfers after scope
+exit and never consume response or stream budgets. Iterator code must yield
+cooperatively: deadlines and cancellation cannot interrupt it, and cleanup waits
+for an in-flight iteration before joining the writer.
 
 Aggregate response budgets apply within observation scopes and the bounded
 inventory call. Snapshots aren't daemon transactions or total memory caps.
@@ -311,7 +323,7 @@ match capture_compose(
         print(f"Compose capture stopped: {type(stopped).__name__}")
 ```
 
-`capture_compose(client, services, *, completion_services: tuple[str, ...] = (), policy, timeout, cancel=None)` returns a
+`capture_compose(client, services, *, completion_services: tuple[str, ...] = (), max_restarts=None, policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
@@ -324,6 +336,13 @@ waiting.
 - `completion_services` is a tuple of distinct selected names, fixed at capture;
   a list, duplicates, or a name outside `services` raises `ValueError` before
   launch. The default `()` leaves every selected service long-running.
+- `max_restarts` is `None` (disabled) or a nonnegative integer, never a boolean;
+  invalid values raise before launch. The target freezes this choice. When enabled,
+  every long-running member must report a nonnegative integer `RestartCount` at
+  capture and each cycle, otherwise the result is cause-free `malformed`. Any
+  member above budget keeps its service unsettled even while healthy. This is a
+  live blocker, not a permanent failure or a monotonic-counter assumption;
+  completion services ignore the restart budget.
 - Capture lists the selected services' containers with stopped ones included,
   inspects each, and skips one-off `compose run` containers. For every selected
   service the target records the full container IDs and the single
@@ -380,6 +399,8 @@ yet reported). A restarting or paused container also counts as non-running.
 `unfinished_completion_containers` counts affected completion services, not
 individual containers or replicas; the other readiness counters exclude
 completion services.
+`restart_budget_exceeded_containers` counts affected long-running services once
+each, bounded by `captured_services`, from the latest complete cycle.
 
 A `Failure.cause` or a target's `template` may hold confidential wire data; they
 stay out of `repr()`, but don't log them without a confidentiality policy.
