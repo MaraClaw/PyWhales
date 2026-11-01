@@ -81,12 +81,21 @@ def test_manifest_create_remove(
     reason="The creation of manifest doesn't work in github actions for some reason",
 )
 def test_manifest_annotate(docker_client: DockerClient, manifest: ManifestList) -> None:
+    with docker_client.manifest.create(random_name(), ["busybox:1.26"]) as target:
+        assert target.manifests is not None
+        assert len(target.manifests) == 1
+        digest = target.manifests[0].digest
+        assert digest is not None
+
     assert manifest.name is not None
     docker_client.manifest.annotate(
         manifest.name, "busybox:1.26", os="linux", arch="arm64"
     )
+    manifest.reload()
     assert manifest.manifests is not None
-    platform = manifest.manifests[0].platform
+    matching = [entry for entry in manifest.manifests if entry.digest == digest]
+    assert len(matching) == 1
+    platform = matching[0].platform
     assert platform is not None
     assert platform.os == "linux"
     assert platform.architecture == "arm64"
