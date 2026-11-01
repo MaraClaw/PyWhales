@@ -7,6 +7,7 @@ dispatches, deploys, runs Docker or contacts a production service.
 import base64
 import io
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -58,6 +59,7 @@ from scripts.delivery.trust import (
     attempt_jobs,
     identity,
     merged_pull,
+    successful_jobs,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -491,6 +493,241 @@ def test_rejects_incomplete_same_attempt_checks(service: Service, fault: str) ->
     service.set_jobs(tuple(jobs))
     with pytest.raises(Rejected):
         producer(service.api, 100)
+
+
+ARM_CHECK = "Compose and Buildx ARM64 smoke tests"
+WORKFLOW = ROOT / ".github" / "workflows" / "python-package.yml"
+MODERN_COMMAND = (
+    "uv run --locked pytest -vv -rs --no-runtime-skip --durations=10 "
+    "tests/pywhales/components/test_docker_modern_integration.py"
+)
+# Written out by hand, not derived from trust.CHECKS, so renaming a job on only
+# one side of the workflow/seal contract fails.
+EXPECTED_CHECKS = frozenset(
+    {
+        "Render docs",
+        "build-linux-lint",
+        "build-linux-test-other",
+        "build-linux-test-coverage",
+        "Compose and Buildx smoke tests",
+        ARM_CHECK,
+        "build-windows",
+        "Build tested distributions",
+        *(
+            f"build-linux-test-component ({component})"
+            for component in (
+                "buildx",
+                "test_compose.py",
+                "test_config.py",
+                "test_container.py",
+                "test_context.py",
+                "test_image.py",
+                "test_manifest.py",
+                "test_network.py",
+                "test_node.py",
+                "test_plugin.py",
+                "test_service.py",
+                "test_stack.py",
+                "test_swarm.py",
+                "test_system.py",
+                "test_task.py",
+                "test_volume.py",
+            )
+        ),
+    }
+)
+
+
+def matches(pattern: str, text: str) -> tuple[str, ...]:
+    return tuple(str(item) for item in re.findall(pattern, text))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowJob:
+    """Machine-read facts of one `python-package.yml` job."""
+
+    ident: str
+    text: str
+
+    @property
+    def keys(self) -> frozenset[str]:
+        return frozenset(matches(r"(?m)^    ([\w-]+):", self.text))
+
+    @property
+    def runs_on(self) -> str:
+        found = re.search(r"(?m)^    runs-on: (\S+)$", self.text)
+        assert found, self.ident
+        return str(found.group(1))
+
+    @property
+    def needs(self) -> frozenset[str]:
+        found = re.search(r"(?m)^    needs:\n((?:      - .+\n)+)", self.text)
+        return frozenset(matches(r"- (\S+)", found.group(1)) if found else ())
+
+    @property
+    def names(self) -> frozenset[str]:
+        """Names GitHub reports for this job, one per matrix entry."""
+        found = re.search(r"(?m)^    name: (.+)$", self.text)
+        title = str(found.group(1)) if found else self.ident
+        matrix = re.search(
+            r"(?m)^        component:\n((?:          - .+\n)+)", self.text
+        )
+        if matrix is None:
+            return frozenset({title})
+        return frozenset(
+            f"{title} ({component})"
+            for component in matches(r"- (\S+)", matrix.group(1))
+        )
+
+    @property
+    def command(self) -> str:
+        return " ".join(self.text.split())
+
+
+def workflow_jobs() -> dict[str, WorkflowJob]:
+    section = WORKFLOW.read_text().split("\njobs:\n", 1)[1]
+    blocks = re.split(r"(?m)^  (?=[\w-]+:$)", section)[1:]
+    jobs = [WorkflowJob(block.split(":", 1)[0], block) for block in blocks]
+    return {job.ident: job for job in jobs}
+
+
+def test_workflow_jobs_and_seal_contract_agree_independently() -> None:
+    jobs = workflow_jobs()
+    seal_job = next(job for job in jobs.values() if SEAL_JOB in job.names)
+    names = [name for job in jobs.values() for name in sorted(job.names)]
+
+    assert len(names) == len(set(names))
+    assert set(names) == {*EXPECTED_CHECKS, SEAL_JOB}
+    assert set(CHECKS) == EXPECTED_CHECKS
+    assert len(CHECKS) == len(EXPECTED_CHECKS)
+    assert seal_job.needs == set(jobs) - {seal_job.ident}
+
+
+def test_native_arm64_smoke_job_is_required_and_runs_the_modern_suite() -> None:
+    jobs = workflow_jobs()
+    arm, amd64 = jobs["build-linux-test-modern-arm64"], jobs["build-linux-test-modern"]
+
+    assert arm.names == {ARM_CHECK}
+    assert arm.runs_on == "ubuntu-24.04-arm"
+    assert amd64.names == {"Compose and Buildx smoke tests"}
+    assert amd64.runs_on == "ubuntu-24.04"
+    assert {"if", "strategy", "continue-on-error", "container"}.isdisjoint(arm.keys)
+    assert arm.keys == amd64.keys
+    for job in (arm, amd64):
+        assert MODERN_COMMAND in job.command
+        assert "./scripts/download-docker-plugins.sh" in job.command
+    assert 'test "$(uname -m)" = aarch64' in arm.command
+    assert 'test "$RUNNER_ARCH" = ARM64' in arm.command
+    assert "{{.Server.Arch}}')\" = arm64" in arm.command
+    for emulation in ("qemu", "binfmt", "--platform", "|| true"):
+        assert emulation not in arm.command.lower()
+    assert {"build-linux-test-modern", "build-linux-test-modern-arm64"} <= jobs[
+        "delivery-eligible"
+    ].needs
+
+
+def arm_faults(jobs: tuple[Job, ...], fault: str) -> tuple[Job, ...]:
+    index = next(i for i, job in enumerate(jobs) if job.name == ARM_CHECK)
+    arm, result = jobs[index], list(jobs)
+    match fault:
+        case "missing":
+            del result[index]
+        case "failed" | "skipped" | "cancelled":
+            conclusion = {"failed": "failure"}.get(fault, fault)
+            result[index] = arm.model_copy(update={"conclusion": conclusion})
+        case "unfinished":
+            result[index] = arm.model_copy(
+                update={
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "completed_at": None,
+                }
+            )
+        case "no-completion-time":
+            result[index] = arm.model_copy(update={"completed_at": None})
+        case "attempt":
+            result[index] = arm.model_copy(update={"run_attempt": 2})
+        case "sha":
+            result[index] = arm.model_copy(update={"head_sha": "c" * 40})
+        case "duplicate":
+            result.append(arm.model_copy(update={"id": 500}))
+        case "extra":
+            result.append(
+                arm.model_copy(update={"id": 500, "name": "Compose and Buildx s390x"})
+            )
+        case "renamed":
+            result[index] = arm.model_copy(
+                update={"name": "Compose and Buildx smoke tests (arm64)"}
+            )
+        case _:
+            raise AssertionError(fault)
+    return tuple(result)
+
+
+@pytest.mark.parametrize("gate", ["sealer", "consumer"])
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("missing", "incomplete"),
+        ("failed", "sealer checks failed|unsuccessful job"),
+        ("skipped", "sealer checks failed|unsuccessful job"),
+        ("cancelled", "sealer checks failed|unsuccessful job"),
+        ("unfinished", "sealer checks failed|unsuccessful job"),
+        ("no-completion-time", "sealer checks failed|unsuccessful job"),
+        ("attempt", "job attempt linkage"),
+        ("sha", "job attempt linkage"),
+        ("duplicate", "ambiguous jobs"),
+        ("extra", "incomplete"),
+        ("renamed", "incomplete"),
+    ],
+)
+def test_arm64_smoke_job_must_succeed_in_this_attempt_before_sealing(
+    service: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    gate: str,
+    fault: str,
+    reason: str,
+) -> None:
+    checkout(tmp_path)
+    uploaded(service, monkeypatch)
+
+    def run() -> object:
+        if gate == "sealer":
+            return seal(service.api, 100, tmp_path)
+        return producer(service.api, 100)
+
+    assert run()
+    service.set_jobs(arm_faults(service.jobs, fault))
+    with pytest.raises(Rejected, match=reason):
+        run()
+
+
+def test_arm64_job_from_an_earlier_attempt_cannot_satisfy_a_rerun(
+    service: Service,
+) -> None:
+    rerun = service.source.model_copy(update={"run_attempt": 2})
+    jobs = tuple(job.model_copy(update={"run_attempt": 2}) for job in service.jobs)
+    stale = tuple(
+        job.model_copy(update={"run_attempt": 1}) if job.name == ARM_CHECK else job
+        for job in jobs
+    )
+    expected = (*CHECKS, SEAL_JOB)
+
+    def list_attempt_two(listing: tuple[Job, ...]) -> None:
+        service.put(
+            "actions/runs/100/attempts/2/jobs?per_page=100&page=1",
+            Jobs(total_count=len(listing), jobs=listing),
+        )
+
+    list_attempt_two(jobs)
+    assert len(successful_jobs(service.api, rerun, expected)) == len(expected)
+    list_attempt_two(stale)
+    with pytest.raises(Rejected, match="job attempt linkage"):
+        successful_jobs(service.api, rerun, expected)
+    list_attempt_two(tuple(job for job in jobs if job.name != ARM_CHECK))
+    with pytest.raises(Rejected, match="incomplete same-attempt jobs"):
+        successful_jobs(service.api, rerun, expected)
 
 
 @pytest.mark.parametrize("existing", [(), (WHEEL,), (WHEEL, SDIST)])

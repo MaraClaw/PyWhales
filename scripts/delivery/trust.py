@@ -31,6 +31,7 @@ CHECKS: Final = (
     "build-linux-test-other",
     "build-linux-test-coverage",
     "Compose and Buildx smoke tests",
+    "Compose and Buildx ARM64 smoke tests",
     "build-windows",
     "Build tested distributions",
     *(f"build-linux-test-component ({component})" for component in COMPONENTS),

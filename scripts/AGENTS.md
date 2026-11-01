@@ -20,9 +20,9 @@ what lives here.
 
 - The root guide covers the provisioning hazards. Read these scripts; don't run them on a workstation.
 - `python-package.yml` calls `ci-setup.sh` from three jobs (component, other, coverage) and `download-docker-plugins.sh`
-  from the Compose and Buildx smoke job. Read those jobs before editing either script.
+  from the amd64 and native ARM64 Compose and Buildx smoke jobs. Read those jobs before editing either script.
 - `COMPOSE_VERSION` and `BUILDX_VERSION` default to 5.6.1 and 0.38.1. The script fails before downloading unless the
-  checksum file holds exactly one 64-hex pin for that name and version, and it verifies with `sha256sum -c` in a staging
+  checksum file holds exactly one 64-hex pin for that name, version and architecture, and it verifies with `sha256sum -c` in a staging
   directory before `mv`. Keep that order. A bump changes the pin file and the plugin rows in
   `fleet_contract/fixtures/support-matrix.json`.
 
