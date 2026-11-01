@@ -9,6 +9,7 @@ calls automatically.
 
 - [Bounding batch inspection](#bounding-batch-inspection)
 - [Manifest lists](#manifest-lists)
+- [Bounding streams and uploads](#bounding-streams-and-uploads)
 - [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
@@ -48,9 +49,11 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
 `max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`, and
-`max_total_stdin_bytes` default to `None`,
-leaving aggregate accounting unbounded. The illustrative limits above aren't
-a universal sizing recommendation. `observation()`
+`max_total_stdin_bytes` default to `None`. An unset output total leaves that
+aggregate unbounded; unset stdin still refuses captured input inside an
+observation unless an enclosing scope supplies a stdin budget. Booleans, zero,
+and negative values are invalid for every policy limit. The illustrative limits
+above aren't a universal sizing recommendation. `observation()`
 is a context manager applying those limits, plus an optional absolute
 monotonic `deadline` and a `cancel` `Event`, to synchronous list/inspect
 calls executed through it. Nested scopes can only tighten the active limits,
@@ -59,9 +62,9 @@ doesn't automatically propagate to worker threads you spawn inside it.
 
 The scope's restrictions belong to the shared synchronous captured path (the
 path list/inspect-style calls use). Inside a scope, that path rejects `tty`,
-uncaptured output, and `input` without a stdin budget with `ValueError`, and charges the captured
-stdout/stderr bytes to the response budgets. Streams and archive transfers
-follow a separate launch lifecycle, described under the limits below. Don't use
+uncaptured output, and `input` without a stdin budget with `ValueError`, and
+charges captured stdout/stderr bytes to the response budgets. Streams and archive
+transfers follow a separate launch lifecycle, described under the limits below. Don't use
 `observation()` as a general command sandbox.
 
 `capture_inventory(items, *, policy)` accepts a mix of `InventoryRequest`
@@ -140,6 +143,8 @@ and the regular, selected-launch
 `DockerTimeout` from `default_timeout`/`timeout=` is unaffected and can still
 fire independently.
 
+### Bounding Streams And Uploads
+
 Streams and archive transfers (log and progress streams, `load`, `save`) can
 retain a scope's lifecycle instead. Started inside a scope, they check
 cancellation and the argv and environment limits before launch, keep the
@@ -162,13 +167,19 @@ selects a Docker exception are uncharged. Leaving the field unset changes no
 stream or archive accounting.
 
 Set `max_total_stdin_bytes` to a strictly positive integer to bound uploads across
-captured `run(input=...)` calls and archive loads. Bytes and cooperative byte
-iterables are accepted; stdout and stderr drain during captured uploads. Only
+the captured execution helper's `run(input=...)` calls and archive loads. This
+is child-CLI stdin, not a new `input=` argument on `client.run()` (container run).
+For public archive uploads, use `client.image.load()` with bytes or a byte
+iterable; see [Registry transfers and archives](registry-and-archives.md).
+Bytes and cooperative byte iterables are accepted; stdout and stderr drain during
+captured uploads. Only
 bytes accepted by successful local pipe writes count, including partial writes,
 against every enclosing shared account. Empty input consumes nothing and exact
 budget EOF succeeds; excess input raises `ObservationLimitError` with reason
-`total_stdin`. Upload accounts remain attached to launched transfers after scope
-exit and never consume response or stream budgets. Iterator code must yield
+`total_stdin`. Concurrent launches sharing a propagated observation context share
+the same allowance; declaring a new independent scope in each thread does not
+create a shared request budget. Upload accounts remain attached to launched
+transfers after scope exit and never consume response or stream budgets. Iterator code must yield
 cooperatively: deadlines and cancellation cannot interrupt it, and cleanup waits
 for an in-flight iteration before joining the writer.
 
@@ -308,6 +319,7 @@ match capture_compose(
     compose_client,
     services,
     completion_services=("migrate",),
+    max_restarts=0,  # optional: no observed restarts for long-running members
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -323,7 +335,8 @@ match capture_compose(
         print(f"Compose capture stopped: {type(stopped).__name__}")
 ```
 
-`capture_compose(client, services, *, completion_services: tuple[str, ...] = (), max_restarts=None, policy, timeout, cancel=None)` returns a
+`capture_compose(client, services, *, completion_services=(), max_restarts=None,
+policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
