@@ -51,8 +51,12 @@ order, instead of being rejected:
   containing NUL, or a non-string key.
 - Duplicate names after stringification, including names that differ only by
   case on Windows.
-- Names colliding with the effective inherited/client environment or an active
+- Names colliding with the effective child environment or an active
   frozen environment snapshot, compared case-insensitively on Windows.
+
+With `inherit_environment=False`, ordinary names present only in excluded
+ambient state don't collide; explicit client-overlay entries still do. Reserved
+names remain reserved. See [CLI environment isolation](client-and-errors.md#isolate-the-cli-environment).
 
 `DockerClient(strict_env_transport=True)` turns every entry above into a
 `ValueError` with a fixed message that discloses no name or value; one ineligible
@@ -126,6 +130,11 @@ raises `ValueError` even for `[]`, while a valid one with `[]` returns `[]`
 without a launch. A single reference returns an `int`, an iterable of references
 a `list[int]`. Expiry raises `DockerTimeout` without stopping the containers.
 
+For running/healthy readiness plus designated successful one-shot completion,
+use `capture_containers()` and `wait()` from `pywhales.convergence`, not
+`docker.wait()`. They return typed observation outcomes instead of exit codes;
+see [Standalone containers](observation-and-convergence.md#standalone-containers).
+
 `start` takes `timeout` in every mode (unattached, attached and captured, or
 streamed) and through all three entry points, validated before the container
 iterable is consumed. An invalid value raises `ValueError` even for `[]`, while
@@ -181,6 +190,8 @@ cancellation boundary and keep the stream in a context manager.
 Container properties such as `name` and `state` can issue inspect calls and use
 a short-lived cache. Read a property once into a local variable for a coherent
 decision; use `container.reload()` when an explicit refresh is required.
+A reload must still describe the handle's immutable ID; a mismatched snapshot
+raises `ParsingError` and leaves the cached data and refresh time untouched.
 
 ## Copy Files or Export a Filesystem
 

@@ -114,7 +114,7 @@ def test_shared_json_parser_keeps_validation_cause_and_json_report_in_raw_mode(
     ],
 )
 @pytest.mark.parametrize("item", [None, [], True, 1, 2.5, "non-object"])
-def test_inspect_preserves_type_error_when_json_item_is_not_an_object(
+def test_inspect_rejects_json_item_that_is_not_an_object(
     monkeypatch: pytest.MonkeyPatch,
     resource_type: type[
         Config
@@ -138,7 +138,7 @@ def test_inspect_preserves_type_error_when_json_item_is_not_an_object(
     monkeypatch.setattr(f"{resource_type.__module__}.run", Mock(return_value=json_str))
     resource = resource_type(config, "resource-id", is_immutable_id=True)
 
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError if resource_type is ManifestList else ParsingError):
         resource._fetch_and_parse_inspect_result("resource-id")
 
 
@@ -206,7 +206,7 @@ def test_inspect_fetch_preserves_nested_values_when_json_item_is_an_object(
         Volume,
     ],
 )
-def test_inspect_fetch_preserves_json_decode_error_when_output_is_malformed(
+def test_inspect_fetch_rejects_malformed_json(
     monkeypatch: pytest.MonkeyPatch,
     resource_type: type[
         Config
@@ -228,5 +228,7 @@ def test_inspect_fetch_preserves_json_decode_error_when_output_is_malformed(
     monkeypatch.setattr(f"{resource_type.__module__}.run", Mock(return_value="{"))
     resource = resource_type(config, "resource-id", is_immutable_id=True)
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(
+        json.JSONDecodeError if resource_type is ManifestList else ParsingError
+    ):
         resource._fetch_inspect_result_json("resource-id")

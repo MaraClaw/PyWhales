@@ -14,7 +14,6 @@ from typing import (
 
 from pydantic import JsonValue
 
-from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -27,7 +26,6 @@ from pywhales.components.secret.models import SecretInspectResult, SecretSpec
 from pywhales.exceptions import NoSuchSecret
 from pywhales.utils import (
     ValidPath,
-    custom_parse_object_as,
     format_mapping_for_cli,
     run,
     to_list,
@@ -73,9 +71,7 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "secret", "inspect", reference])
-        return custom_parse_object_as(
-            dict[str, JsonValue], {**loads_compat(json_str)[0]}
-        )
+        return self._parse_single_inspect_json(json_str)
 
     @override
     def _parse_json_object(

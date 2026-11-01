@@ -10,7 +10,6 @@ from pydantic import JsonValue
 
 import pywhales.components.service.cli_wrapper
 from pywhales._inspect_validation import parse_namespace_inspect_results
-from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     DockerCLICaller,
@@ -24,7 +23,7 @@ from pywhales.components.task.models import (
     TaskStatus,
 )
 from pywhales.enums import TaskState
-from pywhales.utils import custom_parse_object_as, run
+from pywhales.utils import run
 
 
 class Task(ReloadableObjectFromJson[TaskInspectResult]):
@@ -38,9 +37,7 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "inspect", reference])
-        return custom_parse_object_as(
-            dict[str, JsonValue], {**loads_compat(json_str)[0]}
-        )
+        return self._parse_single_inspect_json(json_str)
 
     @override
     def _parse_json_object(

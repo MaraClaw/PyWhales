@@ -23,9 +23,10 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs with project version 1.1.0.
-An installed version string alone isn't proof of support. Check completion and
-restart keywords, stdin policy fields, inventory kinds, and typed stream returns
+The guidance describes current source APIs with project version 1.1.2.
+An installed version string alone isn't proof of support. Check environment
+inheritance, standalone targets, completion and restart keywords, stdin policy
+fields, inventory kinds, and typed stream returns
 before copying their examples:
 
 ```python
@@ -38,13 +39,19 @@ from pywhales import DockerClient, InspectionPolicy, docker
 from pywhales.client_config import ClientConfig
 from pywhales.convergence import (
     ComposeTarget,
+    ContainerTarget,
     DeadlineDetail,
     ServiceTarget,
     capture_compose,
+    capture_containers,
+    wait as wait_for_convergence,
 )
 from pywhales.inventory import InventoryKind
 
 print(signature(capture_compose, annotation_format=Format.STRING))
+print(signature(capture_containers, annotation_format=Format.STRING))
+print(signature(wait_for_convergence, annotation_format=Format.STRING))
+print([f.name for f in fields(ContainerTarget)])
 print(signature(InspectionPolicy))  # max_total_stdin_bytes: int | None = None
 print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
 detail_defaults = {f.name: f.default for f in fields(DeadlineDetail)}
@@ -52,6 +59,8 @@ print(detail_defaults["restart_budget_exceeded_containers"])
 print(get_args(InventoryKind.__value__))  # must include "manifest_list"
 print(signature(DockerClient).parameters["strict_env_transport"])  # bool = False
 print({f.name: f.default for f in fields(ClientConfig)}["strict_env_transport"])
+print(signature(DockerClient).parameters["inherit_environment"])  # bool = True
+print({f.name: f.default for f in fields(ClientConfig)}["inherit_environment"])
 print(get_annotations(ServiceTarget, format=Format.STRING)["mode"])  # job modes?
 
 methods = [
@@ -93,6 +102,13 @@ matching streaming overloads. Also look for:
   blocks convergence without creating a new terminal failure reason.
 - `strict_env_transport: bool = False` on `DockerClient` and on `ClientConfig`
   (import the latter from `pywhales.client_config`, not the package root).
+- `inherit_environment: bool = True` on both client types; false restricts the
+  child base before overlays, independently of strict assignment transport.
+- `capture_containers(client, references, *, completion=(), max_restarts=None,
+  policy, timeout, cancel=None)` and `ContainerTarget` exported from
+  `pywhales.convergence`; the target has `container_ids`, `completion`, and
+  `max_restarts`. The convergence `wait` annotation must accept that target.
+  This is separate from the exit-code `docker.container.wait` API.
 - A keyword-only `timeout: float | None = None` on Compose `build` and `execute`,
   and on `container.wait`, whose overloads return `int` for one reference and
   `list[int]` for an iterable.
@@ -136,13 +152,13 @@ Verify the user's application or script, not the PyWhales repository's
 contributor tests. A version string alone doesn't establish supported arguments
 or return contracts.
 
-Checking a `default_timeout`, `telemetry_observer`, `environment`, or
-`strict_env_transport` argument follows the same signature-first rule: confirm it in
+Checking `default_timeout`, `telemetry_observer`, `environment`,
+`strict_env_transport`, or `inherit_environment` follows the same signature-first rule: confirm it in
 `signature(DockerClient)` before assuming it is supported. Opt-in admission
 (`pywhales.admission`), bounded observation (the root `observation`,
 `capture_inventory`, and `InspectionPolicy` exports, plus `bulk_reload` from
 `pywhales.client_config`), and convergence (`pywhales.convergence`, covering
-Swarm services/stacks and Compose projects) are separate imports that don't
+Swarm services/jobs/stacks, Compose projects, and standalone containers) are separate imports that don't
 change default `DockerClient` behavior; verify their presence the same way
 before building on them. `pywhales.reconciliation`, `pywhales.profiles`, and
 `pywhales.storage` are likewise opt-in imports that the package root doesn't

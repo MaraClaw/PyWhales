@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pywhales import Node, Service, Task, enums
-from pywhales.client_config import ClientConfig
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.node import models as node
 from pywhales.components.service import models as service
 from pywhales.components.system import models as system
@@ -272,7 +272,7 @@ def test_node_remains_mutable_when_role_is_reassigned() -> None:
 
 
 @pytest.mark.parametrize("resource_type", [Node, Task, Service])
-def test_fetch_preserves_json_decode_error_when_inspect_output_is_malformed(
+def test_fetch_rejects_malformed_inspect_output(
     monkeypatch: pytest.MonkeyPatch, resource_type: type[Node | Task | Service]
 ) -> None:
     config = ClientConfig()
@@ -284,5 +284,5 @@ def test_fetch_preserves_json_decode_error_when_inspect_output_is_malformed(
 
     monkeypatch.setattr(f"{resource_type.__module__}.run", malformed_output)
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(ParsingError):
         resource._fetch_inspect_result_json("resource-id")

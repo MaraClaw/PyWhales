@@ -8,12 +8,14 @@ from pywhales.convergence import (
     Cancelled,
     ComposeService,
     ComposeTarget,
+    ContainerTarget,
     Deadline,
     DeadlineDetail,
     Failure,
     Outcome,
     ServiceTarget,
     capture_compose,
+    capture_containers,
     capture_service,
     wait,
 )
@@ -81,3 +83,22 @@ def _check_job_contract(client: DockerClient, policy: InspectionPolicy) -> None:
         assert_type(captured.job_iteration, int | None)
         assert_type(captured.total_completions, int)
         assert_type(captured.restart_condition, str | None)
+
+
+def _check_container_contract(client: DockerClient, policy: InspectionPolicy) -> None:
+    captured = capture_containers(
+        client,
+        ("db", "migrate"),
+        completion=("migrate",),
+        max_restarts=1,
+        policy=policy,
+        timeout=1.0,
+    )
+    assert_type(captured, ContainerTarget | Failure | Deadline | Cancelled)
+    if isinstance(captured, ContainerTarget):
+        assert_type(captured.container_ids, tuple[str, ...])
+        assert_type(captured.completion, tuple[str, ...])
+        assert_type(captured.max_restarts, int | None)
+        assert_type(
+            wait(captured, policy=policy, timeout=1.0, poll_interval=0.1), Outcome
+        )

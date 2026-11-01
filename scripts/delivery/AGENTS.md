@@ -1,7 +1,8 @@
 # Delivery Chain Guide
 
-CI-only trust chain, not an installed API. `README.md` here is authoritative for the handoffs, size budgets, and
-pagination rationale; this guide is the editing map. Local tests drive the real decisions through a stubbed `Transport`.
+CI-only trust chain, not an installed API. `README.md` here remains authoritative for helper trust contracts, size budgets,
+and pagination rationale. Its Pages handoff description is stale, not proof of an active workflow; current wiring is below.
+Local tests drive the real decisions through a stubbed `Transport`.
 
 ## Local Map
 
@@ -16,8 +17,9 @@ pagination rationale; this guide is the editing map. Local tests drive the real 
 | `distributions.py`, `notes.py` | Distribution `inspect` and `smoke`; exact `## <version>` section and body comparison |
 | `publication.py`, `releases.py`, `pages.py` | PyPI `destination`, `prepare`, `confirm`; tag and release; `verify_pages_tar` |
 
-Workflows: `python-package.yml` runs `smoke`, then `seal` on push to `main` only. `python-publish.yml` runs `prepare`,
-the uploader, then `confirm`. `release-on-merge.yml` runs `release`, then calls `gh-pages.yml`: `pages`, `verify-pages`.
+Only three workflows exist: `python-package.yml` runs `smoke` and seals only pushes to `main`; `python-publish.yml` runs
+`prepare`, the uploader, then `confirm`; `release-on-merge.yml` ends at `release`. There is no `gh-pages.yml` or current
+Pages deployment workflow. `pages` and `verify-pages` remain CLI helpers.
 
 ## Trust Rules To Preserve
 
@@ -49,12 +51,14 @@ the uploader, then `confirm`. `release-on-merge.yml` runs `release`, then calls 
 
 ## Workflow And CLI Rules
 
-- `python-publish.yml`, `release-on-merge.yml`, and `gh-pages.yml` start from `permissions: {}`; `python-package.yml`
+- `python-publish.yml` and `release-on-merge.yml` start from `permissions: {}`; `python-package.yml`
   starts from `contents: read` and only the seal job adds `actions: read`. Third-party actions pin full commit SHAs.
-- Those three consumers check out `github.workflow_sha` with `persist-credentials: false`, handle only data, and never
-  install or build downloaded distributions. Publisher and Pages don't cancel in-progress runs; Pages deploys from `main`.
+- Both consumers check out trusted `github.workflow_sha` with `persist-credentials: false`, handle only data, and never
+  install or build downloaded distributions. The publisher serializes publication without cancelling in-progress runs.
 - `smoke` and `verify-pages` are local checks. After `uv build --no-sources --sdist --wheel`, `smoke` runs two
-  `uv run --isolated` installs (wheel, sdist) outside the checkout, 300 s each. `verify-pages` compares local files.
+  `uv run --isolated` installs (wheel, sdist) outside the checkout, 300 s each.
+- `pages` validates the receipt, destination and release, then extracts the verified tested site without rebuilding it.
+  `verify-pages` compares a local tar against every site file under `limits.py` budgets. Neither helper deploys.
 - `seal`, `prepare`, `confirm`, `release`, and `pages` need `GH_TOKEN`, `GITHUB_REPOSITORY`, and `GITHUB_REPOSITORY_ID`,
   call GitHub and PyPI, and `release` creates tags and releases. Never run them locally against production.
 

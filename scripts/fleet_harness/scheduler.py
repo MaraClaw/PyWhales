@@ -1,10 +1,9 @@
 """Event-driven admission for plans whose steps carry arrival offsets.
 
-Submissions arrive at their scripted offsets and are admitted FIFO while fewer
-than `concurrent_submissions` are active. Admitted operations advance through
+Submissions arrive at their scripted offsets and are admitted FIFO under both
+global and per-action concurrency limits. Admitted operations advance through
 real fake phases, so resources, command counts and cleanup change in
-chronological order; no timestamp is shifted to imitate overlap. Per-action
-concurrency (`operation_mix`) is not simulated.
+chronological order; no timestamp is shifted to imitate overlap.
 
 Tie ordering. Events sharing a timestamp run in this order, then by submission:
 1. phase ends of active operations (a final one is terminal and frees its slot);
@@ -19,11 +18,12 @@ cleanup. Arrivals at or beyond the load deadline are never submitted.
 """
 
 import heapq
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Final, Literal, assert_never
 
 from scripts.fleet_contract.results import Outcome
+from scripts.fleet_contract.workload import Action
 
 from .fake import FakeDriver, Launch, Operation
 from .models import (
@@ -67,6 +67,11 @@ class Simulation:
         self.metrics = metrics_for(plan)
         self.end = load_deadline(manifest)
         self.limit = manifest.workload.concurrent_submissions
+        self.action_limits = {
+            op.action: op.concurrency for op in manifest.workload.operation_mix
+        }
+        self.action_active: defaultdict[Action, int] = defaultdict(int)
+        self.action_peaks: dict[Action, int] = {}
         self.events: list[tuple[float, int, int, Kind]] = []
         self.queue: deque[Submission] = deque()
         self.submissions: list[Submission] = []
@@ -93,12 +98,16 @@ class Simulation:
         """Fold the settled counts of the instant just finished into the peaks."""
         self.peak_active = max(self.peak_active, self.active)
         self.peak_queued = max(self.peak_queued, len(self.queue))
+        for action, count in self.action_active.items():
+            self.action_peaks[action] = max(self.action_peaks.get(action, 0), count)
 
     def wake(self) -> None:
         """Request one admission pass at this instant when a slot and a waiter exist."""
         if (
             self.queue
             and self.active < self.limit
+            and self.action_active.get(self.queue[0].step.action, 0)
+            < self.action_limits[self.queue[0].step.action]
             and not self.stopping
             and not self.waking
         ):
@@ -123,6 +132,7 @@ class Simulation:
         )
         receipt = Receipt(
             submission=submission.number,
+            action=submission.step.action,
             arrival_seconds=submission.arrival,
             admitted_seconds=None,
             terminal_seconds=now,
@@ -175,6 +185,9 @@ class Simulation:
         driver = self.driver
         while self.queue and self.active < self.limit and not self.stopping:
             submission = self.queue[0]
+            action = submission.step.action
+            if self.action_active.get(action, 0) >= self.action_limits[action]:
+                break
             try:
                 resource = self.slots.resolve(
                     submission.step, submission.number, driver
@@ -195,6 +208,7 @@ class Simulation:
             operation = driver.begin(submission.step, launch)
             self.operations[submission.number] = operation
             self.active += 1
+            self.action_active[action] += 1
             self.push(operation.phases[0][1], "phase", submission.number)
 
     def phase(self, number: int) -> None:
@@ -205,10 +219,12 @@ class Simulation:
             self.push(following, "phase", number)
             return
         self.active -= 1
+        self.action_active[operation.step.action] -= 1
         observed = self.driver.finish(operation)
         outcome = observed[0].outcome
         receipt = Receipt(
             submission=number,
+            action=operation.step.action,
             arrival_seconds=operation.launch.arrival,
             admitted_seconds=operation.admitted,
             terminal_seconds=operation.end,
@@ -270,7 +286,11 @@ class Simulation:
             submitted=submitted,
             reasons=tuple(self.reasons),
             schedule=Schedule(
-                peaks=Peaks(active=self.peak_active, queued=self.peak_queued),
+                peaks=Peaks(
+                    active=self.peak_active,
+                    queued=self.peak_queued,
+                    per_action=tuple(sorted(self.action_peaks.items())),
+                ),
                 receipts=tuple(self.receipts[number] for number in order),
             ),
         )

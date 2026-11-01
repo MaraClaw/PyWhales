@@ -1,5 +1,7 @@
 # PyWhales Agent Guide
 
+**Verified:** 2026-11-01. **Branch:** `develop`. **Base commit:** `2fce3f8`; this guide includes working-tree changes.
+
 ## Overview
 
 PyWhales is a typed Python wrapper around the external Docker CLI, not a Docker HTTP SDK.
@@ -12,7 +14,7 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 Bounded observation sits on top of the command groups:
 
 - `observation()` nests explicit limits, deadlines, and cancellation over launches. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
-- `pywhales.convergence.wait()` watches a captured Swarm service generation, a fixed stack membership, or a Compose project's selected long-running and completion services. It ends in success, failure, deadline, or cancellation and never mutates anything.
+- `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Compose services, or standalone containers. It ends in success, failure, deadline, or cancellation and never mutates anything.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
 - `telemetry` is optional payload-free launch records with no monitoring dependency or worker.
 
@@ -33,7 +35,7 @@ Bounded observation sits on top of the command groups:
 | `pywhales/_stream_buffer.py` | Thread-safe output buffering and byte accounting |
 | `pywhales/_environment.py` | Effective child environments and safe container `envs` forwarding |
 | `pywhales/telemetry/` | Launch and completion records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |
-| `pywhales/convergence/` | Service and Compose convergence: `_wait.py` entry points, `_service.py`, `_compose.py`, `_wire.py`, `_types.py` |
+| `pywhales/convergence/` | Swarm, Compose, and standalone container convergence: `_wait.py` entry points, `_service.py`, `_compose.py`, `_container.py`, `_wire.py`, `_types.py` |
 | `pywhales/admission/` | Application-owned synchronous admission: class limits, saturation policy, queueing, admitted streams |
 | `pywhales/profiles/` | Application create policy: `plan_create` builds a plan, `create_from_plan` applies it |
 | `pywhales/reconciliation/` | Desired-state controller, operation journal, adapters; only an in-memory store ships |
@@ -46,7 +48,7 @@ Bounded observation sits on top of the command groups:
 | `scripts/fleet_harness/` | Fake-only offline capacity simulation and non-authorizing transport decisions built on the contract |
 | `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
 | `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
-| `.github/workflows/` | Authoritative CI checks, docs build, and the delivery chain from package build to release and Pages |
+| `.github/workflows/` | Authoritative CI checks, docs/site artifact build, and the delivery chain from package build to release; no Pages deployment workflow is present |
 | `pyproject.toml`, `uv.lock`, `.python-version` | Project/tool configuration, locked dependencies, interpreter pin |
 
 ## Code Map
@@ -61,7 +63,7 @@ Bounded observation sits on top of the command groups:
 | `ProcessStream` | `pywhales/_process_stream.py` | Iterator owning a CLI process and streamed output |
 | `observation` | `pywhales/_observation.py` | Context manager nesting limits, deadline, and cancel tokens |
 | `capture_inventory` | `pywhales/inventory.py` | Public entry that delegates to `_inventory_capture.py` |
-| `wait` | `pywhales/convergence/_wait.py` | Convergence wait; `capture_service` and `capture_compose` build its targets |
+| `wait` | `pywhales/convergence/_wait.py` | Convergence wait; `capture_service`, `capture_compose`, and `capture_containers` build its targets |
 
 Code-map discovery uses graph symbols, LSP outlines/references, and AST import searches. Editor references also match ignored `build/lib/pywhales` copies and are capped: don't quote them as exact source-only counts. Prefer graph tracing, or exclude `build/`, `dist/`, and `.venv/`.
 
@@ -72,7 +74,7 @@ Code-map discovery uses graph symbols, LSP outlines/references, and AST import s
 - `pywhales/components/AGENTS.md`: command-group patterns. Buildx, Compose, container, image, manifest, and service directories have their own guides; Buildx also covers imagetools.
 - Opt-in packages: `pywhales/admission/AGENTS.md`, `pywhales/convergence/AGENTS.md`, `pywhales/profiles/AGENTS.md`, `pywhales/reconciliation/AGENTS.md`, and `pywhales/storage/AGENTS.md`.
 - `scripts/AGENTS.md`: tooling and provisioning hazards. Delivery, fleet contract, and fleet harness have child guides; `scripts/fleet_contract/README.md` remains authoritative for contract commands and semantics.
-- `tests/AGENTS.md`: test selection and fixture details. `docs/AGENTS.md`: generation mechanics and the documentation pipeline.
+- `tests/AGENTS.md`: test selection and fixture details; `tests/pywhales/components/AGENTS.md` adds mixed component-test selection. `docs/AGENTS.md`: generation mechanics and the documentation pipeline.
 
 ## Commands From CI
 

@@ -12,7 +12,6 @@ from typing import Any, Self, overload, override
 from pydantic import JsonValue
 
 from pywhales._inspect_validation import parse_namespace_inspect_results
-from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -26,7 +25,7 @@ from pywhales.components.context.models import (
     ContextStorage,
 )
 from pywhales.exceptions import NoSuchContext
-from pywhales.utils import custom_parse_object_as, run, to_list
+from pywhales.utils import run, to_list
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
@@ -62,9 +61,7 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
         if reference is not None:
             full_cmd.append(reference)
         json_str = run(full_cmd)
-        return custom_parse_object_as(
-            dict[str, JsonValue], {**loads_compat(json_str)[0]}
-        )
+        return self._parse_single_inspect_json(json_str)
 
     @override
     def _parse_json_object(

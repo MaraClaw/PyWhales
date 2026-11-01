@@ -387,7 +387,11 @@ def test_scheduled_run_export_and_report_when_docker_is_absent_stay_unqualified(
     # Then overlap was simulated with zero connections and nothing was qualified.
     assert ran.returncode == 0 and report["status"] == "completed"
     assert report["connections"] == 0 and report["simulation"] is True
-    assert report["schedule"]["peaks"] == {"active": 2, "queued": 1}
+    assert report["schedule"]["peaks"] == {
+        "active": 2,
+        "queued": 1,
+        "per_action": [["create", 1], ["inspect", 2]],
+    }
     assert [
         (r["arrival_seconds"], r["admitted_seconds"], r["terminal_seconds"])
         for r in report["schedule"]["receipts"]
@@ -430,7 +434,10 @@ def test_scheduled_run_cli_when_unapproved_returns_empty_zero_call_receipt(
     assert output.returncode == 2 and report["status"] == "rejected"
     assert report["provider_calls"] == report["connections"] == 0
     assert report["command_count"] == report["submitted"] == 0
-    assert report["schedule"] == {"peaks": {"active": 0, "queued": 0}, "receipts": []}
+    assert report["schedule"] == {
+        "peaks": {"active": 0, "queued": 0, "per_action": []},
+        "receipts": [],
+    }
 
 
 def test_export_cli_when_scheduled_report_is_tampered_is_refused_safely(

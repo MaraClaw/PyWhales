@@ -108,6 +108,10 @@ Both `compose.run` and `compose.execute` default to `tty=True`. Set `tty=False`
 for captured output and unattended jobs. `compose.run` also rejects TTY plus
 streaming, TTY plus detach, and detach plus streaming.
 
+A detached `compose.run(..., tty=False, detach=True)` handle retains the complete
+captured container ID and originating client configuration. Keep the full ID
+when reloading or passing it to other container APIs; don't truncate it.
+
 With the client and disposable Compose file above, a one-off job is:
 
 ```python
@@ -144,6 +148,8 @@ Reserved or colliding names stay literal `KEY=VALUE` arguments by default. With
 instead; see [Strict environment transport](client-and-errors.md#strict-environment-transport).
 Every `build` branch (blocking and `stream_logs=True`) and every `execute` branch
 (detached, TTY, captured) forwards the same child environment.
+The client's [environment inheritance setting](client-and-errors.md#isolate-the-cli-environment)
+also applies to these launches and their collision checks.
 
 `build(services=[])` is a validated no-op: it checks `timeout` and the
 `quiet`/`stream_logs` conflict, then returns `None` without a launch. It never

@@ -11,7 +11,6 @@ from typing import assert_never, overload, override
 from pydantic import JsonValue
 
 import pywhales.components.task.cli_wrapper
-from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -27,7 +26,7 @@ from pywhales.components.node.models import (
     NodeStatus,
     NodeVersion,
 )
-from pywhales.utils import custom_parse_object_as, run, to_list
+from pywhales.utils import run, to_list
 
 
 class Node(ReloadableObjectFromJson[NodeInspectResult]):
@@ -41,9 +40,7 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "node", "inspect", reference])
-        return custom_parse_object_as(
-            dict[str, JsonValue], {**loads_compat(json_str)[0]}
-        )
+        return self._parse_single_inspect_json(json_str)
 
     @override
     def _parse_json_object(

@@ -119,6 +119,34 @@ class ComposeTarget:
             raise ValueError("Compose target must contain distinct services and IDs")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContainerTarget:
+    """Fixed container IDs and their completion designation and restart budget."""
+
+    client_config: ClientConfig = field(repr=False, compare=False)
+    container_ids: tuple[str, ...]
+    completion: tuple[str, ...] = ()
+    max_restarts: int | None = None
+
+    def __post_init__(self) -> None:
+        """Reject invalid membership, completion IDs, or restart budget."""
+        ids, completion = self.container_ids, self.completion
+        if (
+            type(ids) is not tuple
+            or not ids
+            or any(type(identity) is not str or not identity for identity in ids)
+            or len(set(ids)) != len(ids)
+            or type(completion) is not tuple
+            or any(type(identity) is not str or not identity for identity in completion)
+            or len(set(completion)) != len(completion)
+            or not set(completion) <= set(ids)
+        ):
+            raise ValueError("Container target must contain distinct IDs")
+        budget = self.max_restarts
+        if budget is not None and (type(budget) is not int or budget < 0):
+            raise ValueError("Restart budget must be None or a nonnegative integer")
+
+
 @dataclass(frozen=True, slots=True)
 class Success:
     """All fixed services met the captured convergence conditions."""
@@ -150,7 +178,8 @@ class DeadlineDetail:
     service identities, task or container payloads, client settings or failure
     causes are kept.
 
-    The container counts apply to Compose targets. A service is counted when any
+    The container counts apply to Compose and standalone container targets. Each
+    standalone container counts as one captured service. A service is counted when any
     of its containers has a status other than ``running`` (so a restarting, paused
     or exited-0 container is also a non-running one), is restarting, is paused, or
     has a healthcheck whose status is not ``healthy``, including ``starting``.

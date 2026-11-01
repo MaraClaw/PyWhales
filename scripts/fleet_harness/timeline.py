@@ -11,6 +11,8 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Final, Literal
 
+from scripts.fleet_contract.workload import Action
+
 if TYPE_CHECKING:
     from .records import Observation, Receipt, RunReport
 
@@ -52,6 +54,17 @@ def peak_counts(receipts: Sequence[Receipt]) -> tuple[int, int]:
             active[receipt.admitted_seconds] += 1
             active[receipt.terminal_seconds] -= 1
     return peak(active), peak(queued)
+
+
+def action_peak_counts(receipts: Sequence[Receipt]) -> tuple[tuple[Action, int], ...]:
+    """Recount settled active peaks for actions with launched submissions."""
+    actions: dict[Action, defaultdict[float, int]] = {}
+    for receipt in receipts:
+        if receipt.admitted_seconds is not None:
+            deltas = actions.setdefault(receipt.action, defaultdict(int))
+            deltas[receipt.admitted_seconds] += 1
+            deltas[receipt.terminal_seconds] -= 1
+    return tuple(sorted((action, peak(deltas)) for action, deltas in actions.items()))
 
 
 def is_ordered(receipts: Sequence[Receipt]) -> bool:
@@ -119,6 +132,7 @@ def bound(report: RunReport) -> bool:
         return all(step.arrival_seconds is None for step in report.steps)
     offsets = [step.arrival_seconds for step in report.steps]
     present = [offset for offset in offsets if offset is not None]
+    declared = {operation.action for operation in report.workload.operation_mix}
     return (
         len(offsets) > 0
         and len(present) == len(offsets)
@@ -126,8 +140,10 @@ def bound(report: RunReport) -> bool:
         and report.repetitions == 1
         and len(schedule.receipts) == report.submitted <= len(offsets)
         and all(
-            receipt.arrival_seconds == offset
-            for receipt, offset in zip(schedule.receipts, offsets, strict=False)
+            receipt.arrival_seconds == step.arrival_seconds
+            and receipt.action == step.action
+            and receipt.action in declared
+            for receipt, step in zip(schedule.receipts, report.steps, strict=False)
         )
         and (
             report.status == "stopped"
@@ -166,7 +182,13 @@ def reconcile(report: RunReport) -> Code | None:
         return "schedule_binding"
     if schedule is None:
         return None
-    if schedule.peaks.active > report.workload.concurrent_submissions:
+    limits = {
+        operation.action: operation.concurrency
+        for operation in report.workload.operation_mix
+    }
+    if schedule.peaks.active > report.workload.concurrent_submissions or any(
+        count > limits[action] for action, count in schedule.peaks.per_action
+    ):
         return "schedule_concurrency"
     if not timed(report, schedule.receipts):
         return "schedule_times"

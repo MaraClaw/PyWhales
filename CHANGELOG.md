@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.1.2
+
+### New Features
+
+- `capture_containers()` and the frozen `ContainerTarget` add standalone
+  containers to `pywhales.convergence.wait()`, without requiring Compose labels.
+  Capture resolves distinct names or ID prefixes to fixed full container IDs;
+  missing or replaced containers later return `superseded`. Long-running
+  containers must be running, unpaused, not restarting, and healthy when they
+  have a healthcheck. Selected completion containers must exit 0; a nonzero exit
+  that is not restarting returns `completion_failed`. Optional restart budgets,
+  cancellation, bounded deadline details, and the final all-clear recheck follow
+  the Compose rules. Observation never mutates Docker state.
+- `DockerClient(inherit_environment=False)` starts CLI children with only the
+  parent's available `PATH` and `HOME`, plus `USERPROFILE` and `SYSTEMROOT` on
+  Windows, before applying explicit environment overlays. Docker endpoint,
+  credential, proxy, and SSH variables must be passed explicitly. The default
+  remains `True`, and executable lookup still uses the process `PATH`. Isolation
+  covers captured commands, streams, archives, and staged inventory capture;
+  container environment collision checks use the same effective child
+  environment. This does not isolate files or credential helpers in the retained
+  home directory.
+
+### Behavior Changes And Fixes
+
+- Scalar inspect hooks for container, image, network, volume, config, secret,
+  node, service, task, plugin, and context handles require exactly one JSON
+  object in a single-element array. Invalid JSON and malformed response shapes
+  raise `ParsingError`; safe diagnostics suppress payload-bearing exception
+  chains. Reload rejects a snapshot whose immutable identity differs from the
+  handle, leaving its cached snapshot and refresh time unchanged. Handles that
+  track the current context skip this identity check. Batch inspection and the
+  distinct builder and manifest-list response shapes retain their contracts.
+- The offline fleet harness enforces each action's declared concurrency cap
+  alongside the global limit for overlapping submissions. Admission remains
+  strictly FIFO: a capped head blocks later actions, while queued deadlines
+  continue to expire. Schedule receipts record actions, reports expose canonical
+  per-action active peaks, and imports validate those peaks, action bindings,
+  and declared caps. Sequential execution and operation digests stay unchanged;
+  the harness remains fake-only and offline.
+
+### Documentation
+
+- Updated API documentation, hierarchical agent guides, and the consumer skill
+  for standalone convergence, child environment inheritance, strict scalar
+  snapshots, and offline fleet scheduling contracts.
+
 ## 1.1.0
 
 ### New Features

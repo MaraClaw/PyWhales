@@ -10,7 +10,7 @@ calls automatically.
 - [Bounding batch inspection](#bounding-batch-inspection)
 - [Manifest lists](#manifest-lists)
 - [Bounding streams and uploads](#bounding-streams-and-uploads)
-- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
+- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [standalone containers](#standalone-containers), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
 ## Bounding Batch Inspection
@@ -191,12 +191,14 @@ inventory call. Snapshots aren't daemon transactions or total memory caps.
 `pywhales.convergence` is an opt-in, read-only observer of one fixed target:
 a captured Swarm service generation, including replicated and global jobs
 (`capture_service` returns a `ServiceTarget`), an explicit Swarm stack
-(`StackTarget`), or selected Compose
-services (`capture_compose` returns a `ComposeTarget`). `wait()` takes any of
-the three. Existing mutating calls never invoke it automatically; capture and
-wait yourself after submitting the change you want to confirm. Choose the
+(`StackTarget`), selected Compose services (`capture_compose` returns a
+`ComposeTarget`), or standalone containers (`capture_containers` returns a
+`ContainerTarget`). `wait()` takes any of the four. Existing mutating calls
+never invoke it automatically; capture and wait yourself after submitting the
+change you want to confirm. Choose the
 Swarm path for `docker service`/`docker stack` deployments and the Compose path
-for a `docker compose` project.
+for a `docker compose` project; use standalone capture for explicit container
+names or IDs.
 
 ### Swarm Service Or Stack
 
@@ -241,8 +243,8 @@ non-container runtime is `Failure(reason="unsupported")`, and malformed
 service/task data fails closed.
 
 `wait(target, *, policy, timeout, poll_interval, cancel=None)` accepts a
-`ServiceTarget`, a `StackTarget(services=(...))`, or a `ComposeTarget` and
-returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For ordinary
+`ServiceTarget`, a `StackTarget(services=(...))`, a `ComposeTarget`, or a
+`ContainerTarget` and returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For ordinary
 (Replicated and Global) Swarm targets, only current desired-running tasks count;
 a changed service `Version` or template fingerprint returns `superseded`;
 `paused`/`failed`/rollback `UpdateStatus` states are terminal `update_failed`
@@ -386,8 +388,97 @@ waiting.
 - When a cycle finds all long-running services ready and completion services
   finished, `wait()` lists and checks the project again. `Success` requires
   that mandatory second pass to satisfy the same conditions and be unchanged.
-  It proves the captured conditions at that moment, not application readiness
-  beyond the configured healthchecks.
+   It proves the captured conditions at that moment, not application readiness
+   beyond the configured healthchecks.
+
+### Standalone Containers
+
+Use this path to observe existing containers without Compose project discovery.
+`docker.container.wait()` (also `docker.wait()`) waits for containers to stop
+and returns exit codes; convergence `wait()` observes running/healthy state and
+designated successful completion, returning typed outcomes. See
+[Containers, output, and lifecycle](containers-and-output.md#choose-the-result-type)
+for the exit-code API.
+
+Check that the installed package exports `ContainerTarget` and
+`capture_containers`, that capture accepts `completion` and `max_restarts`, and
+that convergence `wait` accepts `ContainerTarget`; see
+[Usage validation](validation.md). A version string alone doesn't establish
+these capabilities.
+
+```python
+from threading import Event
+
+from pywhales import DockerClient, InspectionPolicy
+from pywhales.convergence import (
+    Cancelled,
+    ContainerTarget,
+    Deadline,
+    Failure,
+    Success,
+    capture_containers,
+    wait,
+)
+
+client = DockerClient()
+policy = InspectionPolicy(
+    max_references=32, max_argv_bytes=65536, max_response_bytes=1_048_576
+)
+cancel = Event()
+
+# These names identify already-existing containers you're authorized to observe.
+target = capture_containers(
+    client,
+    ("database", "migration"),
+    completion=("migration",),
+    max_restarts=0,
+    policy=policy,
+    timeout=10,
+    cancel=cancel,
+)
+if isinstance(target, ContainerTarget):
+    outcome = wait(target, policy=policy, timeout=120, poll_interval=1, cancel=cancel)
+    converged = isinstance(outcome, Success)
+elif isinstance(target, Failure):
+    print(f"Container capture failed: {target.reason}")
+elif isinstance(target, (Deadline, Cancelled)):
+    print(f"Container capture stopped: {type(target).__name__}")
+```
+
+`capture_containers(client, references, *, completion=(), max_restarts=None,
+policy, timeout, cancel=None)` returns a `ContainerTarget` or typed
+`Failure`/`Deadline`/`Cancelled`. Capture and wait never launch, restart, stop,
+or remove containers.
+
+`references` must be a nonempty tuple of distinct, nonempty names or ID prefixes.
+`completion` must be a tuple of distinct references drawn from that selection;
+its default `()` leaves all members long-running. `max_restarts` is `None`
+(disabled) or a nonnegative integer, never a boolean. Invalid selections,
+completion tuples, restart budgets, or timeouts, and clients configured with
+`compose_dry_run=True`, raise `ValueError` before any CLI launch.
+
+Capture resolves each reference once to a full lowercase 64-hex container ID.
+The target freezes those IDs, completion IDs, and restart budget; keep its
+originating client configuration stable and its IDs out of untrusted output.
+Different references resolving to the same ID produce cause-free
+`Failure(reason="malformed")`, as does unusable inspect output. A missing
+container during capture is `Failure(reason="observation")` with its cause.
+Each wait cycle inspects only the captured IDs, never resolving names again;
+a later disappearance or recreate is `Failure(reason="superseded")`, not a
+replacement to follow. Compose labels aren't required here; Compose capture
+still enforces its service labels, config hashes, and fixed project membership.
+
+The [Compose readiness and completion rules](#compose-project) apply per
+standalone container: unmarked members must be running, not restarting or
+paused, and healthy when a healthcheck is configured. Marked members must exit
+0 without restarting; a nonzero exit without restarting is cause-free
+`completion_failed`, and a missing or malformed exit code is cause-free
+`malformed`. An enabled restart budget checks each long-running member's current
+`RestartCount`, not restarts since capture. Missing, negative, or non-integer
+counts are cause-free `malformed`; over-budget readings block success but a
+later within-budget reading clears the blocker. Completion members ignore the
+budget. After an all-clear, `Success` requires a second complete all-clear pass
+over the same IDs. It proves only the captured conditions at that moment.
 
 ### Outcomes And Budgets
 
@@ -395,17 +486,17 @@ These rules apply to every target. `timeout` on capture and wait is a positive
 finite total budget for that call, unlike a per-launch CLI timeout; cleanup
 can outlast it. `poll_interval` is also positive finite seconds.
 `Deadline.detail`, when present, is a payload-free aggregate from the last
-complete polling cycle, not live state at expiry; it's absent when capture
-expired or no cycle finished. It holds `captured_services` plus counts of
-affected services per reason, each service counted at most once per reason and
+complete polling cycle, never a partial cycle or live state at expiry; it's
+absent when capture expired or no cycle finished. It holds `captured_services`
+plus counts of affected services per reason, each service counted at most once per reason and
 reasons allowed to overlap. Swarm counters are `missing_ready_slots`,
 `duplicate_slots`, `stale_templates`, `non_running_tasks`, `invalid_task_shape`,
 `ongoing_updates`, `missing_ready_nodes`, `duplicate_node_assignments`,
 `missing_node_assignments`, and `outside_approved_nodes`. A job wait fills only
 `missing_ready_slots` (a ReplicatedJob short of `TotalCompletions`) and
 `missing_ready_nodes` (a GlobalJob with an approved node not yet complete), each
-counting affected services rather than tasks or nodes. For Compose the
-long-running readiness counters are `non_running_containers`,
+counting affected services rather than tasks or nodes. For Compose and standalone
+targets the long-running readiness counters are `non_running_containers`,
 `restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
 configured healthcheck that isn't `healthy`, including still `starting` or not
 yet reported). A restarting or paused container also counts as non-running.
@@ -413,12 +504,17 @@ yet reported). A restarting or paused container also counts as non-running.
 individual containers or replicas; the other readiness counters exclude
 completion services.
 `restart_budget_exceeded_containers` counts affected long-running services once
-each, bounded by `captured_services`, from the latest complete cycle.
+each, bounded by `captured_services`, from the latest complete cycle. For a
+standalone target, each captured container is one `captured_services` unit and
+each applicable container counter counts those units; all Swarm-only counters
+stay zero.
 
 A `Failure.cause` or a target's `template` may hold confidential wire data; they
 stay out of `repr()`, but don't log them without a confidentiality policy.
+Standalone failures have `service_id=None`.
 Cancellation or deadline expiry reaps only the local CLI child; it never cancels
-or rolls back daemon-side Swarm or Compose work.
+or rolls back daemon-side work, including Swarm, Compose, or standalone
+containers.
 
 ## Optional Application Reconciliation
 

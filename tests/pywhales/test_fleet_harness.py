@@ -65,7 +65,7 @@ def overlap_manifest(
         termination=termination,
         termination_operations=operations,
         operation_mix=[
-            {"action": action, "fraction": 0.25, "concurrency": 1}
+            {"action": action, "fraction": 0.25, "concurrency": limit}
             for action in ("create", "inspect", "start", "remove")
         ],
     )
@@ -637,8 +637,104 @@ def test_simultaneous_arrivals_when_limit_is_one_wait_in_fifo_order() -> None:
         1.0,
         2.0,
     ]
-    assert schedule(report).peaks == Peaks(active=1, queued=2)
+    assert schedule(report).peaks == Peaks(
+        active=1, queued=2, per_action=(("inspect", 1),)
+    )
     assert report.provider_calls == report.command_count == 3
+
+
+def test_action_cap_serializes_same_action_with_global_capacity_available() -> None:
+    declaration = overlap_manifest(2, "operation_count", 3)
+    operations = tuple(
+        op.model_copy(update={"concurrency": 1}) if op.action == "inspect" else op
+        for op in declaration.workload.operation_mix
+    )
+    declaration = declaration.model_copy(
+        update={
+            "workload": declaration.workload.model_copy(
+                update={"operation_mix": operations}
+            )
+        }
+    )
+
+    report = run(declaration, overlap_plan(at(0.0), at(0.0), at(0.0)))
+
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "succeeded"),
+        (0.0, 1.0, 2.0, "succeeded"),
+        (0.0, 2.0, 3.0, "succeeded"),
+    ]
+    assert schedule(report).peaks == Peaks(
+        active=1, queued=2, per_action=(("inspect", 1),)
+    )
+
+
+def test_action_cap_blocks_later_other_action_until_head_can_launch() -> None:
+    declaration = overlap_manifest(2, "operation_count", 3)
+    operations = tuple(
+        op.model_copy(update={"concurrency": 1}) if op.action == "inspect" else op
+        for op in declaration.workload.operation_mix
+    )
+    declaration = declaration.model_copy(
+        update={
+            "workload": declaration.workload.model_copy(
+                update={"operation_mix": operations}
+            )
+        }
+    )
+
+    report = run(
+        declaration, overlap_plan(at(0.0, 2.0), at(0.0), at(0.0, 1.0, "create"))
+    )
+
+    assert receipts(report) == [
+        (0.0, 0.0, 2.0, "succeeded"),
+        (0.0, 2.0, 3.0, "succeeded"),
+        (0.0, 2.0, 3.0, "succeeded"),
+    ]
+    assert schedule(report).peaks == Peaks(
+        active=2, queued=2, per_action=(("create", 1), ("inspect", 1))
+    )
+
+
+def test_action_cap_queue_expiry_excludes_unlaunched_action_from_peaks() -> None:
+    declaration = overlap_manifest(2, "operation_count", 4, error_fraction=1.0)
+    operations = tuple(
+        op.model_copy(update={"concurrency": 1}) if op.action == "inspect" else op
+        for op in declaration.workload.operation_mix
+    )
+    declaration = declaration.model_copy(
+        update={
+            "workload": declaration.workload.model_copy(
+                update={"operation_mix": operations}
+            )
+        }
+    )
+
+    report = run(
+        declaration,
+        overlap_plan(
+            at(0.0, 1.0), at(0.0, 2.0), at(0.0), at(0.0, 1.0, "create"), timeout=2.0
+        ),
+    )
+
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "succeeded"),
+        (0.0, 1.0, 2.0, "timed_out"),
+        (0.0, None, 2.0, "timed_out"),
+        (0.0, None, 2.0, "timed_out"),
+    ]
+    assert [receipt.action for receipt in schedule(report).receipts] == [
+        "inspect",
+        "inspect",
+        "inspect",
+        "create",
+    ]
+    assert schedule(report).peaks == Peaks(
+        active=1, queued=3, per_action=(("inspect", 1),)
+    )
+    assert report.command_count == 2 and not report.ledger
+    assert RunReport.model_validate_json(report.model_dump_json()) == report
 
 
 def test_overlap_when_limit_allows_starts_next_operation_before_first_settles() -> None:
@@ -666,7 +762,9 @@ def test_overlap_when_limit_allows_starts_next_operation_before_first_settles() 
         (0.5, 0.5, 3.5, "succeeded"),
         (1.0, 2.0, 3.0, "succeeded"),
     ]
-    assert schedule(report).peaks == Peaks(active=2, queued=1)
+    assert schedule(report).peaks == Peaks(
+        active=2, queued=1, per_action=(("inspect", 2),)
+    )
     assert [
         (s.boundary, s.started_at_seconds, s.ended_at_seconds)
         for s in report.samples
@@ -732,7 +830,9 @@ def test_lifecycle_when_remove_and_start_overlap_follows_chronological_state() -
         (4.0, 4.0, 4.5, "failed"),
     ]
     assert report.status == "completed" and report.reasons == ()
-    assert schedule(report).peaks == Peaks(active=2, queued=0)
+    assert schedule(report).peaks == Peaks(
+        active=2, queued=0, per_action=(("create", 1), ("remove", 1), ("start", 1))
+    )
     assert [item.identity for item in report.ledger] == ["fake-1"]
     assert report.cleanup.attempted == () and not report.cleanup.residual
     assert report.provider_calls == report.command_count == 4
@@ -752,7 +852,9 @@ def test_early_stop_when_terminal_failure_cancels_queue_and_drains_active() -> N
         (0.0, 0.0, 3.0, "succeeded"),
         (0.5, None, 1.0, "cancelled"),
     ]
-    assert schedule(report).peaks == Peaks(active=2, queued=1)
+    assert schedule(report).peaks == Peaks(
+        active=2, queued=1, per_action=(("create", 1), ("inspect", 1))
+    )
     assert report.load_elapsed_seconds == 3.0
     assert report.elapsed_seconds == pytest.approx(3.1)
     assert [item.identity for item in report.ledger] == ["fake-2"]
@@ -800,7 +902,9 @@ def test_zero_duration_when_operations_share_an_instant_settles_peaks() -> None:
 
     # Then nothing stays queued or active once the instant settles.
     assert receipts(report) == [(0.0, 0.0, 0.0, "succeeded")] * 3
-    assert schedule(report).peaks == Peaks(active=0, queued=0)
+    assert schedule(report).peaks == Peaks(
+        active=0, queued=0, per_action=(("inspect", 0),)
+    )
     assert report.status == "completed"
 
 
@@ -952,6 +1056,10 @@ def test_report_when_scheduled_round_trips_and_old_sequential_json_imports() -> 
         ("swap", "schedule_order"),
         ("fifo", "schedule_order"),
         ("peaks", "schedule_peaks"),
+        ("action_peaks", "schedule_peaks"),
+        ("action_limit", "schedule_concurrency"),
+        ("action_mismatch", "schedule_binding"),
+        ("action_undeclared", "schedule_binding"),
         ("limit", "schedule_concurrency"),
         ("sample_time", "schedule_times"),
         ("sample_order", "schedule_times"),
@@ -970,6 +1078,10 @@ def test_report_rejects_when_scheduled_import_is_contradictory(
         "swap",
         "fifo",
         "peaks",
+        "action_peaks",
+        "action_limit",
+        "action_mismatch",
+        "action_undeclared",
         "limit",
         "sample_time",
         "sample_order",
@@ -994,8 +1106,26 @@ def test_report_rejects_when_scheduled_import_is_contradictory(
             rows[1]["admitted_seconds"] = 2.5
         case "peaks":
             raw["schedule"]["peaks"]["active"] = 1
+        case "action_peaks":
+            raw["schedule"]["peaks"]["per_action"][0][1] = 1
+        case "action_limit":
+            next(
+                op
+                for op in raw["workload"]["operation_mix"]
+                if op["action"] == "inspect"
+            )["concurrency"] = 1
+        case "action_mismatch" | "action_undeclared":
+            action = "create" if defect == "action_mismatch" else "pull"
+            rows[0]["action"] = action
+            raw["schedule"]["peaks"]["per_action"] = (
+                [[action, 1], ["inspect", 2]]
+                if action == "create"
+                else [["inspect", 2], [action, 1]]
+            )
         case "limit":
             raw["workload"]["concurrent_submissions"] = 1
+            for operation in raw["workload"]["operation_mix"]:
+                operation["concurrency"] = 1
         case "sample_time":
             sample = next(
                 s

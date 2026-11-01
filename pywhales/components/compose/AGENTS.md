@@ -2,7 +2,7 @@
 
 `cli_wrapper.py` defines `ComposeCLI`; `models.py` holds configuration, project, and event models.
 Build progress overrides and Compose globals follow [the package guide](../../AGENTS.md).
-`run`/`execute` `envs` follow its [shared environment transport](../../AGENTS.md#container-environment-transport), including the interpolation caveat.
+`run`/`execute` `envs` and `build` `build_args` follow its [shared environment transport](../../AGENTS.md#container-environment-transport), including the interpolation caveat.
 
 ## Configuration Models
 
@@ -26,7 +26,7 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 - `build(print=True)` still returns `None` when blocking, or an output stream with `stream_logs=True`.
 - Streamed `create()` prints its command only with `raw_diagnostics=True`; returned log records are unchanged.
 - Record-stream branches of `build`, `create`, `down`, `logs`, `pull`, `run`, `start`, `stop`, and `up` expose owned `ProcessStream`, not generic iterables; records are `(source, bytes)`.
-- `run()` otherwise returns attached `str` or detached `Container` retaining its config. Blocking and `[]` no-op `None` arms stay unchanged; guard optional streams before entering their context.
+- `run()` otherwise returns attached `str` or detached `Container` retaining its config and complete captured ID as immutable identity, without truncation or a second lookup. Blocking and `[]` no-op `None` arms stay unchanged; guard optional streams before entering their context.
 - `run()` defaults to `tty=True`. Reject TTY plus streaming, detach plus streaming,
   and detach plus TTY; callers must set `tty=False` for detached or streamed runs.
 - `ps()` returns container resources. Reject `ps()` and detached `run()` in dry-run mode

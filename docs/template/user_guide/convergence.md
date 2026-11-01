@@ -1,4 +1,4 @@
-# Service and stack convergence
+# Service, stack and container convergence
 
 `pywhales.convergence` is an opt-in, read-only observer. Deploy, service update,
 and rollback retain their existing behavior and do not invoke it. Capture each
@@ -86,6 +86,39 @@ The target's `template` and `Failure.cause`, including exception raw attributes,
 may contain confidential service settings, command arguments, and output. Do not
 log or expose them without an appropriate confidentiality policy. The template is
 excluded from target representations and the cause from failure representations.
+
+## Standalone containers
+
+Use `capture_containers` for containers started outside Compose. Names and ID
+prefixes are resolved at capture to fixed full IDs; Compose labels aren't needed.
+
+```python
+from pywhales.convergence import ContainerTarget, capture_containers, wait
+
+target = capture_containers(
+    client,
+    ("database", "migration"),
+    completion=("migration",),
+    max_restarts=0,
+    policy=policy,
+    timeout=10,
+)
+if isinstance(target, ContainerTarget):
+    outcome = wait(target, policy=policy, timeout=120, poll_interval=1)
+```
+
+References must be a nonempty tuple of distinct nonempty strings, and completion
+references must be a subset. Two references resolving to the same container fail
+capture. Long-running containers must be running, neither restarting nor paused,
+and healthy if configured with a healthcheck. Completion containers must exit zero
+without restarting; a nonzero exit returns `completion_failed`. An optional
+nonnegative integer `max_restarts` limits long-running containers, as with Compose.
+
+Success requires a second all-clear observation. A captured container disappearing
+or being replaced returns `superseded`; capture-time missing references return an
+`observation` failure. Deadline details describe the last complete cycle and count
+each captured container as one unit in `captured_services`. Capture and wait only
+observe Docker state; cancellation stops and reaps the local CLI child.
 
 ## Compose restart budgets
 

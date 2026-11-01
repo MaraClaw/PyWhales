@@ -158,6 +158,7 @@ class DockerClient(DockerCLICaller):
         environment: Mapping[str, str] | None = None,
         default_timeout: float | None = None,
         strict_env_transport: bool = False,
+        inherit_environment: bool = True,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -219,6 +220,9 @@ class DockerClient(DockerCLICaller):
             strict_env_transport: Require container envs and build args to use the
                 child environment, rejecting literal argv fallback without exposing
                 values. Defaults to false. Image history and provenance are not hidden.
+            inherit_environment: Inherit the parent environment by default. When
+                false, retain only PATH and HOME, plus USERPROFILE and SYSTEMROOT
+                on Windows, before applying the explicit overlay.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -256,6 +260,7 @@ class DockerClient(DockerCLICaller):
                 environment=environment,
                 default_timeout=default_timeout,
                 strict_env_transport=strict_env_transport,
+                inherit_environment=inherit_environment,
             )
         super().__init__(client_config)
 

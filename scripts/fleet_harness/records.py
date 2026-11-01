@@ -18,6 +18,7 @@ from scripts.fleet_contract.common import (
 from scripts.fleet_contract.platform import Platform, Topology
 from scripts.fleet_contract.results import Outcome, Outcomes
 from scripts.fleet_contract.workload import (
+    Action,
     Artifact,
     Boundary,
     Image,
@@ -25,7 +26,7 @@ from scripts.fleet_contract.workload import (
 )
 
 from .models import Metric, Step
-from .timeline import is_ordered, peak_counts, reconcile
+from .timeline import action_peak_counts, is_ordered, peak_counts, reconcile
 
 
 class OwnedResource(Contract):
@@ -112,6 +113,7 @@ class Receipt(Contract):
     """
 
     submission: PositiveCount
+    action: Action
     arrival_seconds: Amount
     admitted_seconds: Amount | None
     terminal_seconds: Amount
@@ -123,6 +125,7 @@ class Peaks(Contract):
 
     active: Count
     queued: Count
+    per_action: tuple[tuple[Action, Count], ...] = ()
 
 
 class Schedule(Contract):
@@ -136,7 +139,9 @@ class Schedule(Contract):
         """Reject receipts that break FIFO order or peaks the receipts do not give."""
         if not is_ordered(self.receipts):
             raise PydanticCustomError("schedule_order", "schedule_order")
-        if (self.peaks.active, self.peaks.queued) != peak_counts(self.receipts):
+        if (self.peaks.active, self.peaks.queued) != peak_counts(
+            self.receipts
+        ) or self.peaks.per_action != action_peak_counts(self.receipts):
             raise PydanticCustomError("schedule_peaks", "schedule_peaks")
         return self
 

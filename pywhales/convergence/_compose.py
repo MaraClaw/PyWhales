@@ -26,6 +26,7 @@ from pywhales.convergence._types import (
 )
 from pywhales.convergence._wire import (
     ContainerWire,
+    StandaloneContainerWire,
     inspect_container,
     list_compose_ids,
 )
@@ -88,6 +89,7 @@ def validate_selection(config: ClientConfig, selection: Selection) -> None:
         raise ValueError("Services must be a nonempty tuple of distinct names")
     if (
         type(completion) is not tuple
+        or any(type(name) is not str or not name for name in completion)
         or len(set(completion)) != len(completion)
         or not set(completion) <= set(services)
     ):
@@ -112,7 +114,7 @@ def list_members(
     return members
 
 
-def _restarts(container: ContainerWire) -> int:
+def _restarts(container: ContainerWire | StandaloneContainerWire) -> int:
     """Return Docker's top-level ``RestartCount``, which must be a real integer."""
     count = container.restart_count
     if type(count) is not int or count < 0:
@@ -170,17 +172,18 @@ def capture_project(
 
 
 def _affected(
-    groups: Iterable[list[ContainerWire]], blocked: Callable[[ContainerWire], bool]
+    groups: Iterable[list[ContainerWire | StandaloneContainerWire]],
+    blocked: Callable[[ContainerWire | StandaloneContainerWire], bool],
 ) -> int:
     return sum(any(map(blocked, group)) for group in groups)
 
 
-def _finished(container: ContainerWire) -> bool:
+def _finished(container: ContainerWire | StandaloneContainerWire) -> bool:
     state = container.state
     return state.status == "exited" and state.exit_code == 0 and not state.restarting
 
 
-def _failed(container: ContainerWire) -> bool:
+def _failed(container: ContainerWire | StandaloneContainerWire) -> bool:
     state = container.state
     return state.status == "exited" and state.exit_code != 0 and not state.restarting
 
@@ -211,15 +214,22 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
         for identity in service.container_ids
     }:
         return Failure(reason="superseded")
-    groups = [
+    groups: list[tuple[bool, list[ContainerWire | StandaloneContainerWire]]] = [
         (service.completion, [current[identity] for identity in service.container_ids])
         for service in target.services
     ]
+    return evaluate_groups(groups, target.max_restarts)
+
+
+def evaluate_groups(
+    groups: list[tuple[bool, list[ContainerWire | StandaloneContainerWire]]],
+    budget: int | None,
+) -> DeadlineDetail | Failure:
+    """Evaluate grouped containers using the shared Compose readiness rules."""
     completion = [group for done, group in groups if done]
     if any(_failed(container) for group in completion for container in group):
         return Failure(reason="completion_failed")
     running = [group for done, group in groups if not done]
-    budget = target.max_restarts
     over_budget = 0
     if budget is not None:
         counts = [[_restarts(container) for container in group] for group in running]
@@ -278,14 +288,23 @@ def wait_compose(
     The scope is entered here, so a deadline reached as it exits still yields the
     latest complete cycle's counts.
     """
+    return wait_groups(lambda: check_compose(target), scope, poll_interval)
+
+
+def wait_groups(
+    check: Callable[[], DeadlineDetail | Failure],
+    scope: AbstractContextManager[ObservationState],
+    poll_interval: float,
+) -> Outcome:
+    """Run complete cycles and a final all-clear under the shared clock."""
     last_complete: DeadlineDetail | None = None
     try:
         with scope as state:
             while True:
                 check_observation(state)
-                cycle = check_compose(target)
+                cycle = check()
                 if _settled(cycle):
-                    cycle = check_compose(target)
+                    cycle = check()
                 if isinstance(cycle, Failure):
                     return cycle
                 check_observation(state)

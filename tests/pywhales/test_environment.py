@@ -19,7 +19,7 @@ from pywhales._environment import (
     frozen_environment_scope,
     resolve_environment,
 )
-from pywhales._execution_policy import get_execution_policy
+from pywhales._execution_policy import PolicyExecutable, get_execution_policy
 from pywhales.admission import EndpointIdentity
 from pywhales.client_config import ClientConfig, Command
 from pywhales.profiles import EndpointBinding, PolicyError
@@ -243,6 +243,144 @@ def test_overlay_change_invalidates_endpoint_binding() -> None:
     client.client_config.environment["TEST_ENV_CLIENT"] = "second"
     with pytest.raises(PolicyError):
         binding.validate(client)
+
+
+def test_inheritance_change_invalidates_endpoint_binding() -> None:
+    client = DockerClient()
+    binding = EndpointBinding(EndpointIdentity("test"), client.client_config)
+    client.client_config.inherit_environment = False
+    with pytest.raises(PolicyError):
+        binding.validate(client)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("inherit", [False, True])
+def test_child_environment_inheritance(
+    stream: bool, inherit: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "ambient-endpoint")
+    monkeypatch.setenv("DOCKER_CONTEXT", "ambient-context")
+    monkeypatch.setenv("APP_PARENT_TOKEN", "ambient-token")
+    client = DockerClient(
+        client_call=[sys.executable],
+        inherit_environment=inherit,
+        environment={"DOCKER_HOST": "explicit-endpoint", "APP_CLIENT": "client"},
+    )
+    command = [
+        *client.client_config.docker_cmd,
+        "-c",
+        "import json, os; print(json.dumps([os.getenv('DOCKER_HOST'), "
+        "os.getenv('APP_PARENT_TOKEN'), os.getenv('APP_CLIENT'), os.getenv('PATH'), os.getenv('DOCKER_CONTEXT')]))",
+    ]
+    if stream:
+        output = b"".join(
+            data
+            for source, data in stream_stdout_and_stderr(command)
+            if source == "stdout"
+        ).decode()
+    else:
+        output = run(command)
+    assert json.loads(output) == [
+        "explicit-endpoint",
+        "ambient-token" if inherit else None,
+        "client",
+        os.environ.get("PATH"),
+        "ambient-context" if inherit else None,
+    ]
+
+
+def test_isolated_windows_base_and_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(environment_module, "_WINDOWS", True)
+    monkeypatch.setattr(
+        environment_module.os,
+        "environ",
+        {
+            "Path": "ambient",
+            "home": "home",
+            "UserProfile": "profile",
+            "SystemRoot": "root",
+            "DOCKER_HOST": "ambient",
+            "TOKEN": "secret",
+        },
+    )
+    config = ClientConfig(inherit_environment=False, environment={"PATH": "client"})
+    policy = get_execution_policy([PolicyExecutable("docker", config)])
+    assert resolve_environment(
+        policy.environment, {"path": "operation"}, frozen=policy.frozen_environment
+    ) == {
+        "path": "operation",
+        "home": "home",
+        "UserProfile": "profile",
+        "SystemRoot": "root",
+    }
+
+
+def test_isolated_frozen_scope_wins_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_PARENT_TOKEN", "ambient")
+    config = ClientConfig(client_call=[sys.executable], inherit_environment=False)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "import os; print(os.getenv('APP_PARENT_TOKEN', 'missing'))",
+    ]
+    with frozen_environment_scope(config, {"APP_PARENT_TOKEN": "planned"}):
+        assert run(command) == "planned"
+        assert run(command) == "missing"
+
+
+def test_isolated_snapshot_precedes_argument_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_PARENT_TOKEN", "ambient")
+    config = ClientConfig(
+        client_call=[sys.executable],
+        inherit_environment=False,
+        environment={"APP_CLIENT": "before"},
+    )
+
+    class MutatingArgument:
+        @override
+        def __str__(self) -> str:
+            config.inherit_environment = True
+            config.environment = {"APP_CLIENT": "after"}
+            return "import os; print(os.getenv('APP_PARENT_TOKEN', 'missing') + '|' + os.environ['APP_CLIENT'])"
+
+    assert run([*config.docker_cmd, "-c", MutatingArgument()]) == "missing|before"
+
+
+def test_isolated_archive_load_and_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "ambient")
+    monkeypatch.setenv("APP_PARENT_TOKEN", "ambient")
+    driver = tmp_path / "archive.py"
+    record = tmp_path / "archive.jsonl"
+    driver.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[2:]\n"
+        "with Path(sys.argv[1]).open('a') as f:\n"
+        "    f.write(json.dumps([args[:2], os.getenv('DOCKER_HOST'), os.getenv('APP_PARENT_TOKEN')]) + '\\n')\n"
+        "if args[:2] == ['image', 'inspect']:\n"
+        '    print(\'[{"Id":"sha256:abc","RepoTags":["app:latest"]}]\')\n'
+        "elif args[:2] == ['image', 'load']:\n"
+        "    sys.stdin.buffer.read()\n"
+        "    print('Loaded image: app:latest')\n"
+        "else:\n"
+        "    print('archive')\n"
+    )
+    client = DockerClient(
+        client_call=[sys.executable, str(driver), str(record)],
+        inherit_environment=False,
+        environment={"DOCKER_HOST": "explicit"},
+    )
+    assert client.image.load(b"archive") == ["app:latest"]
+    assert b"".join(client.image.save("app:latest")) == b"archive\n"
+    assert [json.loads(line) for line in record.read_text().splitlines()] == [
+        [["image", "load"], "explicit", None],
+        [["image", "inspect"], "explicit", None],
+        [["image", "save"], "explicit", None],
+    ]
 
 
 @pytest.mark.parametrize("stream", [False, True])
