@@ -27,6 +27,13 @@ def _check_compose_contract(
         client, ("web", "db"), policy=policy, timeout=1.0, cancel=cancel
     )
     assert_type(captured, ComposeTarget | Failure | Deadline | Cancelled)
+    budgeted = capture_compose(
+        client, ("web",), max_restarts=3, policy=policy, timeout=1.0
+    )
+    assert_type(budgeted, ComposeTarget | Failure | Deadline | Cancelled)
+    if isinstance(budgeted, ComposeTarget):
+        assert_type(budgeted.max_restarts, int | None)
+    assert_type(DeadlineDetail(1).restart_budget_exceeded_containers, int)
     if isinstance(captured, ComposeTarget):
         assert_type(captured.services, tuple[ComposeService, ...])
         assert_type(captured.services[0].container_ids, tuple[str, ...])

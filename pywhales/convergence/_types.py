@@ -90,13 +90,16 @@ class ComposeTarget:
     The target holds full container IDs, so keep it away from untrusted output.
     One-off ``compose run`` containers are never members. A hash records the
     service configuration, not its replica count; the container IDs fix that.
+    ``max_restarts`` is a fixed restart budget for long-running containers, or
+    ``None`` to leave Docker's ``RestartCount`` unchecked.
     """
 
     client_config: ClientConfig = field(repr=False, compare=False)
     services: tuple[ComposeService, ...]
+    max_restarts: int | None = None
 
     def __post_init__(self) -> None:
-        """Reject empty membership, duplicate service names or duplicate IDs."""
+        """Reject empty membership, duplicate names or IDs, or a bad restart budget."""
         services = self.services
         if (
             type(services) is not tuple
@@ -104,6 +107,9 @@ class ComposeTarget:
             or any(type(service) is not ComposeService for service in services)
         ):
             raise ValueError("Compose target must contain selected services")
+        budget = self.max_restarts
+        if budget is not None and (type(budget) is not int or budget < 0):
+            raise ValueError("Restart budget must be None or a nonnegative integer")
         identities = [
             identity for service in services for identity in service.container_ids
         ]
@@ -152,6 +158,11 @@ class DeadlineDetail:
     as unfinished when any of its containers isn't ``exited`` with code 0 and not
     restarting; a nonzero exit that isn't restarting ends the wait as a failure
     instead of being counted.
+
+    ``restart_budget_exceeded_containers`` counts long-running services with any
+    container whose latest observed ``RestartCount`` exceeds the target's
+    ``max_restarts``. It stays zero when the budget is disabled, and a later
+    within-budget observation clears it.
     """
 
     captured_services: int
@@ -170,6 +181,7 @@ class DeadlineDetail:
     paused_containers: int = 0
     unhealthy_containers: int = 0
     unfinished_completion_containers: int = 0
+    restart_budget_exceeded_containers: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -191,6 +203,7 @@ class DeadlineDetail:
             self.paused_containers,
             self.unhealthy_containers,
             self.unfinished_completion_containers,
+            self.restart_budget_exceeded_containers,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services

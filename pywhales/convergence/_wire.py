@@ -113,12 +113,17 @@ class ContainerConfig(BaseModel):
 
 
 class ContainerWire(BaseModel):
-    """Container identity, state and Compose labels; environment and command drop."""
+    """Container identity, state, labels and raw restart count; env and command drop.
+
+    ``restart_count`` is not validated here, so a disabled restart budget keeps
+    ignoring whatever Docker reports; the evaluator checks it when enabled.
+    """
 
     model_config = ConfigDict(strict=True)
     id: str = Field(alias="Id", min_length=1)
     state: ContainerState = Field(alias="State")
     config: ContainerConfig = Field(alias="Config")
+    restart_count: JsonValue = Field(default=None, alias="RestartCount")
 
 
 def canonical(value: dict[str, JsonValue], *, template: bool = False) -> str:

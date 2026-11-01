@@ -1212,6 +1212,7 @@ def container(
     restarting: bool = False,
     paused: bool = False,
     exit_code: int = 0,
+    restarts: int | None = None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "Status": status,
@@ -1222,7 +1223,7 @@ def container(
     }
     if health is not None:
         state["Health"] = {"Status": health, "Log": [{"Output": "credential-payload"}]}
-    return {
+    wire: dict[str, Any] = {
         "Id": identity,
         "Name": "/private-name",
         "State": state,
@@ -1238,6 +1239,9 @@ def container(
             },
         },
     }
+    if restarts is not None:
+        wire["RestartCount"] = restarts
+    return wire
 
 
 def snapshot(
@@ -2272,3 +2276,230 @@ def test_compose_target_is_frozen_and_keeps_config_out_of_equality_and_repr(
     for attribute in fields(WEB_SERVICE):
         with pytest.raises(FrozenInstanceError):
             setattr(WEB_SERVICE, attribute.name, None)
+
+
+ABSENT = "<absent>"
+INVALID_RESTARTS = [ABSENT, None, "2", True, 1.5, -1]
+INVALID_IDS = ["absent", "null", "string", "bool", "float", "negative"]
+
+
+def counted(identity: str, value: object, *, service: str = "web") -> dict[str, Any]:
+    """A healthy container whose raw RestartCount is ``value`` (or missing)."""
+    wire = container(identity, service=service, health="healthy")
+    if value != ABSENT:
+        wire["RestartCount"] = value
+    return wire
+
+
+def budgeted(
+    client: DockerClient,
+    policy: InspectionPolicy,
+    services: tuple[str, ...] = ("web",),
+    *,
+    completion: tuple[str, ...] = (),
+    budget: int = 1,
+) -> ComposeTarget:
+    result = capture_compose(
+        client,
+        services,
+        completion_services=completion,
+        max_restarts=budget,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(result, ComposeTarget)
+    return result
+
+
+@pytest.mark.parametrize("budget", [-1, True, False, 1.5, "1", [1]])
+def test_compose_capture_rejects_invalid_restart_budget_before_launch(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, budget: object
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, 0)))
+    invalid: Any = budget
+    with pytest.raises(ValueError):
+        capture_compose(
+            fake_cli, ("web",), max_restarts=invalid, policy=policy, timeout=5
+        )
+    assert not (tmp_path / "calls").exists()
+
+
+def test_compose_restart_budget_is_frozen_on_the_target_and_unset_by_default(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, 0)))
+    plain = compose_target(fake_cli, policy)
+    zero = budgeted(fake_cli, policy, budget=0)
+    assert plain.max_restarts is None and zero.max_restarts == 0
+    assert plain != zero and zero == budgeted(fake_cli, policy, budget=0)
+    assert zero != budgeted(fake_cli, policy, budget=1)
+    for invalid in (-1, True, 1.5, "1"):
+        bad: Any = invalid
+        with pytest.raises(ValueError):
+            replace(zero, max_restarts=bad)
+
+
+def test_compose_restart_budget_holds_a_healthy_service_until_within_budget(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    def stage(restarts: int) -> dict[str, Any]:
+        return snapshot(counted(A, restarts))
+
+    store_compose(tmp_path, stage(0), stage(0), stage(2), stage(1), stage(0))
+    target = budgeted(fake_cli, policy)
+    assert wait(target, policy=policy, timeout=10, poll_interval=0.01) == Success()
+    assert listings(tmp_path) == 5
+
+
+def test_compose_restart_budget_final_pass_must_stay_within_budget(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    ok, over = snapshot(counted(A, 1)), snapshot(counted(A, 2))
+    store_compose(tmp_path, ok, ok, over, ok, ok)
+    target = budgeted(fake_cli, policy)
+    assert wait(target, policy=policy, timeout=10, poll_interval=0.01) == Success()
+    assert listings(tmp_path) == 5
+
+
+def test_compose_over_budget_service_expires_with_a_bounded_live_counter(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, 1)), snapshot(counted(A, 2)))
+    target = budgeted(fake_cli, policy)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(DeadlineDetail(1, restart_budget_exceeded_containers=1))
+    assert not any(secret in repr(result) for secret in SECRETS)
+
+
+def test_compose_restart_counter_counts_services_once_and_joins_other_blockers(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(
+            counted(A, 3),
+            counted(B, 5),
+            counted(C, 2, service="db"),
+            container("d" * 64, service="cache", health="starting", restarts=3),
+        ),
+    )
+    names = ("web", "db", "cache")
+    target = budgeted(fake_cli, policy, names, budget=2)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(
+        DeadlineDetail(3, unhealthy_containers=1, restart_budget_exceeded_containers=2)
+    )
+
+
+@pytest.mark.parametrize("value", [ABSENT, "x", None, 99, -1])
+def test_compose_completion_services_ignore_the_restart_budget(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, value: object
+) -> None:
+    done = container(B, service="migrate", status="exited")
+    if value != ABSENT:
+        done["RestartCount"] = value
+    store_compose(tmp_path, snapshot(counted(A, 0), done))
+    target = budgeted(fake_cli, policy, MIGRATE, completion=("migrate",), budget=0)
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+
+def test_compose_restart_budget_keeps_completion_rules_and_joins_unfinished(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    def stage(status: str, exit_code: int = 0) -> dict[str, Any]:
+        return snapshot(
+            counted(A, 2),
+            container(B, service="migrate", status=status, exit_code=exit_code),
+        )
+
+    store_compose(tmp_path, stage("created"))
+    target = budgeted(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(
+        DeadlineDetail(
+            2, unfinished_completion_containers=1, restart_budget_exceeded_containers=1
+        )
+    )
+    store_compose(tmp_path, stage("exited"), stage("exited", exit_code=1))
+    failed = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert failed == Failure(reason="completion_failed")
+
+
+@pytest.mark.parametrize(
+    "value", [*INVALID_RESTARTS, 0, 99], ids=[*INVALID_IDS, "zero", "huge"]
+)
+def test_compose_disabled_budget_ignores_any_restart_count(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, value: object
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, value)))
+    target = compose_target(fake_cli, policy)
+    assert target.max_restarts is None
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+
+@pytest.mark.parametrize("value", INVALID_RESTARTS, ids=INVALID_IDS)
+def test_compose_enabled_budget_malformed_restart_count_fails_safely(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, value: object
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, value)))
+    captured = capture_compose(
+        fake_cli, ("web",), max_restarts=1, policy=policy, timeout=5
+    )
+    ready = snapshot(counted(A, 0))
+    store_compose(tmp_path, ready, ready, snapshot(counted(A, value)))
+    result = wait(
+        budgeted(fake_cli, policy), policy=policy, timeout=5, poll_interval=0.01
+    )
+    for outcome in (captured, result):
+        assert outcome == Failure(reason="malformed")
+        assert isinstance(outcome, Failure) and outcome.cause is None
+    assert listings(tmp_path) == 3
+
+
+def test_compose_enabled_budget_validates_every_member_not_just_the_first(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(counted(A, 0), counted(B, 0)),
+        snapshot(counted(A, 9), counted(B, "9")),
+    )
+    result = wait(
+        budgeted(fake_cli, policy), policy=policy, timeout=5, poll_interval=0.01
+    )
+    assert result == Failure(reason="malformed")
+
+
+@pytest.mark.parametrize("drift", ["hash", "membership"])
+def test_compose_over_budget_replacement_or_hash_drift_stays_superseded(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, drift: str
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, 0)))
+    target = budgeted(fake_cli, policy)
+    changed = counted(A, 9)
+    if drift == "hash":
+        changed["Config"]["Labels"]["com.docker.compose.config-hash"] = "hash-2"
+        later = snapshot(changed)
+    else:
+        later = snapshot(changed, counted(B, 9))
+    store_compose(tmp_path, snapshot(counted(A, 0)), later)
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="superseded")
+
+
+def test_compose_restart_budget_deadline_reaps_hung_child_and_keeps_last_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_compose(tmp_path, snapshot(counted(A, 2)))
+    target = budgeted(fake_cli, policy)
+    command = inspection(A)
+    hang_at(tmp_path, command, 3)
+    processes = track_processes(monkeypatch)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(DeadlineDetail(1, restart_budget_exceeded_containers=1))
+    assert (tmp_path / "started").exists()
+    assert_reaped(processes)
+    assert calls_of(tmp_path)[-1] == command

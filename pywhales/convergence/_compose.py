@@ -8,6 +8,7 @@ counts, never container payloads. A long-running service is ready when it is
 import time
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
@@ -66,10 +67,18 @@ def _outcome(
             return Failure(reason="observation", cause=error)
 
 
-def validate_selection(
-    config: ClientConfig, services: tuple[str, ...], completion: tuple[str, ...]
-) -> None:
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """Caller-chosen services, completion designation and optional restart budget."""
+
+    services: tuple[str, ...]
+    completion: tuple[str, ...]
+    max_restarts: int | None
+
+
+def validate_selection(config: ClientConfig, selection: Selection) -> None:
     """Reject an invalid selection or a dry-run client before any launch."""
+    services, completion = selection.services, selection.completion
     if (
         type(services) is not tuple
         or not services
@@ -83,6 +92,9 @@ def validate_selection(
         or not set(completion) <= set(services)
     ):
         raise ValueError("Completion services must be distinct selected services")
+    budget = selection.max_restarts
+    if budget is not None and (type(budget) is not int or budget < 0):
+        raise ValueError("Restart budget must be None or a nonnegative integer")
     if config.compose_dry_run:
         raise ValueError("A dry-run client cannot be captured")
 
@@ -100,13 +112,26 @@ def list_members(
     return members
 
 
+def _restarts(container: ContainerWire) -> int:
+    """Return Docker's top-level ``RestartCount``, which must be a real integer."""
+    count = container.restart_count
+    if type(count) is not int or count < 0:
+        raise ParsingError("Invalid restart count")
+    return count
+
+
 def snapshot_target(
-    config: ClientConfig, services: tuple[str, ...], completion: tuple[str, ...]
+    config: ClientConfig, selection: Selection
 ) -> ComposeTarget | Failure:
     """Capture each selected service's current containers and single config hash."""
+    services, completion = selection.services, selection.completion
     members = list_members(config, services)
     if {member.config.labels.service for member in members} - set(services):
         raise ParsingError("Container outside the selected services")
+    if selection.max_restarts is not None:
+        for member in members:
+            if member.config.labels.service not in completion:
+                _restarts(member)
     captured: list[ComposeService] = []
     for name in services:
         group = [member for member in members if member.config.labels.service == name]
@@ -124,19 +149,22 @@ def snapshot_target(
                 completion=name in completion,
             )
         )
-    return ComposeTarget(client_config=config, services=tuple(captured))
+    return ComposeTarget(
+        client_config=config,
+        services=tuple(captured),
+        max_restarts=selection.max_restarts,
+    )
 
 
 def capture_project(
     config: ClientConfig,
-    services: tuple[str, ...],
-    completion: tuple[str, ...],
+    selection: Selection,
     scope: AbstractContextManager[ObservationState],
 ) -> ComposeTarget | Failure | Deadline | Cancelled:
     """Capture the selected services inside an already bounded observation scope."""
     try:
         with scope:
-            return snapshot_target(config, services, completion)
+            return snapshot_target(config, selection)
     except _INTERRUPTIONS as error:
         return _outcome(error, None)
 
@@ -191,6 +219,11 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
     if any(_failed(container) for group in completion for container in group):
         return Failure(reason="completion_failed")
     running = [group for done, group in groups if not done]
+    budget = target.max_restarts
+    over_budget = 0
+    if budget is not None:
+        counts = [[_restarts(container) for container in group] for group in running]
+        over_budget = sum(any(count > budget for count in group) for group in counts)
     return DeadlineDetail(
         captured_services=len(groups),
         non_running_containers=_affected(
@@ -213,6 +246,7 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
         unfinished_completion_containers=_affected(
             completion, lambda container: not _finished(container)
         ),
+        restart_budget_exceeded_containers=over_budget,
     )
 
 
