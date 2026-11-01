@@ -23,9 +23,10 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs with project version 1.0.8.
-An installed version string alone isn't proof of support. Check the actual completion keyword, inventory
-kind, and typed stream returns before copying their examples:
+The guidance describes current source APIs with project version 1.1.0.
+An installed version string alone isn't proof of support. Check completion and
+restart keywords, stdin policy fields, inventory kinds, and typed stream returns
+before copying their examples:
 
 ```python
 from annotationlib import Format, get_annotations
@@ -33,12 +34,21 @@ from dataclasses import fields
 from inspect import signature
 from typing import get_args, get_overloads
 
-from pywhales import DockerClient, docker
+from pywhales import DockerClient, InspectionPolicy, docker
 from pywhales.client_config import ClientConfig
-from pywhales.convergence import ServiceTarget, capture_compose
+from pywhales.convergence import (
+    ComposeTarget,
+    DeadlineDetail,
+    ServiceTarget,
+    capture_compose,
+)
 from pywhales.inventory import InventoryKind
 
 print(signature(capture_compose, annotation_format=Format.STRING))
+print(signature(InspectionPolicy))  # max_total_stdin_bytes: int | None = None
+print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
+detail_defaults = {f.name: f.default for f in fields(DeadlineDetail)}
+print(detail_defaults["restart_budget_exceeded_containers"])
 print(get_args(InventoryKind.__value__))  # must include "manifest_list"
 print(signature(DockerClient).parameters["strict_env_transport"])  # bool = False
 print({f.name: f.default for f in fields(ClientConfig)}["strict_env_transport"])
@@ -74,6 +84,13 @@ for method in methods:
 Look for `completion_services: tuple[str, ...] = ()` and `ProcessStream` in the
 matching streaming overloads. Also look for:
 
+- `max_total_stdin_bytes: int | None = None` on `InspectionPolicy`: a positive
+  value enables bounded captured input and accounts archive uploads separately
+  from response and stream output. `None` does not enable uncapped observed input.
+- `max_restarts: int | None = None` on `capture_compose` and `ComposeTarget`, and
+  a default-zero `DeadlineDetail.restart_budget_exceeded_containers` field.
+  This budget accepts zero, applies only to selected long-running services, and
+  blocks convergence without creating a new terminal failure reason.
 - `strict_env_transport: bool = False` on `DockerClient` and on `ClientConfig`
   (import the latter from `pywhales.client_config`, not the package root).
 - A keyword-only `timeout: float | None = None` on Compose `build` and `execute`,

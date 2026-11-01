@@ -6,20 +6,22 @@ description: >-
   managing containers or images with pywhales, pulling/pushing/saving/loading
   images, using Buildx or Compose from Python, enforcing strict environment-only
   transport for container envs and build args, adding telemetry or admission
-  limits, bounding batch inspection, waiting for Swarm service/job/stack or
-  Compose project convergence, or troubleshooting pywhales usage, output types,
+  limits, bounding inspection and archive uploads, waiting for Swarm
+  service/job/stack or Compose project convergence with restart budgets, or
+  troubleshooting pywhales usage, output types,
   streaming, and cleanup. This skill is for consuming pywhales, not developing
   or contributing to the library.
 compatibility: >-
-  Python >=3.14.10 with pywhales installed; Docker CLI on PATH and a reachable
-  Docker engine. Compose and Buildx plugins are required for their commands.
+  Python >=3.14.10 with pywhales installed. Executing Docker operations requires
+  the Docker CLI and the selected engine; Compose and Buildx need their plugins.
+  Imports, client construction, and API introspection do not require Docker.
 ---
 
 # PyWhales
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes current source APIs with project version 1.0.8.
+This guidance describes current source APIs with project version 1.1.0.
 An installed version string alone isn't proof of support; check actual
 capabilities before use.
 
@@ -35,12 +37,16 @@ are not part of this workflow.
 3. Check installed signatures, return annotations/overloads, and `help()` before
    adding unfamiliar arguments or assuming a closeable stream. For inventory,
    check supported kinds too; for Swarm waits, check the supported service modes.
+   For bounded uploads and Compose restart budgets, check the policy fields and
+   capture options rather than inferring support from the version string.
    See [Usage validation](references/validation.md);
    these checks need no repository checkout or running engine.
 4. Translate commands into argument sequences and verified keyword arguments.
    Choose captured output, detached objects, or streaming before writing code.
 5. Scope clients instead of changing the user's active Docker context. Give owned
    containers and streams explicit lifetimes; don't attach cleanup to borrowed objects.
+   Reload resource handles explicitly when verifying state after a mutation;
+   don't use a fixed sleep to expire their inspection cache.
 6. Validate the smallest authorized scenario. Report what ran, its output type,
    cleanup, and any unavailable engine or plugin checks.
 
@@ -54,7 +60,7 @@ are not part of this workflow.
 | Building images, passing build args, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
 | Observing executions with sanitized telemetry or bounding concurrent work with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
-| Bounding inspection or inventory, including manifest lists; waiting for Swarm services, jobs, or stacks, or mixed long-running/completion Compose services; or evaluating opt-in reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
+| Bounding inspection, inventory, streams, or stdin uploads; waiting for Swarm services/jobs/stacks or Compose services with completion and restart budgets; or evaluating opt-in reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
 | Checking installed API support and verifying the user's automation | [Usage validation](references/validation.md) |
 
 ## Quick Translation
