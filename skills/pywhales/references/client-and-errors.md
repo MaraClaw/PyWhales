@@ -42,8 +42,8 @@ Environment files are applied in order, with later files overriding earlier ones
 
 `environment={"KEY": "value"}` overlays entries on top of the inherited process
 environment for every launch from that client; omitting it (`None`) inherits
-the process environment unchanged. This does not affect executable lookup or
-the parent Python process's own environment.
+the process environment rather than replacing it. This does not affect
+executable lookup or the parent Python process's own environment.
 
 Keep this CLI configuration distinct from container `envs={...}`. Eligible
 `envs` values use a per-launch child environment with `--env KEY`; CLI-control
@@ -105,7 +105,9 @@ Expiry kills and reaps the local CLI and raises `DockerTimeout`, a subclass of
 `DockerException` with the same `docker_command`/`return_code`/`stdout`/`stderr`
 attributes. This happens even while archive consumption is paused or a producer
 is blocked; arbitrary Python iterator code itself cannot be interrupted, so the
-timeout is only reported when the caller's code resumes. It does not guarantee
+timeout is only reported when the caller's code resumes. Retained partial output
+may be available on the raw attributes; streamed stdout already delivered to the
+consumer isn't reconstructed there. Expiry does not guarantee
 daemon-side cancellation or rollback. See
 [Containers, output, and lifecycle](containers-and-output.md) and
 [Registry transfers and archives](registry-and-archives.md) for which methods
@@ -175,3 +177,8 @@ limits around specific calls, see
 [Telemetry and admission](telemetry-and-admission.md). For bounding batch
 inspection or waiting for Swarm service/stack or Compose project convergence,
 see [Observation budgets and convergence](observation-and-convergence.md).
+
+Application policy APIs also require explicit imports from `pywhales.profiles`,
+`pywhales.reconciliation`, or `pywhales.storage`, not the package root. They
+don't automatically add create policy, reconciliation, or storage gates to
+ordinary `DockerClient` calls.

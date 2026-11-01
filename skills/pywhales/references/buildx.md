@@ -166,8 +166,10 @@ or an existing `Builder` handle. Limits, deadlines, and cancellation come from
 
 - References are exact builder names, not IDs, and no name reaches the command
   line. Buildx has no batch inspect, so each client configuration group runs
-  one `buildx ls --format "{{json . }}"` listing and returns one detached
-  snapshot per requested name, in request order, duplicates included.
+  one `buildx ls --format "{{json . }}"` listing. Inventory capture returns one
+  detached record per requested occurrence, in request order, duplicates included;
+  `bulk_reload()` instead stages snapshots and refreshes the original handles,
+  returning `None`.
 - That listing is parsed strictly. Lines identical byte for byte collapse,
   because node rows repeat them. A non-builder line, a null or empty name, or
   two different lines under one name raises `ParsingError` before any snapshot
