@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.1.0
+
+### New Features
+
+- `InspectionPolicy.max_total_stdin_bytes` bounds bytes accepted by local stdin
+  pipe writes across captured input and image archive uploads. Nested scopes
+  share accounting across their launches, including partial writes and transfers
+  retained after scope exit. Exact-budget EOF succeeds; excess input raises
+  `ObservationLimitError` with reason `total_stdin`. Budgeted captured input
+  supports bytes and cooperative byte iterables while draining stdout and stderr.
+- `capture_compose(max_restarts=...)` optionally requires each selected
+  long-running container's current `RestartCount` to stay within a nonnegative
+  budget. Over-budget services remain unsettled even when healthy; a later
+  within-budget observation clears the blocker. Completion services are exempt.
+  `DeadlineDetail.restart_budget_exceeded_containers` counts affected services
+  from the latest complete cycle, and success still requires the final recheck.
+- Swarm convergence supports `ReplicatedJob` and `GlobalJob` targets, tracking
+  completion within the captured job iteration. Global jobs require explicit
+  approved node IDs. Failed or rejected tasks with restart condition `none`
+  return `completion_failed`; a new iteration or changed template supersedes
+  the capture, while a service version change alone does not.
+- `DockerClient(strict_env_transport=True)` rejects container environment and
+  build-argument assignments that would otherwise fall back to literal CLI
+  arguments. The default remains permissive. Rejections omit assignment names
+  and values; this does not hide child environments, image history, or provenance.
+- The offline fleet harness accepts explicit arrival offsets for deterministic
+  overlapping submissions, FIFO admission, queue-inclusive deadlines, and
+  chronological resource lifecycle simulation. Reports include validated
+  per-submission schedule receipts and observed active/queued peaks. Plans
+  without offsets retain sequential behavior and operation digests.
+- The fleet harness exports synthetic evidence for the fleet contract reporter.
+  Exported results remain unqualified, establish zero external connections,
+  and never authorize a live run or a transport beyond `no_go` and `cli`.
+
+### Behavior Changes And Fixes
+
+- Eligible Buildx and Compose build arguments use name-only `--build-arg KEY`
+  options with values in the child environment, retaining literal fallback by
+  default. Compose environment values also reach configuration interpolation;
+  Bake `--set` transport is unchanged.
+- Compose `build` and `execute`, and container `wait` (including `docker.wait`),
+  accept keyword-only local CLI deadlines. Container/service logs and system
+  events reject invalid deadlines before inspection or filter processing.
+  `None` inherits the client default; expiry reaps only the local CLI and does
+  not roll back daemon-side work or change Docker shutdown-grace options.
+- Fleet contract samples require a submission identity linking observations
+  across boundaries. Assessments flag conflicting linked outcomes and aggregate
+  count mismatches. Existing schema-version-1 result files without these links
+  must be migrated; the shared schema version remains unchanged.
+- Integration tests identify annotated manifest members by digest, wait for
+  ARM64-compatible stack services to converge, and explicitly refresh service
+  snapshots after scaling instead of relying on inspection-cache timing.
+
+### Release Process And Documentation
+
+- The Linux plugin installer supports amd64 and arm64 with architecture-specific,
+  checked-in checksums, verifying both pinned plugins before replacing either.
+  Delivery now requires native ARM64 Compose and Buildx smoke tests in both the
+  workflow dependencies and the seal's exact successful-job contract.
+- Updated API documentation and consumer skill guidance for deadlines,
+  environment transport, Swarm jobs, bounded uploads, and Compose restart budgets.
+
 ## 1.0.8
 
 ### New Features
