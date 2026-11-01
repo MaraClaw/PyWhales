@@ -2,12 +2,13 @@
 
 ## Configuration And Policy
 
-- Resources retain the originating `ClientConfig`; equality is immutable ID plus config equality. `add_simple_arg()` omits only `None` (keeps `0`, `False`); `add_flag()` uses truthiness; optional Docker globals use `is True`.
-  Compose globals sit between `compose` and the subcommand (`get_compose_command()`); explicit per-call `progress` wins and `compose_env_files` order matters.
-- Lookup is lazy: `get_client_call_with_path()` caches `shutil.which()` plus prefix arguments, not globals rebuilt by `docker_cmd`.
-  Its leading `PolicyExecutable` carries config through `Command`/list composition, `copy()` and `deepcopy()`; get execution policy before stringifying argv.
-- Each launch snapshots buffer budget, diagnostics, observer by reference, environment, and default or innermost `execution_timeout()` for the identical config; later mutations affect new launches only.
-- `ReloadableObject` stores immutable identity; `is_immutable_id=True` skips initial inspect, `CACHE_VALIDITY_PERIOD = 0.01` seconds expires snapshots, and `reload()` forces inspection.
+- Resources retain the originating `ClientConfig`; equality is immutable ID plus config equality. `add_simple_arg()` omits only `None` (keeps `0`, `False`); `add_flag()` uses truthiness; optional Docker globals use `is True`. Compose globals sit between `compose` and the subcommand (`get_compose_command()`); explicit per-call `progress` wins and `compose_env_files` order matters.
+- Lookup is lazy: `get_client_call_with_path()` caches `shutil.which()` plus prefix arguments, not globals rebuilt by `docker_cmd`. Its leading `PolicyExecutable` carries config through `Command`/list composition, `copy()` and `deepcopy()`; get execution policy before stringifying argv.
+- Each launch snapshots buffer budget, diagnostics, observer by reference, environment, and default or innermost `execution_timeout()` for the identical config; later mutations affect new launches only. `DockerClient(client_config=...)` retains the supplied config unchanged; other configuration arguments don't override it.
+- `inherit_environment=True` is the `DockerClient`/`ClientConfig` default. False retains only ambient `PATH`/`HOME`, plus `USERPROFILE`/`SYSTEMROOT` on Windows, then applies client and launch overlays; Windows names merge case-insensitively.
+  `get_execution_policy()` centrally freezes that restricted full environment before argv stringification. Executable lookup still uses process `PATH`; child settings never modify `os.environ`.
+- `ReloadableObject` stores immutable identity; `is_immutable_id=True` skips initial inspect, `CACHE_VALIDITY_PERIOD = 0.01` seconds expires snapshots, and `reload()` forces inspection. Reload requires exact stored-identity equality unless the stored identity is `None`; mismatch raises `ParsingError` without publishing cache or timestamp.
+- `ReloadableObjectFromJson._parse_single_inspect_json()` requires a singleton array containing an object, not a bare object, empty/multiple results, or a scalar; reject shape errors with `ParsingError` before model parsing.
 - `DockerCamelModel` accepts names and aliases; preserve `to_docker_camel()` exceptions (`ExecIDs`, `IPAddress`, `OOMKilled`, `RootFS`, `DefaultAPIVersion`).
 - `exceptions.py` uses ordered line-start stderr patterns, not substrings, names, or context paths. Forwarded application stderr from `run`/`exec` can still be misclassified.
 
@@ -15,22 +16,19 @@
 
 - `_environment.py::container_environment` is shared by container `create`/`run`/`execute`, Compose `run`/`execute`, service `create`, and Buildx/Compose `build` args.
 - Safe noncolliding names become `--env KEY`; values move to per-launch overrides bound to the effective child-environment snapshot, never to process-global `os.environ`.
-- Reserved CLI/runtime names or prefixes, invalid names/values, non-string keys, and ambient/client collisions retain ordered literal `KEY=value` arguments rather than new rejection or env-file behavior.
-- A matching frozen scope supplies collision checks without consuming its one-use snapshot. Windows checks names case-insensitively; all equivalent mapping entries stay literal.
+- Reserved CLI/runtime names or prefixes, invalid names/values, non-string keys, and effective-child environment collisions retain ordered literal `KEY=value` arguments rather than new rejection or env-file behavior. Filtered-out ambient names don't collide.
+- A matching frozen scope supplies collision checks without consuming its snapshot; only the next policy snapshot for the identical config consumes it. Windows checks names case-insensitively; all equivalent mapping entries stay literal.
 - Existing stringification (including non-string values) and empty values survive. `_ContainerEnvironment` binds the collision snapshot so later ambient/client changes cannot change the launch decision.
 - This reduces argv exposure, not universal redaction: literal fallbacks, child environments, returned data, raw exception attributes, and caller logging can still carry values; see confidentiality below.
 - Compose receives the same child overrides for config interpolation; these are not a container-only secret channel. Tests: `tests/pywhales/components/test_env_forwarding.py` and `test_env_branch_transport.py`.
-- `strict_env_transport=True` on `DockerClient`/`ClientConfig` rejects any literal assignment fallback with a
-  value-free `ValueError`; build args reject before lookup/inspect. The default is false. Reserved prefixes
-  include `PYTHON`, so `PYTHON_VERSION` rejects in strict mode. Bake `--set` is unaffected. Image history,
-  provenance, child environments and Compose interpolation remain possible value exposure surfaces.
+- `strict_env_transport=True` on `DockerClient`/`ClientConfig` rejects any literal assignment fallback with a value-free `ValueError`; build args reject before lookup/inspect. The default is false.
+  Reserved prefixes include `PYTHON`, so `PYTHON_VERSION` rejects in strict mode. Bake `--set` is unaffected. Image history, provenance, child environments and Compose interpolation remain possible value exposure surfaces.
 
 ## Bulk Reload And Inventory
 
 - Both support 13 kinds: Container, Image, Network, Volume, Node, Service, Config, Secret, Task, Plugin, Context, Builder, and ManifestList (`manifest_list` in `InventoryKind`).
 - Bulk reload rejects unsupported kinds and missing identities before CLI lookup; empty input is inert. Group by exact config object identity plus kind, not config equality; inspect each distinct handle once.
-- Builders use one strict `buildx ls --format "{{json . }}"` per group (`parse_builder_listing`): exact names never reach argv, with ordered handles per request.
-  Only byte-identical lines collapse; non-builder data, null/empty names, and conflicting entries reject. Safe mode withholds names.
+- Builders use one strict `buildx ls --format "{{json . }}"` per group (`parse_builder_listing`): exact names never reach argv, with ordered handles per request. Only byte-identical lines collapse; non-builder data, null/empty names, and conflicting entries reject. Safe mode withholds names.
 - Manifest lists require per-reference inspection, never generic batching; each handle's `insecure` flag follows its launch. Strict helper and lenient public inspection differ: [manifest guide](components/manifest/AGENTS.md).
 - Stage all groups before any cache/timestamp publication; staged identity equals stored identity exactly without freshness accessors. Any group failure leaves all originals unchanged; each distinct handle publishes once.
 - This is neither a daemon transaction nor atomic for concurrent readers: groups inspect separately and successful handles publish sequentially.
@@ -62,7 +60,7 @@
 - `stream_buffer_bytes=None` is unbounded; budgets are positive integers, not bool. Omitted `DEFAULT_BUFFER` inherits at the shared boundary; explicit `None` stays unbounded. The separate non-`None` image override wins without config normalization; see the image guide.
 - Stdout/stderr queued payload shares one budget; unfinished pipe records and stderr history have separate bounds, not a total-memory cap.
 - Oversized records raise `BufferError`; pressure blocks rather than drops. Close/failure wakes waiters; terminal errors stay outside the payload queue and must not be erased.
-- Automatic diagnostics omit argv, environment values and captured payloads unless that client enables `raw_diagnostics=True`. Safe inspect failures dump no response and chain no input-bearing errors.
+- Automatic diagnostics omit argv, environment values and captured payloads unless that client enables `raw_diagnostics=True`. Safe inspect failures dump no response and suppress input-bearing causes. Raw fetch validation re-raises `ValidationError`; raw model validation wraps it in `ParsingError`, chains it and dumps the response.
 - Raw `docker_command`/`stdout`/`stderr` attributes remain confidential and intact; explicit output, uncaptured terminal output and caller logging are outside this policy.
 
 ## JSON Utility

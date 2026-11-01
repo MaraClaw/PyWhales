@@ -23,14 +23,14 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 
 ## Shared Contracts
 
-- Use `_cleanup.py::resource_cleanup` in resource `__exit__` methods. It catches
-  `BaseException` from cleanup and, when the body also failed, preserves both errors
-  in a `BaseExceptionGroup`. Don't swallow either failure or narrow the catch.
+- Use `_cleanup.py::resource_cleanup` in resource `__exit__` methods. Cleanup `BaseException` plus a body failure
+  form a `BaseExceptionGroup`; don't swallow either failure or narrow the catch.
   Container, Image, Volume, Network, Config, Secret, Plugin, and Service nest a `try` inside it that
   returns on only their own `NoSuch*` error; every other removal failure still reaches `resource_cleanup`.
   Context, Builder, and ManifestList use it without that `try`.
-  Config, Secret, Plugin, Context, and Service handles expose `exists()`, which is `False` only for
-  that own error, so `NotASwarmManager` and other failures propagate.
+  Config, Secret, Plugin, Context, and Service `exists()` returns `False` only for that own error; other failures propagate.
+- Eleven scalar JSON hooks retain module-local `run()` and `-> dict[str, JsonValue]`, calling `_parse_single_inspect_json()`.
+  Singleton shape and reload identity rules live in [the runtime guide](../AGENTS.md#configuration-and-policy); Builder and ManifestList keep distinct response shapes.
 - Config, Node, Secret, and Service inspect use `_swarm_inspect.py::parse_swarm_inspect_results`.
   Resolve reordered responses by exact ID, then exact name (hostname for nodes), then
   unique ID prefix. Validate identities, ambiguity, snapshot consistency, and requested
@@ -40,8 +40,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   identities, and duplicate consistency for the whole response before hydrating any returned handle.
 - Context names must match exactly. Full plugin IDs (64 lowercase hex characters) and task IDs
   (25 lowercase alphanumeric characters) must match exactly; other aliases retain positional association.
-  Preserve request order and duplicate handles; `[]` returns without executable lookup. Scalar and current-context
-  `context.inspect()` behavior stay unchanged; don't apply these positional rules to Swarm reordering.
+  Preserve request order and duplicate handles; `[]` returns without executable lookup. Don't apply these batch positional rules to scalar inspection or Swarm reordering.
 - `top.py` shares table parsing, but Docker top takes `ps_args` and Compose top selects
   services with grouped-container or flat-service output. Keep those grammars separate.
   Parsed tables support scalar columns and at most one final free-text field.
