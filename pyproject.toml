@@ -37,6 +37,7 @@ dev = [
     "mkdocstrings-python==2.0.10",
     "pymdown-extensions==12.3",
     "coverage>=7.17.0",
+    "pytest-asyncio>=1.4.1",
 ]
 
 [project.urls]
