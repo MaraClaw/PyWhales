@@ -13,24 +13,36 @@ from pywhales.utils import PROJECT_ROOT
 
 
 @pytest.fixture
-def stack(docker_client: DockerClient, swarm_mode: None) -> Generator[Stack]:
+def stack(
+    docker_client: DockerClient, swarm_mode: None, tmp_path: Path
+) -> Generator[Stack]:
     """Deploy the fixed some_stack project inside the fixture-owned Swarm.
 
-    Requires a disposable daemon and its Swarm setup. Normal teardown removes
-    the stack and waits before the surrounding Swarm fixture force-leaves.
+    Requires a disposable daemon and its Swarm setup. Use small multi-platform
+    services and let the scale CLI wait for convergence before listing tasks.
 
     Yields:
-        The deployed stack handle between setup and removal delays.
+        The converged stack handle, removed during teardown even on failure.
     """
-    time.sleep(1)
-    some_stack = docker_client.stack.deploy(
-        "some_stack",
-        [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
+    compose_file = tmp_path / "stack.yml"
+    compose_file.write_text(
+        "services:\n"
+        + "".join(
+            f"  {name}:\n    image: busybox:1.37.0\n    command: [sleep, '3600']\n"
+            for name in ("app", "db", "influxdb", "agent")
+        )
     )
-    time.sleep(1)
-    yield some_stack
-    some_stack.remove()
-    time.sleep(1)
+    docker_client.image.pull("busybox:1.37.0")
+    some_stack = docker_client.stack.deploy(
+        "some_stack", [compose_file], resolve_image="never"
+    )
+    try:
+        docker_client.service.scale(
+            dict.fromkeys(some_stack.services(), 1), detach=False, timeout=60
+        )
+        yield some_stack
+    finally:
+        some_stack.remove()
 
 
 @pytest.mark.usefixtures("stack")
@@ -61,6 +73,8 @@ def test_stack_ps_and_services(docker_client: DockerClient, stack: Stack) -> Non
     assert len(stack_tasks) > 0
     for task in stack_tasks:
         assert task.desired_state == "running"
+        assert task.status is not None
+        assert task.status.state == "running"
 
 
 @pytest.mark.usefixtures("swarm_mode")
