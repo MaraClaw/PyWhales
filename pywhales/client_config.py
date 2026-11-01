@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from json import JSONDecodeError
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
@@ -20,7 +21,7 @@ import pydantic
 from . import utils
 from ._environment import copy_environment
 from ._execution_policy import PolicyExecutable
-from ._json import dumps_compat
+from ._json import dumps_compat, loads_compat
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
 from .telemetry import TelemetryObserver
@@ -441,6 +442,10 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
     def _reload(self) -> InspectResultT:
         """Fetch, cache, and return a snapshot for the stored identity."""
         inspect_result = self._fetch_and_parse_inspect_result(self._immutable_id)
+        if self._immutable_id is not None and (
+            getattr(inspect_result, self._id_in_inspect) != self._immutable_id
+        ):
+            raise ParsingError("Inspect identity does not match stored identity")
         self._set_inspect_result(inspect_result)
         return inspect_result
 
@@ -493,6 +498,30 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
     Raw diagnostic opt-in may retain those chains and write invalid snapshots
     to temporary files, which must be treated as confidential.
     """
+
+    def _parse_single_inspect_json(self, json_str: str) -> JsonObject:
+        """Return the single object in an inspect array, respecting diagnostic policy.
+
+        Args:
+            json_str: Captured scalar inspect response.
+
+        Raises:
+            ParsingError: If the response is malformed or not a singleton object array.
+            pydantic.ValidationError: If the object contains invalid JSON values.
+        """
+        try:
+            result = loads_compat(json_str)
+        except JSONDecodeError as err:
+            if self.client_config.raw_diagnostics:
+                raise ParsingError("Invalid inspect JSON response") from err
+            raise ParsingError("Invalid inspect JSON response") from None
+        if (
+            not isinstance(result, list)
+            or len(result) != 1
+            or not isinstance(result[0], dict)
+        ):
+            raise ParsingError("Expected one inspect JSON object")
+        return utils.custom_parse_object_as(dict[str, pydantic.JsonValue], result[0])
 
     def _fetch_inspect_result_json(self, reference: ReferenceT) -> JsonObject:
         """Define the subclass hook for fetching one JSON inspection object.

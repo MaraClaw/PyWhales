@@ -40,6 +40,111 @@ type ResourceType = type[
     | Volume
 ]
 
+SCALAR_RESOURCES = [
+    Config,
+    Container,
+    Context,
+    Image,
+    Network,
+    Node,
+    Plugin,
+    Secret,
+    Service,
+    Task,
+    Volume,
+]
+
+
+@pytest.mark.parametrize("resource_type", SCALAR_RESOURCES)
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "[]",
+        '[{"sentinel": "scalar-secret"}, {}]',
+        '["scalar-secret"]',
+        '{"sentinel": "scalar-secret"}',
+        '[{"sentinel": "scalar-secret"}',
+    ],
+    ids=["empty", "multiple", "non-object", "non-array", "invalid-json"],
+)
+def test_scalar_inspect_rejects_malformed_response(
+    resource_type: ResourceType, raw: bool, payload: str, tmp_path: Path
+) -> None:
+    config = ClientConfig(raw_diagnostics=raw, _client_call_with_path=["mock-cli"])
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, payload.encode(), b""),
+        ),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        resource_type(config, "reference")
+
+    if not raw:
+        assert "scalar-secret" not in "".join(traceback.format_exception(raised.value))
+        assert raised.value.__cause__ is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("resource_type", SCALAR_RESOURCES)
+@pytest.mark.parametrize("raw", [False, True])
+def test_scalar_reload_rejects_changed_identity_without_publishing(
+    resource_type: ResourceType, raw: bool, tmp_path: Path
+) -> None:
+    config = ClientConfig(raw_diagnostics=raw, _client_call_with_path=["mock-cli"])
+    original = {"Id": "original", "ID": "original", "Name": "original"}
+    changed = {"Id": "scalar-secret", "ID": "scalar-secret", "Name": "scalar-secret"}
+    with patch(
+        "subprocess.run",
+        return_value=CompletedProcess([], 0, json.dumps([original]).encode(), b""),
+    ):
+        resource = resource_type(config, "reference")
+    snapshot, timestamp = resource._inspect_result, resource._last_refreshed_time
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps([changed]).encode(), b""),
+        ),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        resource.reload()
+
+    assert resource._inspect_result is snapshot
+    assert resource._last_refreshed_time == timestamp
+    if not raw:
+        assert "scalar-secret" not in "".join(traceback.format_exception(raised.value))
+        assert raised.value.__cause__ is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_current_context_reload_accepts_changed_name() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-cli"])
+    context = Context(config, None, is_immutable_id=True)
+    with patch(
+        "subprocess.run",
+        return_value=CompletedProcess([], 0, b'[{"Name":"current"}]', b""),
+    ):
+        context.reload()
+    assert context._inspect_result is not None
+    assert context._inspect_result.name == "current"
+
+
+@pytest.mark.parametrize("resource_type", SCALAR_RESOURCES)
+def test_scalar_reload_accepts_matching_full_identity(
+    resource_type: ResourceType,
+) -> None:
+    identity = "a" * 64
+    payload = json.dumps([{"Id": identity, "ID": identity, "Name": identity}]).encode()
+    config = ClientConfig(_client_call_with_path=["mock-cli"])
+    resource = resource_type(config, identity, is_immutable_id=True)
+    with patch("subprocess.run", return_value=CompletedProcess([], 0, payload, b"")):
+        resource.reload()
+    assert resource._inspect_result is not None
+    assert getattr(resource._inspect_result, resource._id_in_inspect) == identity
+
 
 @pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
 @pytest.mark.parametrize("raw", [False, True])

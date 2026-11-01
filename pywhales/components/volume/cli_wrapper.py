@@ -23,7 +23,6 @@ import pywhales.components.buildx.cli_wrapper
 import pywhales.components.container.cli_wrapper
 import pywhales.components.image.cli_wrapper
 from pywhales._execution_policy import execution_timeout
-from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -38,7 +37,6 @@ from pywhales.exceptions import NoSuchContainer, NoSuchImage, NoSuchVolume
 from pywhales.test_utils import random_name
 from pywhales.utils import (
     ValidPath,
-    custom_parse_object_as,
     run,
     to_list,
     validate_timeout,
@@ -87,9 +85,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "volume", "inspect", reference])
-        return custom_parse_object_as(
-            dict[str, JsonValue], {**loads_compat(json_str)[0]}
-        )
+        return self._parse_single_inspect_json(json_str)
 
     @override
     def _parse_json_object(
