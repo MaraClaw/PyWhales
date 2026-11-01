@@ -34,11 +34,11 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 
 ## Local Deadlines
 
-- `run`, `pull`, `push`, `watch`, `logs`, and `events` take keyword-only `timeout`: positive finite seconds from the
+- `build`, `execute`, `run`, `pull`, `push`, `watch`, `logs`, and `events` take keyword-only `timeout`: positive finite seconds from the
   local CLI launch, or `None` to inherit `ClientConfig.default_timeout`. Expiry kills and reaps only the local CLI and
   raises `DockerTimeout`; it doesn't stop services, undo pulled or pushed layers, or change post-exit pipe draining.
   A returned stream's deadline advances while nothing consumes it.
-- `pull()`, `push()`, and `watch()` validate `timeout` before the `[]` no-op: an invalid value raises `ValueError`
+- `build()`, `pull()`, `push()`, and `watch()` validate `timeout` before the `[]` no-op: an invalid value raises `ValueError`
   for `[]` and `None` selections alike, and a valid one with `[]` returns `None` without a launch. `pull()` validates
   before its quiet/stream conflict check. Blocking `push()` returns `None`; `pull(stream_logs=True)` returns a stream.
 - Dry-run rejections and the `[]` rules in Service Selection are unchanged by timeouts. `watch()` keeps its explicit

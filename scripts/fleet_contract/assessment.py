@@ -38,10 +38,31 @@ class Assessment(Contract):
 def assess(
     measurements: Measurements, budgets: Budgets, result: RunResult
 ) -> Assessment:
-    """Assess all outcome populations without filling missing evidence with zero."""
+    """Assess all outcome populations without filling missing evidence with zero.
+
+    Each linked submission must keep one outcome across every boundary, and those
+    outcomes must reproduce the aggregate counts.
+    """
     missing: set[str] = set()
     failed = False
     distributions: list[DistributionReport] = []
+    linked = {
+        (sample.submission, sample.outcome)
+        for item in result.latency
+        for sample in item.samples
+    }
+    if len(linked) > len({submission for submission, _ in linked}):
+        missing.add("submission_outcome_conflict")
+    outcomes = result.outcomes
+    if linked and Counter(outcome for _, outcome in linked) != Counter(
+        succeeded=outcomes.succeeded,
+        failed=outcomes.failed,
+        rejected=outcomes.rejected,
+        cancelled=outcomes.cancelled,
+        unknown=outcomes.unknown,
+        timed_out=outcomes.timed_out,
+    ):
+        missing.add("outcome_samples_mismatch")
     for requirement in measurements.latency:
         item = next(
             (item for item in result.latency if item.boundary == requirement.boundary),
@@ -66,18 +87,6 @@ def assess(
             missing.add("latency_population_incomplete")
         if excluded:
             missing.add("latency_excluded")
-        outcomes = result.outcomes
-        if item.boundary == "queue_wait" and Counter(
-            sample.outcome for sample in item.samples
-        ) != Counter(
-            succeeded=outcomes.succeeded,
-            failed=outcomes.failed,
-            rejected=outcomes.rejected,
-            cancelled=outcomes.cancelled,
-            unknown=outcomes.unknown,
-            timed_out=outcomes.timed_out,
-        ):
-            missing.add("outcome_samples_mismatch")
         percentiles = (
             tuple(
                 Percentile(

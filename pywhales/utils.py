@@ -193,7 +193,7 @@ def run(
     args: Sequence[object],
     capture_stdout: bool = ...,
     capture_stderr: bool = ...,
-    input: bytes | None = ...,
+    input: bytes | Iterable[bytes] | None = ...,
     return_stderr: Literal[False] = ...,
     env: Mapping[str, str] = ...,
     tty: bool = ...,
@@ -208,7 +208,7 @@ def run(
     args: Sequence[object],
     capture_stdout: bool = ...,
     capture_stderr: bool = ...,
-    input: bytes | None = ...,
+    input: bytes | Iterable[bytes] | None = ...,
     *,
     return_stderr: Literal[True],
     env: Mapping[str, str] = ...,
@@ -222,7 +222,7 @@ def run(
     args: Sequence[object],
     capture_stdout: bool = True,
     capture_stderr: bool = True,
-    input: bytes | None = None,
+    input: bytes | Iterable[bytes] | None = None,
     return_stderr: bool = False,
     env: Mapping[str, str] = MappingProxyType({}),
     tty: bool = False,
@@ -238,6 +238,14 @@ def run(
     captured details on DockerTimeout. It does not guarantee cancellation of
     daemon-side work. Without a selected timeout, wait without a deadline.
 
+    Inside ``observation()`` the call always uses bounded capture, which sends
+    input only when an enclosing scope sets ``max_total_stdin_bytes``. Output is
+    drained while input is uploaded, and the bytes the child's stdin pipe
+    accepted are charged to every enclosing stdin account: a scope cannot be
+    exceeded, an upload ending exactly at the limit succeeds, and one that needs
+    more fails with reason ``total_stdin`` after the child is killed and reaped.
+    The upload's writer thread is joined before the call returns or raises.
+
     Args:
         args: Executable and arguments, optionally retaining a policy carrier as
             the first item. Values are stringified without invoking a shell.
@@ -245,7 +253,12 @@ def run(
             Ignored when tty is true.
         capture_stderr: Capture stderr when true; otherwise inherit output.
             Ignored when tty is true.
-        input: Bytes to send through child stdin; ``None`` inherits stdin.
+        input: Bytes, or an iterable of byte chunks, to send through child
+            stdin; ``None`` inherits stdin and an empty value sends only EOF.
+            Chunks are pulled lazily on a writer thread and never buffered
+            whole. Deadlines and cancellation stop the child but cannot
+            interrupt the iterator's own code, so cleanup waits for a chunk
+            in flight. Inside an observation, input requires a stdin budget.
         return_stderr: Return both decoded streams when true instead of stdout
             alone. Uncaptured streams are represented by empty strings.
         env: Overrides applied after inherited and client environment layers.
@@ -262,7 +275,11 @@ def run(
         each captured stream. Uncaptured streams become empty strings.
 
     Raises:
-        ValueError: If timeout is boolean, nonfinite, zero, or negative.
+        ValueError: If timeout is boolean, nonfinite, zero, or negative; or, inside
+            an observation, if output is uncaptured, tty is set, or input is
+            supplied without a stdin budget.
+        ObservationLimitError: With reason ``total_stdin`` when the input exceeds
+            an enclosing stdin budget.
         OSError: If the executable cannot be launched.
         DockerException: If the command exits unsuccessfully, with a subtype
             selected from captured stderr when available.
@@ -302,9 +319,15 @@ def run(
     _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
     with ExecutionTelemetry(policy.telemetry_observer, "captured") as telemetry:
         if observation is not None:
-            if tty or not capture_stdout or not capture_stderr or input is not None:
+            if (
+                tty
+                or not capture_stdout
+                or not capture_stderr
+                or (input is not None and not observation.stdin_accounts)
+            ):
                 raise ValueError(
-                    "Observation requires captured output and no input or tty"
+                    "Observation requires captured output, no tty, and input only"
+                    " under a stdin budget"
                 )
             from pywhales._bounded_capture import bounded_capture
 
@@ -316,6 +339,7 @@ def run(
                 policy,
                 observation,
                 telemetry=telemetry,
+                input=input,
             )
         elif timeout is None and input is None:
             telemetry.start()

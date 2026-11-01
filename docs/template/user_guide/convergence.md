@@ -86,3 +86,25 @@ The target's `template` and `Failure.cause`, including exception raw attributes,
 may contain confidential service settings, command arguments, and output. Do not
 log or expose them without an appropriate confidentiality policy. The template is
 excluded from target representations and the cause from failure representations.
+
+## Compose restart budgets
+
+For Compose deployments, `capture_compose(client, services, policy=policy,
+timeout=10, max_restarts=0)` freezes the selected containers, config hashes and
+restart budget in a `ComposeTarget`; pass that target to `wait()` with its own
+timeout and polling interval. `max_restarts=None` keeps the existing behavior.
+An enabled budget accepts a nonnegative integer, never a boolean, and validates
+before any CLI launch.
+
+Each selected long-running container must report a nonnegative integer top-level
+`RestartCount` at capture and every observation. Missing or malformed values yield
+cause-free `Failure(reason="malformed")`. A healthy running container above budget
+keeps its service unsettled; a later within-budget observation can clear that
+blocker. Services designated with `completion_services` retain their exit-code
+rules and ignore restart counts. Membership and config hashes must stay fixed,
+and success still requires the final observation recheck.
+
+On expiry, `Deadline.detail.restart_budget_exceeded_containers` counts affected
+services, once per service, from the latest complete cycle. It contains no
+container names, IDs or inspect payloads. Cancellation and timeout stop only the
+local CLI process, without changing Docker state.

@@ -13,9 +13,13 @@ from scripts.fleet_harness.experiment import Comparison, Experiment
 from scripts.fleet_harness.runner import run
 from tests.pywhales.test_fleet_harness import (
     FIXTURES,
+    at,
     duration_manifest,
     duration_plan,
     manifest,
+    overlap_manifest,
+    overlap_plan,
+    overlapped,
     plan,
 )
 from tests.pywhales.test_transport_experiment import semantics
@@ -30,6 +34,86 @@ def invoke(arguments: list[str], tmp_path: Path) -> subprocess.CompletedProcess[
         timeout=20,
         check=False,
     )
+
+
+def test_export_cli_when_simulation_is_reported_without_docker(tmp_path: Path) -> None:
+    simulation = tmp_path / "simulation.json"
+    simulation.write_text(run(manifest(), plan()).model_dump_json())
+    exported = invoke(
+        [
+            "export",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--input",
+            str(simulation),
+        ],
+        tmp_path,
+    )
+    assert exported.returncode == 0
+    result = json.loads(exported.stdout)
+    assert result["provenance"] == "synthetic"
+    assert result["authorization_record"] is None
+    assert all(
+        result[name] is None
+        for name in (
+            "isolation_evidence_ref",
+            "artifact_receipt_ref",
+            "cleanup_receipt_ref",
+        )
+    )
+    assert [s["submission"] for s in result["latency"][0]["samples"]] == [1, 2, 3]
+    result_path = tmp_path / "result.json"
+    result_path.write_text(exported.stdout)
+    contract = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.fleet_contract",
+            "report",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--support",
+            str(FIXTURES.parent.parent / "fleet_contract/fixtures/support-matrix.json"),
+            "--input",
+            str(result_path),
+        ],
+        env={**os.environ, "PATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert contract.returncode == 0, contract.stderr
+    assessed = json.loads(contract.stdout)
+    assert (
+        not assessed["evidence_complete"] and assessed["qualification"] == "unqualified"
+    )
+    assert {"receipts_missing", "authorization_record_mismatch"} <= set(
+        assessed["flags"]
+    )
+
+
+@pytest.mark.parametrize("defect", ["rejected", "non_synthetic", "invalid"])
+def test_export_cli_when_input_is_refused_is_safe(defect: str, tmp_path: Path) -> None:
+    declaration = json.loads(manifest().model_dump_json())
+    simulation = json.loads(run(manifest(), plan()).model_dump_json())
+    if defect == "rejected":
+        simulation.update(status="rejected", reasons=["refused"])
+    elif defect == "non_synthetic":
+        declaration["provenance"] = "operator_declared"
+        declaration["authorization"]["purpose"] = "operator_declared"
+    else:
+        simulation["private-secret"] = "private-secret"
+    manifest_path, report_path = tmp_path / "manifest.json", tmp_path / "report.json"
+    manifest_path.write_text(json.dumps(declaration))
+    report_path.write_text(json.dumps(simulation))
+    output = invoke(
+        ["export", "--manifest", str(manifest_path), "--input", str(report_path)],
+        tmp_path,
+    )
+    assert output.returncode == 2
+    assert json.loads(output.stderr)["errors"]
+    assert "private-secret" not in output.stderr
 
 
 def test_run_cli_when_docker_is_absent_writes_simulated_cleanup_report(
@@ -242,6 +326,156 @@ def test_decision_cli_when_imported_report_is_incoherent_rejects_without_launche
     output = invoke(["decide", "--input", str(path)], tmp_path)
 
     # Then validation rejects before any candidate launch and emits safe errors.
+    assert output.returncode == 2
+    assert json.loads(output.stdout)["candidate_launches"] == 0
+    assert {error["code"] for error in json.loads(output.stderr)["errors"]} == {
+        "invalid"
+    }
+
+
+def scheduled_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a fictional overlapping manifest and plan for the actual CLI."""
+    declaration, recipe = tmp_path / "manifest.json", tmp_path / "plan.json"
+    declaration.write_text(overlap_manifest(2, "operation_count", 3).model_dump_json())
+    recipe.write_text(
+        overlap_plan(
+            at(0.0, 1.0, "create"), at(0.0, 2.0), at(0.5, 1.0)
+        ).model_dump_json()
+    )
+    return declaration, recipe
+
+
+def test_scheduled_run_export_and_report_when_docker_is_absent_stay_unqualified(
+    tmp_path: Path,
+) -> None:
+    # Given fictional overlapping inputs and a PATH that holds no Docker executable.
+    declaration, recipe = scheduled_inputs(tmp_path)
+
+    # When the actual run, export and contract report commands execute in turn.
+    ran = invoke(
+        ["run", "--manifest", str(declaration), "--input", str(recipe)], tmp_path
+    )
+    report = json.loads(ran.stdout)
+    report_path = tmp_path / "report.json"
+    report_path.write_text(ran.stdout)
+    exported = invoke(
+        ["export", "--manifest", str(declaration), "--input", str(report_path)],
+        tmp_path,
+    )
+    result_path = tmp_path / "result.json"
+    result_path.write_text(exported.stdout)
+    contract = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.fleet_contract",
+            "report",
+            "--manifest",
+            str(declaration),
+            "--support",
+            str(FIXTURES.parent.parent / "fleet_contract/fixtures/support-matrix.json"),
+            "--input",
+            str(result_path),
+        ],
+        env={**os.environ, "PATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+    # Then overlap was simulated with zero connections and nothing was qualified.
+    assert ran.returncode == 0 and report["status"] == "completed"
+    assert report["connections"] == 0 and report["simulation"] is True
+    assert report["schedule"]["peaks"] == {"active": 2, "queued": 1}
+    assert [
+        (r["arrival_seconds"], r["admitted_seconds"], r["terminal_seconds"])
+        for r in report["schedule"]["receipts"]
+    ] == [(0.0, 0.0, 1.0), (0.0, 0.0, 2.0), (0.5, 1.0, 2.0)]
+    assert report["provider_calls"] == report["command_count"] + len(
+        report["cleanup"]["attempted"]
+    )
+    assert exported.returncode == 0 and "schedule" not in exported.stdout
+    result = json.loads(exported.stdout)
+    assert (
+        result["provenance"] == "synthetic" and result["authorization_record"] is None
+    )
+    assert result["populations"]["all_submissions"] == 3
+    assert contract.returncode == 0, contract.stderr
+    assessed = json.loads(contract.stdout)
+    assert (
+        not assessed["evidence_complete"] and assessed["qualification"] == "unqualified"
+    )
+    assert {"receipts_missing", "authorization_record_mismatch"} <= set(
+        assessed["flags"]
+    )
+
+
+def test_scheduled_run_cli_when_unapproved_returns_empty_zero_call_receipt(
+    tmp_path: Path,
+) -> None:
+    # Given an overlapping plan that lacks the explicit opt-in.
+    declaration, recipe = scheduled_inputs(tmp_path)
+    raw = json.loads(recipe.read_text())
+    raw["opt_in"] = False
+    recipe.write_text(json.dumps(raw))
+
+    # When the actual CLI runs it.
+    output = invoke(
+        ["run", "--manifest", str(declaration), "--input", str(recipe)], tmp_path
+    )
+
+    # Then declared concurrency grants nothing: a rejected, call-free, empty schedule.
+    report = json.loads(output.stdout)
+    assert output.returncode == 2 and report["status"] == "rejected"
+    assert report["provider_calls"] == report["connections"] == 0
+    assert report["command_count"] == report["submitted"] == 0
+    assert report["schedule"] == {"peaks": {"active": 0, "queued": 0}, "receipts": []}
+
+
+def test_export_cli_when_scheduled_report_is_tampered_is_refused_safely(
+    tmp_path: Path,
+) -> None:
+    # Given a scheduled report whose recorded peaks contradict its receipts.
+    declaration, _ = scheduled_inputs(tmp_path)
+    raw = json.loads(overlapped().model_dump_json())
+    raw["schedule"]["peaks"]["active"] = 1
+    report_path = tmp_path / "tampered.json"
+    report_path.write_text(json.dumps(raw))
+
+    # When the actual export command imports it.
+    output = invoke(
+        ["export", "--manifest", str(declaration), "--input", str(report_path)],
+        tmp_path,
+    )
+
+    # Then nothing is exported and one fixed error names only the schedule field.
+    assert output.returncode == 2 and output.stdout == ""
+    assert json.loads(output.stderr) == {
+        "errors": [{"code": "invalid", "path": "$.schedule"}]
+    }
+
+
+def test_decision_cli_when_scheduled_candidate_is_tampered_rejects_without_launches(
+    tmp_path: Path,
+) -> None:
+    # Given a matched scheduled comparison whose candidate misreports its peaks.
+    result = overlapped()
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    raw["comparison"]["candidate"]["schedule"]["peaks"]["queued"] = 0
+    path = tmp_path / "tampered-experiment.json"
+    path.write_text(json.dumps(raw))
+
+    # When the actual decide command loads it.
+    output = invoke(["decide", "--input", str(path)], tmp_path)
+
+    # Then validation rejects it before any decision with zero candidate launches.
     assert output.returncode == 2
     assert json.loads(output.stdout)["candidate_launches"] == 0
     assert {error["code"] for error in json.loads(output.stderr)["errors"]} == {

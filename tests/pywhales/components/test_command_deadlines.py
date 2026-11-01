@@ -97,6 +97,8 @@ else:
         Path(args[args.index('--iidfile') + 1]).write_text('sha256:built')
     if '--print' in args:
         print('{"target":{"app":{"context":"."}}}', flush=True)
+    elif args[:2] == ['container', 'wait']:
+        print('\\n'.join('0' for name in args[2:]), flush=True)
     elif 'logs' in args:
         os.write(1, b'app | first\\nlast')
     elif 'events' in args:
@@ -352,6 +354,136 @@ def subscribe(
             assert_never(unreachable)
 
 
+type BlockingCall = Literal[
+    "build",
+    "build_stream",
+    "exec",
+    "exec_tty",
+    "exec_detach",
+    "wait",
+    "wait_many",
+    "root_wait",
+]
+
+
+def blocking_call(
+    client: DockerClient, operation: BlockingCall, timeout: float | None
+) -> object:
+    match operation:
+        case "build" | "build_stream":
+            return client.compose.build(
+                stream_logs=operation == "build_stream", timeout=timeout
+            )
+        case "exec" | "exec_tty" | "exec_detach":
+            return client.compose.execute(
+                "app",
+                ["cmd"],
+                tty=operation == "exec_tty",
+                detach=operation == "exec_detach",
+                timeout=timeout,
+            )
+        case "wait":
+            return client.container.wait("app", timeout=timeout)
+        case "wait_many":
+            return client.container.wait(["app", "other"], timeout=timeout)
+        case "root_wait":
+            return client.wait("app", timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "build",
+        "build_stream",
+        "exec",
+        "exec_tty",
+        "exec_detach",
+        "wait",
+        "wait_many",
+        "root_wait",
+    ],
+)
+@pytest.mark.parametrize("inherited", [False, True])
+def test_blocking_command_deadline_kills_and_reaps(
+    client: DockerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: BlockingCall,
+    inherited: bool,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    client.client_config.default_timeout = 0.4 if inherited else 10
+    result = None
+    with pytest.raises(DockerTimeout):
+        result = blocking_call(client, operation, None if inherited else 0.4)
+        if isinstance(result, ProcessStream):
+            with result:
+                list(result)
+    if isinstance(result, ProcessStream):
+        assert_released(result)
+    for line in (tmp_path / "pids.jsonl").read_text().splitlines():
+        pid, _ = json.loads(line)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "build",
+        "build_stream",
+        "exec",
+        "exec_tty",
+        "exec_detach",
+        "wait",
+        "wait_many",
+        "root_wait",
+    ],
+)
+@pytest.mark.parametrize("timeout", [0, -1, True, False, float("inf"), float("nan")])
+def test_blocking_invalid_timeout_precedes_lookup(
+    operation: BlockingCall, timeout: float
+) -> None:
+    client = DockerClient(client_call=["missing-executable"])
+    with pytest.raises(ValueError):
+        blocking_call(client, operation, timeout)
+
+
+@pytest.mark.parametrize("timeout", [0, True, float("nan")])
+def test_empty_blocking_calls_validate_timeout(timeout: float) -> None:
+    client = DockerClient(client_call=["missing-executable"])
+    with pytest.raises(ValueError):
+        client.compose.build([], timeout=timeout)
+    with pytest.raises(ValueError):
+        client.wait([], timeout=timeout)
+
+
+def test_empty_blocking_calls_are_inert() -> None:
+    client = DockerClient(client_call=["missing-executable"])
+    assert client.compose.build([], timeout=1) is None
+    assert client.wait([], timeout=1) == []
+
+
+@pytest.mark.parametrize(
+    "operation,expected",
+    [
+        ("build", None),
+        ("exec", "container-id"),
+        ("exec_detach", None),
+        ("exec_tty", None),
+        ("wait", 0),
+        ("wait_many", [0, 0]),
+        ("root_wait", 0),
+    ],
+)
+def test_blocking_success_shapes(
+    client: DockerClient, operation: BlockingCall, expected: object
+) -> None:
+    assert blocking_call(client, operation, 5) == expected
+
+
 def assert_released(raw: ProcessStream) -> None:
     """Check process completion, watchdog and reader shutdown, and output closure."""
     assert raw._process.returncode is not None
@@ -369,18 +501,35 @@ def assert_released(raw: ProcessStream) -> None:
     "timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan"), True, False]
 )
 def test_invalid_subscription_timeout_precedes_selected_launch(
-    client: DockerClient, tmp_path: Path, operation: Subscription, timeout: float
+    client: DockerClient,
+    tmp_path: Path,
+    mocker: MockerFixture,
+    operation: Subscription,
+    timeout: float,
 ) -> None:
+    container_inspect = mocker.spy(client.container, "inspect")
+    service_inspect = mocker.spy(client.service, "inspect")
     with pytest.raises(ValueError):
         subscribe(client, operation, timeout=timeout)
 
+    container_inspect.assert_not_called()
+    service_inspect.assert_not_called()
     record = tmp_path / "launches.jsonl"
     launches = (
         [json.loads(line) for line in record.read_text().splitlines()]
         if record.exists()
         else []
     )
-    assert all(args[1] == "inspect" for args in launches)
+    assert launches == []
+
+
+@pytest.mark.parametrize("operation", (*STREAM_SUBSCRIPTIONS, "handle_logs"))
+def test_invalid_subscription_timeout_precedes_executable_lookup(
+    operation: Subscription,
+) -> None:
+    client = DockerClient(client_call=["missing-executable"])
+    with pytest.raises(ValueError):
+        subscribe(client, operation, timeout=0)
 
 
 @pytest.mark.parametrize("operation", LOG_SUBSCRIPTIONS)

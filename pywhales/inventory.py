@@ -100,7 +100,11 @@ class InspectionPolicy:
 
     ``max_total_stream_bytes`` caps the stdout and stderr bytes that streams and
     archive transfers started inside the scope read; captured output counts
-    against ``max_total_response_bytes`` instead. ``None`` leaves a total unset.
+    against ``max_total_response_bytes`` instead. ``max_total_stdin_bytes`` caps
+    the bytes that captured runs and archive uploads started inside the scope
+    write to child stdin, counting only bytes the local pipe accepted; it is
+    independent of both output totals, and a captured ``run()`` may send input
+    only while a scope sets it. ``None`` leaves a total unset.
     """
 
     max_references: int
@@ -109,6 +113,7 @@ class InspectionPolicy:
     max_total_references: int | None = None
     max_total_response_bytes: int | None = None
     max_total_stream_bytes: int | None = None
+    max_total_stdin_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Reject non-integer, boolean, and nonpositive limits."""
@@ -123,6 +128,7 @@ class InspectionPolicy:
             self.max_total_references,
             self.max_total_response_bytes,
             self.max_total_stream_bytes,
+            self.max_total_stdin_bytes,
         ):
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("Inspection limits must be positive integers")

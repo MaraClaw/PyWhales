@@ -2,10 +2,19 @@
 
 from typing import Literal, Self, assert_never
 
-from pydantic import model_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from .common import Amount, Contract, Count, Digest, Nonempty, SchemaVersion, Token
+from .common import (
+    Amount,
+    Contract,
+    Count,
+    Digest,
+    Nonempty,
+    PositiveCount,
+    SchemaVersion,
+    Token,
+)
 from .support import Versions
 from .workload import Boundary, Resource
 
@@ -72,8 +81,9 @@ class Populations(Contract):
 
 
 class Sample(Contract):
-    """One outcome with optional seconds, explicit exclusion and fixed reason code."""
+    """One submission's outcome with optional seconds, exclusion and reason code."""
 
+    submission: PositiveCount
     outcome: Outcome
     seconds: Amount | None
     excluded: bool
@@ -108,6 +118,13 @@ class LatencyEvidence(Contract):
     population: Population
     samples: tuple[Sample, ...]
 
+    @model_validator(mode="after")
+    def unique_submissions(self) -> Self:
+        """Reject two samples for one submission within a boundary."""
+        if len({sample.submission for sample in self.samples}) != len(self.samples):
+            raise PydanticCustomError("sample_link", "sample_link")
+        return self
+
 
 class HighWater(Contract):
     """An unavailable high-water observation remains null, never zero-filled."""
@@ -141,6 +158,21 @@ class RunResult(Contract):
     artifact_receipt_ref: Token | None
     cleanup_receipt_ref: Token | None
     residual_assets: tuple[Token, ...]
+
+    @field_validator("latency")
+    @classmethod
+    def linked(
+        cls, value: tuple[LatencyEvidence, ...], info: ValidationInfo
+    ) -> tuple[LatencyEvidence, ...]:
+        """Reject sample links beyond the declared submission population."""
+        populations = info.data.get("populations")
+        if isinstance(populations, Populations) and any(
+            sample.submission > populations.all_submissions
+            for item in value
+            for sample in item.samples
+        ):
+            raise PydanticCustomError("sample_link", "sample_link")
+        return value
 
     @model_validator(mode="after")
     def coherent(self) -> Self:

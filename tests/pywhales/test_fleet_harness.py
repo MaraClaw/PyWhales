@@ -4,15 +4,21 @@ import json
 import socket
 import subprocess
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, assert_never, override
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
-from scripts.fleet_harness.fake import FakeDriver
-from scripts.fleet_harness.models import Plan, RunnableManifest
-from scripts.fleet_harness.records import RunReport
+from scripts.fleet_harness.fake import FakeDriver, Launch, Operation
+from scripts.fleet_harness.models import Plan, RunnableManifest, Step
+from scripts.fleet_harness.records import (
+    Cleanup,
+    Observation,
+    Peaks,
+    RunReport,
+    Schedule,
+)
 from scripts.fleet_harness.runner import run
 
 FIXTURES: Final = Path(__file__).resolve().parents[2] / "scripts/fleet_harness/fixtures"
@@ -42,6 +48,120 @@ def duration_plan(local_seconds: float = 10.0, repetitions: int = 3) -> Plan:
     raw["steps"][0].update(local_seconds=local_seconds, readiness_seconds=None)
     raw.update(operation_timeout_seconds=30.0, repetitions=repetitions)
     return Plan.model_validate_json(json.dumps(raw))
+
+
+def overlap_manifest(
+    limit: int = 2,
+    termination: str = "duration",
+    operations: int | None = None,
+    error_fraction: float = 0.5,
+    assets: int = 2,
+) -> RunnableManifest:
+    """Return a validated manifest that admits `limit` submissions at once."""
+    raw = json.loads(manifest().model_dump_json())
+    raw["workload"].update(
+        inflight_operations=max(2, limit),
+        concurrent_submissions=limit,
+        termination=termination,
+        termination_operations=operations,
+        operation_mix=[
+            {"action": action, "fraction": 0.25, "concurrency": 1}
+            for action in ("create", "inspect", "start", "remove")
+        ],
+    )
+    raw["authorization"].update(
+        allowed_actions=["create", "inspect", "start", "remove", "cleanup"],
+        maximum_created_assets=assets,
+    )
+    raw["ownership"]["maximum_created_assets"] = assets
+    raw["budgets"]["early_stop_error_fraction"] = error_fraction
+    return RunnableManifest.model_validate_json(json.dumps(raw))
+
+
+def at(
+    arrival: float, local: float = 1.0, action: str = "inspect", **step: object
+) -> dict[str, object]:
+    """Return one scripted step that arrives at `arrival` on the fake clock."""
+    asset = (
+        {"asset": "example-container"}
+        if action in {"create", "remove", "start"}
+        else {}
+    )
+    return {
+        "scenario": "load",
+        "endpoint": "example-local",
+        "action": action,
+        "arrival_seconds": arrival,
+        "local_seconds": local,
+        "readiness_seconds": None,
+        **asset,
+        **step,
+    }
+
+
+def overlap_plan(*steps: dict[str, object], timeout: float = 10.0) -> Plan:
+    """Return a validated one-repetition plan whose steps all carry offsets."""
+    raw = json.loads(plan().model_dump_json())
+    raw.update(
+        steps=list(steps),
+        repetitions=1,
+        operation_timeout_seconds=timeout,
+        maximum_samples=4 * len(steps),
+    )
+    return Plan.model_validate_json(json.dumps(raw))
+
+
+def schedule(report: RunReport) -> Schedule:
+    """Return the receipts of a report that must have run overlapping."""
+    assert report.schedule is not None
+    return report.schedule
+
+
+def receipts(report: RunReport) -> list[tuple[float, float | None, float, str]]:
+    """Return (arrival, admission, terminal, outcome) of each submission in order."""
+    return [
+        (r.arrival_seconds, r.admitted_seconds, r.terminal_seconds, r.outcome)
+        for r in schedule(report).receipts
+    ]
+
+
+def spied() -> tuple[type[FakeDriver], list[tuple[str, int, float]]]:
+    """Return a driver type that logs each launch and settlement, and that log."""
+    log: list[tuple[str, int, float]] = []
+
+    class Spy(FakeDriver):
+        @override
+        def begin(self, step: Step, launch: Launch) -> Operation:
+            log.append(("begin", launch.submission, self.now))
+            return super().begin(step, launch)
+
+        @override
+        def finish(self, operation: Operation) -> tuple[Observation, ...]:
+            log.append(("finish", operation.launch.submission, self.now))
+            return super().finish(operation)
+
+    return Spy, log
+
+
+def overlapped() -> RunReport:
+    """Return a completed scheduled run with overlap and one queued waiter."""
+    return run(
+        overlap_manifest(2, "operation_count", 3),
+        overlap_plan(at(0.0, 1.0, readiness_seconds=1.0), at(0.5, 3.0), at(1.0, 1.0)),
+    )
+
+
+def stopped() -> RunReport:
+    """Return a scheduled run stopped by a failure while one creation was active."""
+    return run(
+        overlap_manifest(2),
+        overlap_plan(
+            at(0.0, 1.0, outcome="failed"),
+            at(0.0, 3.0, "create"),
+            at(0.5, 1.0),
+            at(2.0, 1.0),
+        ),
+    )
 
 
 def test_authorized_simulation_when_external_contact_is_denied() -> None:
@@ -432,3 +552,488 @@ def test_report_rejects_when_status_disagrees_with_reasons(status: str) -> None:
 
     # Then the fixed status error identifies the contradiction.
     assert {error["type"] for error in caught.value.errors()} == {"status_reasons"}
+
+
+@pytest.mark.parametrize(
+    ("defect", "code"),
+    [
+        ("partial", "arrival_incomplete"),
+        ("decreasing", "arrival_order"),
+        ("repetitions", "arrival_repetitions"),
+        ("queue", "scheduled_queue"),
+        ("negative", "greater_than_equal"),
+        ("infinite", "finite_number"),
+    ],
+)
+def test_plan_rejects_when_arrival_offsets_are_inconsistent(
+    defect: Literal[
+        "partial", "decreasing", "repetitions", "queue", "negative", "infinite"
+    ],
+    code: str,
+) -> None:
+    # Given a valid scheduled plan with one inconsistent offset declaration.
+    raw = json.loads(overlap_plan(at(0.0), at(1.0)).model_dump_json())
+    match defect:
+        case "partial":
+            raw["steps"][1]["arrival_seconds"] = None
+        case "decreasing":
+            raw["steps"][0]["arrival_seconds"] = 2.0
+        case "repetitions":
+            raw.update(repetitions=2, maximum_samples=16)
+        case "queue":
+            raw["steps"][0]["queue_seconds"] = 1.0
+        case "negative":
+            raw["steps"][0]["arrival_seconds"] = -1.0
+        case "infinite":
+            raw["steps"][0]["arrival_seconds"] = float("inf")
+        case unreachable:
+            assert_never(unreachable)
+
+    # When the plan crosses the validation boundary.
+    with pytest.raises(ValidationError) as caught:
+        Plan.model_validate_json(json.dumps(raw))
+
+    # Then a fixed error names the contradiction and nothing else.
+    assert {error["type"] for error in caught.value.errors()} == {code}
+
+
+def test_scheduled_simulation_when_external_contact_is_denied() -> None:
+    # Given overlapping work that creates, inspects and queues behind a limit of two.
+    recipe = overlap_plan(at(0.0, 1.0, "create"), at(0.0, 2.0), at(0.5, 1.0))
+
+    # When it runs with every process and socket entry point refused.
+    with (
+        patch.object(subprocess, "Popen", side_effect=AssertionError("process")),
+        patch.object(socket, "socket", side_effect=AssertionError("socket")),
+        patch.object(socket, "getaddrinfo", side_effect=AssertionError("dns")),
+    ):
+        report = run(overlap_manifest(2, "operation_count", 3), recipe)
+
+    # Then it stays a fake, unqualified simulation with exact call accounting.
+    assert report.status == "completed" and report.submitted == 3
+    assert report.connections == 0 and report.simulation
+    assert report.qualification == "unqualified"
+    assert report.provider_calls == report.command_count + len(report.cleanup.attempted)
+    assert report.environment.platform.endpoints[0].connection_ref == "withheld"
+    assert report.cleanup.removed == report.ledger and not report.cleanup.residual
+
+
+def test_simultaneous_arrivals_when_limit_is_one_wait_in_fifo_order() -> None:
+    # Given three submissions arriving together at a global limit of one.
+    recipe = overlap_plan(at(0.0), at(0.0), at(0.0))
+
+    # When the scheduled plan runs.
+    report = run(overlap_manifest(1, "operation_count", 3), recipe)
+
+    # Then each waits for its predecessor in plan order and the peaks show the queue.
+    assert report.status == "completed" and report.reasons == ()
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "succeeded"),
+        (0.0, 1.0, 2.0, "succeeded"),
+        (0.0, 2.0, 3.0, "succeeded"),
+    ]
+    assert [s.seconds for s in report.samples if s.boundary == "queue_wait"] == [
+        0.0,
+        1.0,
+        2.0,
+    ]
+    assert schedule(report).peaks == Peaks(active=1, queued=2)
+    assert report.provider_calls == report.command_count == 3
+
+
+def test_overlap_when_limit_allows_starts_next_operation_before_first_settles() -> None:
+    # Given a limit of two, a two-phase first operation and a third that must wait.
+    driver, log = spied()
+    recipe = overlap_plan(
+        at(0.0, 1.0, readiness_seconds=1.0), at(0.5, 3.0), at(1.0, 1.0)
+    )
+
+    # When the plan runs through a driver that logs launches and settlements.
+    with patch("scripts.fleet_harness.runner.FakeDriver", driver):
+        report = run(overlap_manifest(2), recipe)
+
+    # Then events follow the fake clock: the second launches before the first settles.
+    assert log == [
+        ("begin", 1, 0.0),
+        ("begin", 2, 0.5),
+        ("finish", 1, 2.0),
+        ("begin", 3, 2.0),
+        ("finish", 3, 3.0),
+        ("finish", 2, 3.5),
+    ]
+    assert receipts(report) == [
+        (0.0, 0.0, 2.0, "succeeded"),
+        (0.5, 0.5, 3.5, "succeeded"),
+        (1.0, 2.0, 3.0, "succeeded"),
+    ]
+    assert schedule(report).peaks == Peaks(active=2, queued=1)
+    assert [
+        (s.boundary, s.started_at_seconds, s.ended_at_seconds)
+        for s in report.samples
+        if s.submission == 1
+    ] == [("queue_wait", 0.0, 0.0), ("selected_cli", 0.0, 1.0), ("readiness", 0.0, 2.0)]
+    assert [s.seconds for s in report.samples if s.boundary == "queue_wait"] == [
+        0.0,
+        0.0,
+        1.0,
+    ]
+    assert report.provider_calls == report.command_count == 3
+
+
+@pytest.mark.parametrize(
+    ("fraction", "outcome", "reasons"),
+    [(0.5, "cancelled", ("failure_limit",)), (1.0, "timed_out", ())],
+)
+def test_queue_expiry_when_blocker_settles_at_the_same_instant(
+    fraction: float, outcome: str, reasons: tuple[str, ...]
+) -> None:
+    # Given a queued creation whose arrival-based deadline equals its blocker's,
+    # and a blocker that started late enough to run out of its own deadline.
+    recipe = overlap_plan(
+        at(0.0, 2.0), at(0.0, 1.5), at(0.0, 1.0, "create"), timeout=3.0
+    )
+
+    # When the blocker times out at the very instant the queued submission expires.
+    report = run(overlap_manifest(1, "operation_count", 3, fraction), recipe)
+
+    # Then the slot is not handed over: the waiter ends unlaunched, owning nothing.
+    assert report.reasons == reasons
+    assert receipts(report) == [
+        (0.0, 0.0, 2.0, "succeeded"),
+        (0.0, 2.0, 3.0, "timed_out"),
+        (0.0, None, 3.0, outcome),
+    ]
+    assert [s.boundary for s in report.samples if s.submission == 3] == ["queue_wait"]
+    assert [s.seconds for s in report.samples if s.submission == 2] == [2.0, 1.0, None]
+    assert report.command_count == report.provider_calls == 2
+    assert report.ledger == () and report.cleanup.attempted == ()
+    assert report.outcomes.timed_out == (outcome == "timed_out") + 1
+    assert report.outcomes.cancelled == (outcome == "cancelled")
+
+
+def test_lifecycle_when_remove_and_start_overlap_follows_chronological_state() -> None:
+    # Given a slow removal of the one created asset overlapped by two later starts.
+    recipe = overlap_plan(
+        at(0.0, 1.0, "create"),
+        at(2.0, 2.0, "remove"),
+        at(3.0, 0.5, "start"),
+        at(4.0, 0.5, "start"),
+    )
+
+    # When the plan runs with room for every submission at once.
+    report = run(overlap_manifest(3, "operation_count", 4), recipe)
+
+    # Then the first start sees the asset while the removal is in flight,
+    # and the second runs after the removal committed at its own arrival.
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "succeeded"),
+        (2.0, 2.0, 4.0, "succeeded"),
+        (3.0, 3.0, 3.5, "succeeded"),
+        (4.0, 4.0, 4.5, "failed"),
+    ]
+    assert report.status == "completed" and report.reasons == ()
+    assert schedule(report).peaks == Peaks(active=2, queued=0)
+    assert [item.identity for item in report.ledger] == ["fake-1"]
+    assert report.cleanup.attempted == () and not report.cleanup.residual
+    assert report.provider_calls == report.command_count == 4
+
+
+def test_early_stop_when_terminal_failure_cancels_queue_and_drains_active() -> None:
+    # Given a fast failure and a slow creation, then a waiter and a later arrival.
+    # When the failure stops the load while the creation is still running.
+    report = stopped()
+
+    # Then the waiter is cancelled, the creation drains to its end, and the
+    # arrival after the stop never happens.
+    assert report.status == "stopped" and report.reasons == ("failure_limit",)
+    assert report.submitted == 3
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "failed"),
+        (0.0, 0.0, 3.0, "succeeded"),
+        (0.5, None, 1.0, "cancelled"),
+    ]
+    assert schedule(report).peaks == Peaks(active=2, queued=1)
+    assert report.load_elapsed_seconds == 3.0
+    assert report.elapsed_seconds == pytest.approx(3.1)
+    assert [item.identity for item in report.ledger] == ["fake-2"]
+    assert report.cleanup.removed == report.ledger
+    assert report.command_count == 2 and report.provider_calls == 3
+    assert report.outcomes.cancelled == 1 and report.outcomes.failed == 1
+
+
+def test_deadline_when_arrivals_reach_load_end_excludes_them() -> None:
+    # Given arrivals before, just before, exactly at, and after the 20-second end.
+    recipe = overlap_plan(at(0.0), at(19.5, 2.0), at(20.0), at(25.0))
+
+    # When the plan runs.
+    report = run(overlap_manifest(2), recipe)
+
+    # Then the last two are never submitted and the second is cut at the end.
+    assert report.status == "completed" and report.reasons == ()
+    assert report.submitted == 2
+    assert receipts(report) == [
+        (0.0, 0.0, 1.0, "succeeded"),
+        (19.5, 19.5, 20.0, "timed_out"),
+    ]
+    assert report.load_elapsed_seconds == 20.0
+
+
+def test_operation_count_when_target_is_reached_excludes_later_steps() -> None:
+    # Given three scripted arrivals and a termination target of two operations.
+    recipe = overlap_plan(at(0.0), at(1.0), at(2.0))
+
+    # When the plan runs.
+    report = run(overlap_manifest(2, "operation_count", 2), recipe)
+
+    # Then the third step never arrives.
+    assert report.status == "completed" and report.submitted == 2
+    assert [item.arrival_seconds for item in schedule(report).receipts] == [0.0, 1.0]
+    assert report.load_elapsed_seconds == 2.0
+
+
+def test_zero_duration_when_operations_share_an_instant_settles_peaks() -> None:
+    # Given instantaneous operations arriving together at a limit of one.
+    recipe = overlap_plan(at(0.0, 0.0), at(0.0, 0.0), at(0.0, 0.0))
+
+    # When the plan runs.
+    report = run(overlap_manifest(1, "operation_count", 3), recipe)
+
+    # Then nothing stays queued or active once the instant settles.
+    assert receipts(report) == [(0.0, 0.0, 0.0, "succeeded")] * 3
+    assert schedule(report).peaks == Peaks(active=0, queued=0)
+    assert report.status == "completed"
+
+
+def test_asset_cap_when_admission_would_exceed_it_cancels_the_waiter() -> None:
+    # Given three creations arriving together against a cap of two assets.
+    recipe = overlap_plan(
+        at(0.0, 2.0, "create"), at(0.0, 2.0, "create"), at(0.0, 2.0, "create")
+    )
+
+    # When the third reaches admission.
+    report = run(overlap_manifest(3, assets=2), recipe)
+
+    # Then the stop cancels it without an asset and the two active ones drain.
+    assert report.status == "stopped" and report.reasons == ("asset_limit",)
+    assert receipts(report) == [
+        (0.0, 0.0, 2.0, "succeeded"),
+        (0.0, 0.0, 2.0, "succeeded"),
+        (0.0, None, 0.0, "cancelled"),
+    ]
+    assert [item.identity for item in report.ledger] == ["fake-1", "fake-2"]
+    assert report.cleanup.attempted == tuple(reversed(report.ledger))
+    assert report.command_count == 2 and report.provider_calls == 4
+
+
+@pytest.mark.parametrize("change", ["opt_in", "provider", "endpoint", "asset"])
+def test_scheduled_plan_when_authority_is_missing_is_rejected_before_driver(
+    change: str,
+) -> None:
+    # Given a scheduled plan under a manifest whose limit permits overlap.
+    recipe = overlap_plan(at(0.0, 1.0, "create"), at(0.0))
+    match change:
+        case "opt_in":
+            recipe = recipe.model_copy(update={"opt_in": False})
+        case "provider":
+            recipe = recipe.model_copy(update={"provider": "real"})
+        case "endpoint":
+            recipe = recipe.model_copy(
+                update={
+                    "steps": (
+                        recipe.steps[0].model_copy(update={"endpoint": "not-allowed"}),
+                        recipe.steps[1],
+                    )
+                }
+            )
+        case "asset":
+            recipe = recipe.model_copy(
+                update={
+                    "steps": (
+                        recipe.steps[0].model_copy(
+                            update={"asset": "example-rollback"}
+                        ),
+                        recipe.steps[1],
+                    )
+                }
+            )
+
+    # When it is run with driver and scheduler construction forbidden.
+    with (
+        patch(
+            "scripts.fleet_harness.runner.FakeDriver",
+            side_effect=AssertionError("preflight called adapter"),
+        ),
+        patch(
+            "scripts.fleet_harness.runner.Simulation",
+            side_effect=AssertionError("preflight scheduled"),
+        ),
+    ):
+        report = run(overlap_manifest(2), recipe)
+
+    # Then declared concurrency grants nothing and an empty receipt set remains.
+    assert report.status == "rejected" and report.reasons
+    assert report.provider_calls == report.command_count == report.submitted == 0
+    assert report.cleanup.attempted == report.ledger == ()
+    assert report.schedule == Schedule(peaks=Peaks(active=0, queued=0), receipts=())
+
+
+def test_failure_when_scheduled_operation_raises_still_runs_exact_cleanup() -> None:
+    # Given two creations in flight and a driver whose first settlement raises.
+    cleaned: list[Cleanup] = []
+
+    class Failing(FakeDriver):
+        @override
+        def finish(self, operation: Operation) -> tuple[Observation, ...]:
+            raise RuntimeError(f"injected {operation.launch.submission}")
+
+        @override
+        def cleanup(self, plan: Plan, seconds: float) -> Cleanup:
+            cleaned.append(result := super().cleanup(plan, seconds))
+            return result
+
+    recipe = overlap_plan(at(0.0, 1.0, "create"), at(0.5, 3.0, "create"))
+
+    # When the exception escapes the load loop.
+    with (
+        patch("scripts.fleet_harness.runner.FakeDriver", Failing),
+        pytest.raises(RuntimeError, match="injected 1"),
+    ):
+        run(overlap_manifest(2), recipe)
+
+    # Then every acquired identity is still removed once, newest first.
+    assert len(cleaned) == 1
+    assert [item.identity for item in cleaned[0].attempted] == ["fake-2", "fake-1"]
+    assert cleaned[0].removed == cleaned[0].attempted and not cleaned[0].residual
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_cleanup_failure_when_scheduled_run_ends_reports_exact_residual(
+    timeout: bool,
+) -> None:
+    # Given an otherwise clean overlapping run whose cleanup fails or runs out of time.
+    recipe = overlap_plan(at(0.0, 1.0, "create"), at(0.0)).model_copy(
+        update={"cleanup_seconds_per_asset": 100.0}
+        if timeout
+        else {"cleanup_fail_assets": ("example-container",)}
+    )
+
+    # When it runs.
+    report = run(overlap_manifest(2, "operation_count", 2), recipe)
+
+    # Then residuals, call accounting and receipts all stay visible.
+    assert report.status == "stopped" and report.reasons == ("cleanup_residual",)
+    assert report.cleanup.residual == report.ledger == report.cleanup.attempted
+    assert report.cleanup.timed_out is timeout
+    assert report.provider_calls == report.command_count + len(report.cleanup.attempted)
+    assert {item[3] for item in receipts(report)} == {"succeeded"}
+    assert RunReport.model_validate_json(report.model_dump_json()) == report
+
+
+def test_report_when_scheduled_round_trips_and_old_sequential_json_imports() -> None:
+    # Given a scheduled report and a sequential one in the pre-schedule JSON shape.
+    scheduled = overlapped()
+    old = json.loads(run(manifest(), plan()).model_dump_json())
+    del old["schedule"]
+    for step in old["steps"]:
+        del step["arrival_seconds"]
+
+    # When both cross the validation boundary.
+    imported = RunReport.model_validate_json(json.dumps(old))
+
+    # Then the schedule survives exactly and the old report is simply sequential.
+    assert RunReport.model_validate_json(scheduled.model_dump_json()) == scheduled
+    assert imported.schedule is None
+    assert all(step.arrival_seconds is None for step in imported.steps)
+
+
+@pytest.mark.parametrize(
+    ("defect", "code"),
+    [
+        ("swap", "schedule_order"),
+        ("fifo", "schedule_order"),
+        ("peaks", "schedule_peaks"),
+        ("limit", "schedule_concurrency"),
+        ("sample_time", "schedule_times"),
+        ("sample_order", "schedule_times"),
+        ("deadline", "schedule_times"),
+        ("window", "schedule_times"),
+        ("outcome", "schedule_times"),
+        ("offset", "schedule_binding"),
+        ("repetitions", "schedule_binding"),
+        ("removed", "schedule_binding"),
+        ("cancelled", "schedule_binding"),
+        ("sequential", "schedule_binding"),
+    ],
+)
+def test_report_rejects_when_scheduled_import_is_contradictory(
+    defect: Literal[
+        "swap",
+        "fifo",
+        "peaks",
+        "limit",
+        "sample_time",
+        "sample_order",
+        "deadline",
+        "window",
+        "outcome",
+        "offset",
+        "repetitions",
+        "removed",
+        "cancelled",
+        "sequential",
+    ],
+    code: str,
+) -> None:
+    # Given the JSON form of a sound overlapping report and one contradiction.
+    raw = json.loads(overlapped().model_dump_json())
+    rows = raw["schedule"]["receipts"]
+    match defect:
+        case "swap":
+            rows[0], rows[1] = rows[1], rows[0]
+        case "fifo":
+            rows[1]["admitted_seconds"] = 2.5
+        case "peaks":
+            raw["schedule"]["peaks"]["active"] = 1
+        case "limit":
+            raw["workload"]["concurrent_submissions"] = 1
+        case "sample_time":
+            sample = next(
+                s
+                for s in raw["samples"]
+                if s["submission"] == 3 and s["boundary"] == "selected_cli"
+            )
+            sample["started_at_seconds"] = 2.5
+        case "sample_order":
+            first = next(
+                i
+                for i, s in enumerate(raw["samples"])
+                if s["submission"] == 1 and s["boundary"] == "selected_cli"
+            )
+            raw["samples"][first : first + 2] = raw["samples"][first : first + 2][::-1]
+        case "deadline":
+            raw["operation_timeout_seconds"] = 1.0
+        case "window":
+            raw["workload"]["duration_seconds"] = 1.0
+        case "outcome":
+            rows[0]["outcome"] = "failed"
+        case "offset":
+            raw["steps"][1]["arrival_seconds"] = 0.6
+        case "repetitions":
+            raw["repetitions"] = 2
+        case "removed":
+            raw["schedule"] = None
+        case "cancelled":
+            raw = json.loads(stopped().model_dump_json())
+            raw.update(status="completed", reasons=[])
+        case "sequential":
+            raw = json.loads(run(manifest(), plan()).model_dump_json())
+            raw["schedule"] = {"peaks": {"active": 0, "queued": 0}, "receipts": []}
+        case unreachable:
+            assert_never(unreachable)
+
+    # When the report crosses the validation boundary.
+    with pytest.raises(ValidationError) as caught:
+        RunReport.model_validate_json(json.dumps(raw))
+
+    # Then one fixed code names the first contradiction.
+    assert {error["type"] for error in caught.value.errors()} == {code}

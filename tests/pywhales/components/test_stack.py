@@ -13,24 +13,36 @@ from pywhales.utils import PROJECT_ROOT
 
 
 @pytest.fixture
-def stack(docker_client: DockerClient, swarm_mode: None) -> Generator[Stack]:
+def stack(
+    docker_client: DockerClient, swarm_mode: None, tmp_path: Path
+) -> Generator[Stack]:
     """Deploy the fixed some_stack project inside the fixture-owned Swarm.
 
-    Requires a disposable daemon and its Swarm setup. Normal teardown removes
-    the stack and waits before the surrounding Swarm fixture force-leaves.
+    Requires a disposable daemon and its Swarm setup. Use small multi-platform
+    services and let the scale CLI wait for convergence before listing tasks.
 
     Yields:
-        The deployed stack handle between setup and removal delays.
+        The converged stack handle, removed during teardown even on failure.
     """
-    time.sleep(1)
-    some_stack = docker_client.stack.deploy(
-        "some_stack",
-        [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
+    compose_file = tmp_path / "stack.yml"
+    compose_file.write_text(
+        "services:\n"
+        + "".join(
+            f"  {name}:\n    image: busybox:1.37.0\n    command: [sleep, '3600']\n"
+            for name in ("app", "db", "influxdb", "agent")
+        )
     )
-    time.sleep(1)
-    yield some_stack
-    some_stack.remove()
-    time.sleep(1)
+    docker_client.image.pull("busybox:1.37.0")
+    some_stack = docker_client.stack.deploy(
+        "some_stack", [compose_file], resolve_image="never"
+    )
+    try:
+        docker_client.service.scale(
+            dict.fromkeys(some_stack.services(), 1), detach=False, timeout=60
+        )
+        yield some_stack
+    finally:
+        some_stack.remove()
 
 
 @pytest.mark.usefixtures("stack")
@@ -41,10 +53,21 @@ def test_services_inspect(docker_client: DockerClient) -> None:
     assert "name='some_stack'" in repr(docker_client.stack.list())
 
 
-@pytest.mark.usefixtures("stack")
-def test_remove_empty_stack_list(docker_client: DockerClient) -> None:
-    docker_client.stack.remove([])
-    assert docker_client.stack.list() != []
+@pytest.mark.parametrize(
+    "make_empty",
+    [
+        pytest.param(list, id="list"),
+        pytest.param(tuple, id="tuple"),
+        pytest.param(lambda: (item for item in ()), id="generator"),
+    ],
+)
+def test_remove_empty_stack_list(make_empty: Callable[[], Iterable[str]]) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.stack.remove(make_empty())
 
 
 def test_stack_ps_and_services(docker_client: DockerClient, stack: Stack) -> None:
@@ -61,6 +84,8 @@ def test_stack_ps_and_services(docker_client: DockerClient, stack: Stack) -> Non
     assert len(stack_tasks) > 0
     for task in stack_tasks:
         assert task.desired_state == "running"
+        assert task.status is not None
+        assert task.status.state == "running"
 
 
 @pytest.mark.usefixtures("swarm_mode")
@@ -150,28 +175,11 @@ def test_services_not_swarm_manager(docker_client: DockerClient) -> None:
     assert "not a swarm manager" in e.value.stderr.lower()
 
 
-EMPTY_SELECTIONS = [
-    pytest.param(list, id="list"),
-    pytest.param(tuple, id="tuple"),
-    pytest.param(lambda: (item for item in ()), id="generator"),
-]
 SINGLE_SELECTIONS = [
     pytest.param(lambda: "alpha", id="str"),
     pytest.param(lambda: ["alpha"], id="list"),
     pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
 ]
-
-
-@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
-def test_stack_remove_empty_selection_skips_cli(
-    make_empty: Callable[[], Iterable[str]],
-) -> None:
-    client = DockerClient(client_call=["not-installed"])
-    with (
-        patch("shutil.which", side_effect=AssertionError("executable lookup")),
-        patch("subprocess.run", side_effect=AssertionError("subprocess")),
-    ):
-        client.stack.remove(make_empty())
 
 
 @pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)

@@ -35,6 +35,11 @@ class ExecutionPolicySource(Protocol):
         ...
 
     @property
+    def strict_env_transport(self) -> bool:
+        """Return whether assignment values must avoid literal argv fallback."""
+        ...
+
+    @property
     def telemetry_observer(self) -> TelemetryObserver | None:
         """Return the optional sanitized execution observer for new launches."""
         ...

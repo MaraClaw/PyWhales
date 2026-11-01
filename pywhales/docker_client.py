@@ -157,6 +157,7 @@ class DockerClient(DockerCLICaller):
         telemetry_observer: TelemetryObserver | None = None,
         environment: Mapping[str, str] | None = None,
         default_timeout: float | None = None,
+        strict_env_transport: bool = False,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -215,6 +216,9 @@ class DockerClient(DockerCLICaller):
                 config. It does not affect executable lookup or the parent process.
             default_timeout: Positive finite seconds per local CLI launch, or None
                 for no default deadline. Explicit per-call timeouts replace it.
+            strict_env_transport: Require container envs and build args to use the
+                child environment, rejecting literal argv fallback without exposing
+                values. Defaults to false. Image history and provenance are not hidden.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -251,6 +255,7 @@ class DockerClient(DockerCLICaller):
                 telemetry_observer=telemetry_observer,
                 environment=environment,
                 default_timeout=default_timeout,
+                strict_env_transport=strict_env_transport,
             )
         super().__init__(client_config)
 

@@ -9,7 +9,7 @@ import json
 import os
 import sys
 import tarfile
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, assert_never
 from unittest.mock import Mock, patch
@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import pywhales.components.buildx.cli_wrapper
-from pywhales import docker
+from pywhales import DockerClient, docker
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
@@ -962,7 +962,11 @@ def test_buildx_build_metadata_file(
     recorded = {}
 
     def fake_run(
-        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+        cmd: Iterable[str],
+        capture_stderr: bool = True,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
@@ -994,7 +998,11 @@ def test_buildx_build_without_metadata_file(
     recorded = {}
 
     def fake_run(
-        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+        cmd: Iterable[str],
+        capture_stderr: bool = True,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
@@ -1020,7 +1028,11 @@ def test_buildx_build_metadata_file_str_path(
     recorded = {}
 
     def fake_run(
-        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+        cmd: Iterable[str],
+        capture_stderr: bool = True,
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
@@ -1051,6 +1063,29 @@ def test_list() -> None:
     assert docker.buildx.inspect("default") in builders
     for builder in builders:
         assert builder.driver in ["docker", "docker-container"]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_build_arguments_reach_report_child_environment(
+    strict: bool, tmp_path: Path
+) -> None:
+    record = tmp_path / "child.json"
+    script = (
+        "import json, os, pathlib, sys; "
+        f"pathlib.Path({str(record)!r}).write_text(json.dumps([sys.argv[1:], os.environ['APP_REPORT_ARG']]))"
+    )
+    client = DockerClient(
+        client_call=[sys.executable, "-c", script], strict_env_transport=strict
+    )
+
+    client.buildx.build(
+        ".", call="check", build_args={"APP_REPORT_ARG": "private-value"}
+    )
+
+    argv, value = json.loads(record.read_text())
+    assert argv[argv.index("--build-arg") + 1] == "APP_REPORT_ARG"
+    assert all("private-value" not in arg for arg in argv)
+    assert value == "private-value"
 
 
 @pytest.mark.parametrize("consume", [False, True])

@@ -14,6 +14,13 @@ or `None` for push-only and other non-loading exports.
 
 ## Current controls and return values
 
+`build_args` uses name-only `--build-arg KEY` and per-child environment values
+when eligible. Literal fallback remains compatible by default;
+`DockerClient(strict_env_transport=True)` rejects it before builder inspection
+or executable lookup. Reserved prefixes such as `PYTHON` are ineligible.
+This does not hide image history or provenance: use build secrets for secrets.
+Bake `--set` transport is unchanged. See [assignment transport](../docker_client.md#assignment-values-and-argv).
+
 `build(call="check")`, `build(call="outline")`, and `build(call="targets")`
 return captured frontend report text without trying to recover an image.
 `call="build"` retains normal image-building behavior. Leaving `call` unset

@@ -55,6 +55,19 @@ including `print=True`: the CLI prints its Bake definition to stdout. Use
 Dry-run output does not represent real containers and cannot be requested as
 resource objects.
 
+`build(timeout=...)` and `execute(timeout=...)` set a positive finite local CLI
+deadline in every output mode; `None` inherits the client default. Invalid values
+are rejected before lookup, including `build(services=[])`. Expiry kills and reaps
+only the local CLI, not service or daemon-side work. Shutdown timeouts on `down`,
+`restart` and `stop` keep their Docker meaning.
+
+Eligible `build_args` values use child environment transport with name-only
+`--build-arg KEY`. As with `run`/`execute` `envs`, these values also reach `${VAR}`
+interpolation and name-only service `environment` entries. Literal fallback is
+the compatibility default; `strict_env_transport=True` rejects it before lookup.
+This does not prevent image-history/provenance exposure. See
+[assignment transport](../docker_client.md#assignment-values-and-argv).
+
 `compose.watch()` supports `no_up`, `quiet`, and `prune`, and returns an owned
 log stream directly. Unlike build/up, watch has no `stream_logs` switch.
 PyWhales defaults `prune=False` and explicitly sends `--prune=false`, unlike

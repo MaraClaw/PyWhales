@@ -24,6 +24,7 @@ from typing import (
 from pydantic import JsonValue, TypeAdapter
 
 import pywhales.components.image.cli_wrapper
+from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
@@ -756,7 +757,9 @@ class BuildxCLI(DockerCLICaller):
             allow: Extra build entitlements, such as `"network.host"` or
                 `"security.insecure"`; only grant them to trusted builds.
             attest: Attestation parameters, such as `{"type": "sbom"}`.
-            build_args: Build-time variable names and values.
+            build_args: Build-time variable names and values. Eligible values use
+                the child environment; other entries stay literal unless
+                strict_env_transport rejects them before lookup or inspection.
             build_contexts: Named additional contexts, including local directories,
                 Git repositories, HTTP archives, `docker-image://` references,
                 and `oci-layout://` paths supported by the installed Buildx.
@@ -815,7 +818,7 @@ class BuildxCLI(DockerCLICaller):
             annotations: Image annotation(s), passed as repeated `--annotation`
                 flags. Requires a Buildx version supporting these flags.
             timeout: Positive finite seconds for the local build CLI, or `None`
-                for no deadline. Builder inspection before launch and image
+                to inherit the client default. Builder inspection before launch and image
                 inspection after completion are outside this budget. Streaming
                 deadlines advance before and between iterations.
 
@@ -835,6 +838,9 @@ class BuildxCLI(DockerCLICaller):
             DockerException: A Buildx or image-inspection command fails.
         """
         validate_timeout(timeout)
+        build_arguments, child_env = container_environment(
+            build_args, self.client_config
+        )
         tags = to_list(tags)
         full_cmd = Command([*self.docker_cmd, "buildx", "build"])
 
@@ -847,9 +853,7 @@ class BuildxCLI(DockerCLICaller):
         full_cmd.add_args_iterable_or_single("--allow", allow)
         if isinstance(attest, dict):
             full_cmd.add_simple_arg("--attest", format_dict_for_buildx(attest))
-        full_cmd.add_args_iterable_or_single(
-            "--build-arg", format_mapping_for_cli(build_args)
-        )
+        full_cmd.add_args_iterable("--build-arg", build_arguments)
         full_cmd.add_args_iterable_or_single(
             "--build-context", format_mapping_for_cli(build_contexts)
         )
@@ -908,11 +912,16 @@ class BuildxCLI(DockerCLICaller):
                 )
 
             full_cmd.append(context_path)
-            return stream_buildx_logs(full_cmd, timeout=timeout)
+            return stream_buildx_logs(full_cmd, env=child_env, timeout=timeout)
 
         if call in ("check", "outline", "targets"):
             full_cmd.append(context_path)
-            return run(full_cmd, capture_stderr=progress is False, timeout=timeout)
+            return run(
+                full_cmd,
+                env=child_env,
+                capture_stderr=progress is False,
+                timeout=timeout,
+            )
 
         will_load_image = self._build_will_load_image(builder, push, load, output)
         driver = None
@@ -927,7 +936,12 @@ class BuildxCLI(DockerCLICaller):
 
         if not will_load_image:
             full_cmd.append(context_path)
-            run(full_cmd, capture_stderr=progress is False, timeout=timeout)
+            run(
+                full_cmd,
+                env=child_env,
+                capture_stderr=progress is False,
+                timeout=timeout,
+            )
             return
 
         docker_image = pywhales.components.image.cli_wrapper.ImageCLI(
@@ -935,7 +949,12 @@ class BuildxCLI(DockerCLICaller):
         )
         if driver != "docker":
             full_cmd.append(context_path)
-            run(full_cmd, capture_stderr=progress is False, timeout=timeout)
+            run(
+                full_cmd,
+                env=child_env,
+                capture_stderr=progress is False,
+                timeout=timeout,
+            )
             return docker_image.inspect(tags[0])
         else:
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -943,7 +962,12 @@ class BuildxCLI(DockerCLICaller):
                 iidfile = tmp_dir / "id_file.txt"
                 full_cmd.add_simple_arg("--iidfile", iidfile)
                 full_cmd.append(context_path)
-                run(full_cmd, capture_stderr=progress is False, timeout=timeout)
+                run(
+                    full_cmd,
+                    env=child_env,
+                    capture_stderr=progress is False,
+                    timeout=timeout,
+                )
                 image_id = iidfile.read_text()
                 return docker_image.inspect(image_id)
 

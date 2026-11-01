@@ -19,6 +19,9 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
   The mapped helper inherits the originating client's general `stream_buffer_bytes` at the shared
   stream boundary; keep its policy carrier and transport ownership through mapping.
 - Build streaming rejects `progress=False`, `"tty"`, `"none"`, and `"quiet"`.
+- Every build launch branch passes the snapshot-bound child environment returned by the shared
+  `container_environment` eligibility seam for `build_args`. Strict fallback rejection precedes
+  lookup and builder inspect; compatibility mode keeps literal fallback. Bake `--set` is unchanged.
 
 ## Bake configuration
 

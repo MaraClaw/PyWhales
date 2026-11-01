@@ -25,7 +25,7 @@ the uploader, then `confirm`. `release-on-merge.yml` runs `release`, then calls 
 - Authority comes from the invoking repository and the workflow's numeric ID (`GitHub.identity`, `trusted_run`), never
   artifact metadata: same repository, branch `main`, event `push` (producer) or `workflow_run` (publisher), completed
   with success, and the latest attempt endpoint equal to the run.
-- Job names are exact. `trust.CHECKS` (seven fixed names plus the 16 `COMPONENTS`) with `SEAL_JOB`, and `PUBLISH_JOB`,
+- Job names are exact. `trust.CHECKS` (eight fixed names plus the 16 `COMPONENTS`) with `SEAL_JOB`, and `PUBLISH_JOB`,
   must equal the attempt's jobs as sets. Renaming a job or editing the `python-package.yml` component matrix needs the
   same change in `trust.py`, and a look at the job cap in `limits.py`.
 - Artifacts are `delivery-{dist,site,seal,receipt}-<run>-<attempt>`: exact name (missing, duplicate, or expired rejects),

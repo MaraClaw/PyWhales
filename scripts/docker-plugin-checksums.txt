@@ -1,3 +1,6 @@
-# Linux amd64 release assets, independently verified against official checksums.
-compose 5.6.1 47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0
-buildx 0.38.1 e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4
+# Linux release assets, one pin per plugin, version and architecture: plugin version arch sha256.
+# Each digest matches the release API digest, the release checksums.txt and the downloaded bytes.
+compose 5.6.1 amd64 47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0
+compose 5.6.1 arm64 42cfa75f51ad0ccf290bad37899e0038a8c10a0069e85233ecc1d53e3ff1347d
+buildx 0.38.1 amd64 e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4
+buildx 0.38.1 arm64 3b83b3731916ba433feccaaa689fe5bcdc81c641d92c8e6c2ea865dfa141c97a

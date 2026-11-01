@@ -10,10 +10,10 @@
   "populations": {"all_submissions": 2, "launched_cli": 2, "readiness_attempts": 2, "faults": 1},
   "outcomes": {"succeeded": 2, "failed": 0, "rejected": 0, "cancelled": 0, "unknown": 0, "timed_out": 0},
   "latency": [
-    {"boundary": "queue_wait", "unit": "seconds", "population": "all_submissions", "samples": [{"outcome": "succeeded", "seconds": 0.1, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}]},
-    {"boundary": "selected_cli", "unit": "seconds", "population": "launched_cli", "samples": [{"outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}]},
-    {"boundary": "readiness", "unit": "seconds", "population": "readiness_attempts", "samples": [{"outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.4, "excluded": false, "reason": "observed"}]},
-    {"boundary": "recovery", "unit": "seconds", "population": "faults", "samples": [{"outcome": "succeeded", "seconds": 1.0, "excluded": false, "reason": "observed"}]}
+    {"boundary": "queue_wait", "unit": "seconds", "population": "all_submissions", "samples": [{"submission": 1, "outcome": "succeeded", "seconds": 0.1, "excluded": false, "reason": "observed"}, {"submission": 2, "outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}]},
+    {"boundary": "selected_cli", "unit": "seconds", "population": "launched_cli", "samples": [{"submission": 1, "outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}, {"submission": 2, "outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}]},
+    {"boundary": "readiness", "unit": "seconds", "population": "readiness_attempts", "samples": [{"submission": 1, "outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}, {"submission": 2, "outcome": "succeeded", "seconds": 0.4, "excluded": false, "reason": "observed"}]},
+    {"boundary": "recovery", "unit": "seconds", "population": "faults", "samples": [{"submission": 2, "outcome": "succeeded", "seconds": 1.0, "excluded": false, "reason": "observed"}]}
   ],
   "high_water": [{"resource": "cpu_cores", "value": 1.0}, {"resource": "rss_bytes", "value": 512.0}, {"resource": "file_descriptors", "value": 4.0}, {"resource": "children", "value": 1.0}, {"resource": "disk_bytes", "value": 512.0}, {"resource": "disk_inodes", "value": 2.0}],
   "elapsed_seconds": 20.0, "stability_window_seconds": 2.0, "stable_observations": 2,

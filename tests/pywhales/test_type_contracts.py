@@ -20,6 +20,7 @@ from pywhales import (
     Service,
     Volume,
 )
+from pywhales.client_config import ClientConfig
 from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.buildx.imagetools.models import Manifest
 from pywhales.components.compose.models import ComposeEvent
@@ -29,6 +30,13 @@ from pywhales.components.system.cli_wrapper import SystemPruneFilter
 from pywhales.components.system.models import DockerEvent
 from pywhales.components.top import ComposeTopResult, ContainerTopResult
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+
+
+def _check_strict_environment_setting(flag: bool) -> None:
+    config = ClientConfig(strict_env_transport=flag)
+    assert_type(config.strict_env_transport, bool)
+    client = DockerClient(strict_env_transport=flag)
+    assert_type(client.client_config.strict_env_transport, bool)
 
 
 def _check_resource_inspection_contracts(client: DockerClient) -> None:

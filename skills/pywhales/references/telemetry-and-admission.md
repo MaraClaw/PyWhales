@@ -36,7 +36,8 @@ which image operations use the archive families. `outcome` on
 `CompletionRecord` is `"success"`, `"failure"`, `"timeout"`, `"closed"`,
 `"cancelled"` (an `ObservationCancelled`), or `"limit"` (an
 `ObservationLimitError` after launch, including a `max_total_stream_bytes`
-overflow or a `native_argv` refusal). `ObservationTimeout` and `DockerTimeout`
+overflow, a `max_total_stdin_bytes` refusal, or a `native_argv` refusal).
+`ObservationTimeout` and `DockerTimeout`
 stay `"timeout"` and `KeyboardInterrupt` stays `"failure"`; a rejection before
 launch emits no record. A stream reports the outcome of the error it delivers
 (deadline, then scope stop, then reader error), and `close()` keeps a stop
@@ -59,7 +60,10 @@ this contract.
 CLI's stdin pipe, including partial acceptance before a failure. It doesn't count
 bytes merely yielded by an input iterator and doesn't prove consumption by the
 CLI or Docker daemon. An observed empty pipe is `0`; an unobserved channel is
-`None`.
+`None`. The same accepted-write measurement charges nested observation stdin
+budgets; reaching the exact budget at EOF succeeds, while further nonempty input
+reports `"limit"` without writing past it. See
+[Bound archive uploads](registry-and-archives.md#bound-archive-uploads).
 
 A stream completes only when its consumer exhausts it, observes a terminal
 error, or closes it; a bare loop `break` doesn't promise a completion record.
@@ -145,8 +149,8 @@ no overflow queue.
 `owner.request(...)` returns an inert, single-use handle. Calling `call()` or
 `stream()` on it attempts admission and only then runs the supplied callable.
 `request.cancel()` can stop a still-pending wait from another thread;
-successful cancellation guarantees the callable never starts, but once the
-request has started, `cancel()` returns `False` and can't undo the operation.
+successful cancellation guarantees the callable never starts, but once admitted,
+`cancel()` returns `False` and can't undo the operation.
 
 ```python
 with owner.request(control).stream(
@@ -161,6 +165,9 @@ iterator; the permit stays held until exhaustion, an observed failure, or an
 explicit close completes source cleanup and any in-flight read unwinds. A bare
 `break`, local child exit, or unobserved source failure doesn't release it.
 A plain generator needs wrapping in `contextlib.closing` inside the factory.
+Use `stream()`, not `call()`, when returning an owned stream: `call()` releases
+its permit as soon as the callable returns. One stream permit covers all direct
+children of a composite source, not one permit per transfer worker.
 `image.pull([], stream_logs=True)` is already context-managed and closeable,
 even though it launches nothing; no wrapper is needed for that result.
 

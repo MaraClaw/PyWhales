@@ -142,7 +142,33 @@ jobs:
           python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
-      - name: Install verified Linux amd64 plugins
+      - name: Install verified Linux plugins
+        run: ./scripts/download-docker-plugins.sh
+      - name: Run required real CLI smoke tests
+        run: >-
+          uv run --locked pytest -vv -rs --no-runtime-skip --durations=10
+          tests/pywhales/components/test_docker_modern_integration.py
+
+  build-linux-test-modern-arm64:
+    name: Compose and Buildx ARM64 smoke tests
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert native ARM64 host and Docker engine
+        run: |
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = aarch64
+          test "$RUNNER_ARCH" = ARM64
+          test "$(docker version --format '{{.Server.Arch}}')" = arm64
+      - name: Setup uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.6"
+          python-version: "3.14.10"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Install verified Linux plugins
         run: ./scripts/download-docker-plugins.sh
       - name: Run required real CLI smoke tests
         run: >-
@@ -210,6 +236,7 @@ jobs:
       - build-linux-test-other
       - build-linux-test-coverage
       - build-linux-test-modern
+      - build-linux-test-modern-arm64
       - build-windows
       - build-distributions
     runs-on: ubuntu-24.04

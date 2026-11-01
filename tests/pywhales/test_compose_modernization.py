@@ -208,7 +208,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-10:] == [
+    assert [field.name for field in fields(ClientConfig)][-11:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
@@ -219,6 +219,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         "telemetry_observer",
         "environment",
         "default_timeout",
+        "strict_env_transport",
     ]
 
 
@@ -246,7 +247,7 @@ def test_build_retains_positional_slots_when_modern_options_are_added(
         "plain",
         "build",
         "--build-arg",
-        "VERSION=1",
+        "VERSION",
         "--no-cache",
         "--pull",
         "--ssh",
@@ -259,6 +260,7 @@ def test_build_retains_positional_slots_when_modern_options_are_added(
         "--push",
         "web",
     ]
+    assert command.call_args.kwargs["env"]["VERSION"] == "1"
 
 
 @pytest.mark.parametrize("attestation", [False, True, "mode=max"])

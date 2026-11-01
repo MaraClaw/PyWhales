@@ -11,6 +11,11 @@ from scripts.fleet_contract.manifest import Manifest
 from scripts.fleet_contract.report import Evidence, classify
 from scripts.fleet_contract.results import RunResult
 from scripts.fleet_contract.support import SupportMatrix
+from scripts.fleet_harness.export import export_result
+from scripts.fleet_harness.models import RunnableManifest
+from scripts.fleet_harness.records import RunReport
+from scripts.fleet_harness.runner import run
+from tests.pywhales.test_fleet_harness import at, overlap_manifest, overlap_plan
 
 FIXTURES: Final = (
     Path(__file__).resolve().parents[2] / "scripts/fleet_contract/fixtures"
@@ -196,6 +201,37 @@ def test_supported_claim_when_review_references_are_not_authentication() -> None
     assert "independent_review_required" in report.flags
 
 
+def settle(data: dict[str, JsonValue], boundaries: set[str], submission: int) -> None:
+    """Fail one submission at the named latency boundaries of a fixture result."""
+    latencies = data["latency"]
+    assert isinstance(latencies, list)
+    for item in latencies:
+        assert isinstance(item, dict) and isinstance(item["samples"], list)
+        for sample in item["samples"]:
+            assert isinstance(sample, dict)
+            if item["boundary"] in boundaries and sample["submission"] == submission:
+                sample.update({"outcome": "failed", "seconds": 9.0})
+
+
+def test_consistent_failure_timings_when_the_full_distribution_is_retained() -> None:
+    data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
+    data["outcomes"] = {
+        "succeeded": 1,
+        "failed": 1,
+        "rejected": 0,
+        "cancelled": 0,
+        "unknown": 0,
+        "timed_out": 0,
+    }
+    settle(data, {"queue_wait", "selected_cli", "readiness"}, 1)
+
+    report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
+
+    assert report.evidence_complete
+    assert report.criteria == "failed"
+    assert report.distributions[0].percentiles[-1].seconds == 9.0
+
+
 def test_failure_timings_when_the_full_distribution_is_retained() -> None:
     data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
     data["outcomes"] = {
@@ -206,14 +242,94 @@ def test_failure_timings_when_the_full_distribution_is_retained() -> None:
         "unknown": 0,
         "timed_out": 0,
     }
-    latencies = data["latency"]
-    assert isinstance(latencies, list) and isinstance(latencies[0], dict)
-    samples = latencies[0]["samples"]
-    assert isinstance(samples, list) and isinstance(samples[0], dict)
-    samples[0].update({"outcome": "failed", "seconds": 9.0})
+    settle(data, {"queue_wait"}, 1)
 
     report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
 
-    assert report.evidence_complete
-    assert report.criteria == "failed"
+    assert not report.evidence_complete and report.criteria == "unknown"
+    assert report.qualification == "unqualified"
+    assert "submission_outcome_conflict" in report.flags
     assert report.distributions[0].percentiles[-1].seconds == 9.0
+
+
+def test_submission_outcome_when_other_boundaries_disagree_with_aggregate() -> None:
+    data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
+    settle(data, {"selected_cli"}, 2)
+
+    report = classify(evidence(RunResult.model_validate_json(json.dumps(data))))
+
+    assert not report.evidence_complete
+    assert {"submission_outcome_conflict", "outcome_samples_mismatch"} <= set(
+        report.flags
+    )
+
+
+def exported(report: RunReport, declaration: RunnableManifest) -> Evidence:
+    """Bind a harness export to the contract manifest and the unapproved matrix."""
+    return Evidence(
+        manifest=Manifest.model_validate_json(declaration.model_dump_json()),
+        support=SupportMatrix.model_validate_json(
+            (FIXTURES / "support-matrix.json").read_text()
+        ),
+        result=export_result(report, declaration),
+    )
+
+
+def test_overlapping_export_when_synthetic_never_qualifies() -> None:
+    # Given a completed overlapping simulation with a queued waiter.
+    declaration = overlap_manifest(2, "operation_count", 3)
+    simulation = run(
+        declaration,
+        overlap_plan(at(0.0, 1.0, readiness_seconds=0.5), at(0.0, 2.0), at(0.5, 1.0)),
+    )
+
+    # When its synthetic export is classified against the unapproved matrix.
+    report = classify(exported(simulation, declaration))
+
+    # Then overlap never turns simulation into permission or qualification.
+    assert simulation.status == "completed" and simulation.schedule is not None
+    assert report.qualification == "unqualified" and not report.evidence_complete
+    assert report.evidence.result.provenance == "synthetic"
+    assert report.evidence.result.authorization_record is None
+    assert {
+        "synthetic_non_authorizing",
+        "support_unapproved",
+        "receipts_missing",
+        "authorization_record_mismatch",
+    } <= set(report.flags)
+
+
+@pytest.mark.parametrize(
+    ("fraction", "outcome"), [(0.5, "cancelled"), (1.0, "timed_out")]
+)
+def test_unlaunched_submission_when_exported_is_counted_once(
+    fraction: float, outcome: str
+) -> None:
+    # Given a queued creation that never launches: cancelled by the stop, or expired.
+    declaration = overlap_manifest(1, "operation_count", 3, fraction)
+    simulation = run(
+        declaration,
+        overlap_plan(
+            at(0.0, 1.0, readiness_seconds=0.5),
+            at(0.0, 1.0, readiness_seconds=1.0),
+            at(0.0, 1.0, "create"),
+            timeout=3.0,
+        ),
+    )
+
+    # When the simulation is exported and classified.
+    report = classify(exported(simulation, declaration))
+
+    # Then the third is one all-submissions outcome with no launch evidence.
+    result = report.evidence.result
+    assert result.populations.all_submissions == result.outcomes.accounted == 3
+    assert result.populations.launched_cli == 2
+    assert result.outcomes.cancelled == (outcome == "cancelled")
+    assert result.outcomes.timed_out == 1 + (outcome == "timed_out")
+    assert report.qualification == "unqualified"
+    assert not {
+        "outcome_samples_mismatch",
+        "submission_outcome_conflict",
+        "latency_excluded",
+        "latency_missing",
+    } & set(report.flags)

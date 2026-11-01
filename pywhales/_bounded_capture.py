@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from time import monotonic
 
 from pywhales._capture_pipes import CapturePipes
@@ -10,12 +10,40 @@ from pywhales._execution_policy import ExecutionPolicy
 from pywhales._observation import ObservationState, check_observation
 from pywhales._readiness import CANCEL_CHECK, watch_exit
 from pywhales._scoped_launch import check_scoped_launch, native_argv_limit
+from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import (
     DockerTimeout,
     ObservationCancelled,
     ObservationLimitError,
 )
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
+
+
+def _launch(
+    args: list[str],
+    env: Mapping[str, str],
+    pass_fds: Sequence[int],
+    *,
+    piped_stdin: bool,
+) -> subprocess.Popen[bytes]:
+    """Start the child with piped output, and piped stdin only for supplied input."""
+    with native_argv_limit(args):
+        if piped_stdin:
+            return subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                pass_fds=pass_fds,
+            )
+        return subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            pass_fds=pass_fds,
+        )
 
 
 def bounded_capture(
@@ -27,19 +55,42 @@ def bounded_capture(
     observation: ObservationState,
     *,
     telemetry: ExecutionTelemetry,
+    input: bytes | Iterable[bytes] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Launch, capture within the observation budget, and reap the local child."""
+    """Launch, capture within the observation budget, and reap the local child.
+
+    Output is drained while ``input`` is uploaded by a writer thread, so a child
+    that fills stdout or stderr before reading stdin cannot deadlock the call.
+    Uploaded bytes are charged to the scope's stdin accounts; the caller supplies
+    ``input`` only under such a budget.
+
+    Args:
+        args: Complete stringified command.
+        env: Effective child environment.
+        pass_fds: Descriptors kept open in the child.
+        timeout: Positive finite seconds from launch, or ``None``.
+        policy: Execution policy snapshot for diagnostics.
+        observation: Scope whose bounds and tokens apply to this launch.
+        telemetry: Measurements for this launch.
+        input: Bytes, or an iterable of byte chunks pulled lazily on the writer
+            thread, sent to child stdin. ``None`` inherits stdin. A deadline or
+            cancellation cannot interrupt the iterator's own code, so cleanup
+            waits for a chunk in flight.
+
+    Returns:
+        The reaped child's return code with all captured output.
+
+    Raises:
+        ObservationLimitError: Output, argv, or environment exceeded a limit, or
+            the input exceeded a stdin budget (reason ``total_stdin``).
+        DockerTimeout: The selected timeout expired first.
+        ObservationTimeout: The scope deadline expired.
+        ObservationCancelled: A cancellation token was set.
+    """
     check_scoped_launch(args, env, observation)
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
-    with native_argv_limit(args):
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            pass_fds=pass_fds,
-        )
+    process = _launch(args, env, pass_fds, piped_stdin=input is not None)
 
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
@@ -50,6 +101,7 @@ def bounded_capture(
         with (
             watch_exit(process) as exited,
             CapturePipes((process.stdout, process.stderr), exited) as pipes,
+            StdinPump(process, input, telemetry, observation=observation),
         ):
             while True:
                 if any(token.is_set() for token in observation.cancel_tokens):
@@ -117,6 +169,8 @@ def bounded_capture(
     finally:
         if process.poll() is None:
             process.kill()
+        if process.stdin is not None:
+            process.stdin.close()
         process.stdout.close()
         process.stderr.close()
         process.wait()

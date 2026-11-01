@@ -9,7 +9,8 @@ calls automatically.
 
 - [Bounding batch inspection](#bounding-batch-inspection)
 - [Manifest lists](#manifest-lists)
-- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
+- [Bounding streams and uploads](#bounding-streams-and-uploads)
+- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
 ## Bounding Batch Inspection
@@ -47,9 +48,12 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
-`max_total_references`, `max_total_response_bytes`, and `max_total_stream_bytes` default to `None`,
-leaving aggregate accounting unbounded. The illustrative limits above aren't
-a universal sizing recommendation. `observation()`
+`max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`, and
+`max_total_stdin_bytes` default to `None`. An unset output total leaves that
+aggregate unbounded; unset stdin still refuses captured input inside an
+observation unless an enclosing scope supplies a stdin budget. Booleans, zero,
+and negative values are invalid for every policy limit. The illustrative limits
+above aren't a universal sizing recommendation. `observation()`
 is a context manager applying those limits, plus an optional absolute
 monotonic `deadline` and a `cancel` `Event`, to synchronous list/inspect
 calls executed through it. Nested scopes can only tighten the active limits,
@@ -58,9 +62,9 @@ doesn't automatically propagate to worker threads you spawn inside it.
 
 The scope's restrictions belong to the shared synchronous captured path (the
 path list/inspect-style calls use). Inside a scope, that path rejects `tty`,
-uncaptured output, and `input` with `ValueError`, and charges the captured
-stdout/stderr bytes to the response budgets. Streams and archive transfers
-follow a separate launch lifecycle, described under the limits below. Don't use
+uncaptured output, and `input` without a stdin budget with `ValueError`, and
+charges captured stdout/stderr bytes to the response budgets. Streams and archive
+transfers follow a separate launch lifecycle, described under the limits below. Don't use
 `observation()` as a general command sandbox.
 
 `capture_inventory(items, *, policy)` accepts a mix of `InventoryRequest`
@@ -139,6 +143,8 @@ and the regular, selected-launch
 `DockerTimeout` from `default_timeout`/`timeout=` is unaffected and can still
 fire independently.
 
+### Bounding Streams And Uploads
+
 Streams and archive transfers (log and progress streams, `load`, `save`) can
 retain a scope's lifecycle instead. Started inside a scope, they check
 cancellation and the argv and environment limits before launch, keep the
@@ -160,14 +166,32 @@ reason `total_stream` once. Archive watchdog drains and the stderr read that
 selects a Docker exception are uncharged. Leaving the field unset changes no
 stream or archive accounting.
 
+Set `max_total_stdin_bytes` to a strictly positive integer to bound uploads across
+the captured execution helper's `run(input=...)` calls and archive loads. This
+is child-CLI stdin, not a new `input=` argument on `client.run()` (container run).
+For public archive uploads, use `client.image.load()` with bytes or a byte
+iterable; see [Registry transfers and archives](registry-and-archives.md).
+Bytes and cooperative byte iterables are accepted; stdout and stderr drain during
+captured uploads. Only
+bytes accepted by successful local pipe writes count, including partial writes,
+against every enclosing shared account. Empty input consumes nothing and exact
+budget EOF succeeds; excess input raises `ObservationLimitError` with reason
+`total_stdin`. Concurrent launches sharing a propagated observation context share
+the same allowance; declaring a new independent scope in each thread does not
+create a shared request budget. Upload accounts remain attached to launched
+transfers after scope exit and never consume response or stream budgets. Iterator code must yield
+cooperatively: deadlines and cancellation cannot interrupt it, and cleanup waits
+for an in-flight iteration before joining the writer.
+
 Aggregate response budgets apply within observation scopes and the bounded
 inventory call. Snapshots aren't daemon transactions or total memory caps.
 
 ## Waiting For Convergence
 
 `pywhales.convergence` is an opt-in, read-only observer of one fixed target:
-a captured Swarm service generation (`capture_service` returns a
-`ServiceTarget`), an explicit Swarm stack (`StackTarget`), or selected Compose
+a captured Swarm service generation, including replicated and global jobs
+(`capture_service` returns a `ServiceTarget`), an explicit Swarm stack
+(`StackTarget`), or selected Compose
 services (`capture_compose` returns a `ComposeTarget`). `wait()` takes any of
 the three. Existing mutating calls never invoke it automatically; capture and
 wait yourself after submitting the change you want to confirm. Choose the
@@ -203,25 +227,73 @@ possibly-changing discovery.
 
 `capture_service(client, service_id, *, policy, timeout, cancel=None, approved_node_ids=None)`
 returns a `ServiceTarget`, or a typed `Failure`/`Deadline`/`Cancelled`
-outcome. It records the service's version and a fingerprint of its desired
-task template and mode at that instant. Replicated services need an explicit
-nonnegative replica count; Global services need `approved_node_ids`, a
-nonempty tuple of distinct node IDs, at capture time, since there's no
-automatic discovery of "eligible" nodes.
+outcome. It records the service's version, its job iteration for job modes, and
+a fingerprint of its desired task template and mode at that instant. Replicated
+services need an explicit nonnegative replica count; Global services need
+`approved_node_ids`, a nonempty tuple of distinct node IDs, at capture time,
+since there's no automatic discovery of "eligible" nodes. Supplying
+`approved_node_ids` for a Replicated or ReplicatedJob service is `unsupported`.
 
 Use an authorized service's actual immutable ID in place of the placeholder.
-Keep the target's originating `ClientConfig` stable while waiting. Unsupported
-job modes and malformed service/task data fail closed.
+Keep the target's originating `ClientConfig` stable while waiting. Replicated,
+Global, ReplicatedJob, and GlobalJob modes are supported; any other mode or a
+non-container runtime is `Failure(reason="unsupported")`, and malformed
+service/task data fails closed.
 
 `wait(target, *, policy, timeout, poll_interval, cancel=None)` accepts a
 `ServiceTarget`, a `StackTarget(services=(...))`, or a `ComposeTarget` and
-returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For Swarm targets,
-only current desired-running tasks count; a changed service version or template
-fingerprint returns `superseded`; `paused`/`failed`/rollback states are
-terminal `update_failed` failures. Snapshot collection isn't an atomic Swarm
-transaction, so a final generation recheck reduces, but can't remove, races
-from concurrent changes. A successful result proves the captured
+returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For ordinary
+(Replicated and Global) Swarm targets, only current desired-running tasks count;
+a changed service `Version` or template fingerprint returns `superseded`;
+`paused`/`failed`/rollback `UpdateStatus` states are terminal `update_failed`
+failures. Jobs follow their own rules, described next. Snapshot collection isn't
+an atomic Swarm transaction, so a final generation recheck reduces, but can't
+remove, races from concurrent changes. A successful result proves the captured
 task-generation conditions, not application health or readiness.
+
+### Swarm Jobs
+
+`capture_service` and `wait` handle `ReplicatedJob` and `GlobalJob` services
+without any extra parameter. Neither the version string nor `capture_service`'s
+signature shows that, so check that the installed `ServiceTarget.mode`
+annotation lists `replicated_job` and `global_job` (see
+[Usage validation](validation.md)). Ordinary Replicated and Global services
+keep the rules above.
+
+Capture:
+
+- A ReplicatedJob service takes no `approved_node_ids`. `MaxConcurrent` defaults
+  to 1 and `TotalCompletions` defaults to `MaxConcurrent`; both must be positive
+  integers, and any other key in the job mode is `unsupported`.
+- A GlobalJob service needs `approved_node_ids` like a Global service, and its
+  job mode must be empty.
+- The service must report a job status. The captured iteration is
+  `JobStatus.JobIteration.Index`, read as 0 when `Index` is missing; a service
+  without `JobStatus` is `Failure(reason="malformed")`. Capture also records the
+  template's `RestartPolicy.Condition`.
+
+Waiting:
+
+- Only tasks whose `JobIteration` equals the captured iteration count. Tasks from
+  other iterations, or with no iteration, are stale and ignored.
+- A matching task counts once its state is `complete`; any other state stays
+  pending, and desired state isn't consulted. A ReplicatedJob succeeds when
+  `TotalCompletions` distinct zero-based completion slots (`0` through
+  `TotalCompletions - 1`) are complete. A GlobalJob succeeds when every approved
+  node has a completed task; completions on other nodes don't count.
+- If the captured restart condition is exactly `none`, a matching task that is
+  `failed` or `rejected` ends the wait with `Failure(reason="completion_failed")`.
+  It carries the service ID but no state or cause. With any other or a missing
+  condition those tasks simply aren't counted, and the wait stays pending until
+  the deadline.
+- The generation fence is the template and mode fingerprint plus the job
+  iteration, with no service `Version` check. A changed fingerprint or a new
+  iteration is `superseded`; a `Version` bump alone isn't.
+- `UpdateStatus` isn't completion evidence and is ignored for jobs, so it can't
+  produce `update_failed` or an ongoing-update blocker.
+
+As with ordinary services, `Success` proves the captured conditions, not that
+the job's work was correct.
 
 ### Compose Project
 
@@ -247,6 +319,7 @@ match capture_compose(
     compose_client,
     services,
     completion_services=("migrate",),
+    max_restarts=0,  # optional: no observed restarts for long-running members
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -262,7 +335,8 @@ match capture_compose(
         print(f"Compose capture stopped: {type(stopped).__name__}")
 ```
 
-`capture_compose(client, services, *, completion_services: tuple[str, ...] = (), policy, timeout, cancel=None)` returns a
+`capture_compose(client, services, *, completion_services=(), max_restarts=None,
+policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
@@ -275,6 +349,13 @@ waiting.
 - `completion_services` is a tuple of distinct selected names, fixed at capture;
   a list, duplicates, or a name outside `services` raises `ValueError` before
   launch. The default `()` leaves every selected service long-running.
+- `max_restarts` is `None` (disabled) or a nonnegative integer, never a boolean;
+  invalid values raise before launch. The target freezes this choice. When enabled,
+  every long-running member must report a nonnegative integer `RestartCount` at
+  capture and each cycle, otherwise the result is cause-free `malformed`. Any
+  member above budget keeps its service unsettled even while healthy. This is a
+  live blocker, not a permanent failure or a monotonic-counter assumption;
+  completion services ignore the restart budget.
 - Capture lists the selected services' containers with stopped ones included,
   inspects each, and skips one-off `compose run` containers. For every selected
   service the target records the full container IDs and the single
@@ -317,13 +398,22 @@ can outlast it. `poll_interval` is also positive finite seconds.
 complete polling cycle, not live state at expiry; it's absent when capture
 expired or no cycle finished. It holds `captured_services` plus counts of
 affected services per reason, each service counted at most once per reason and
-reasons allowed to overlap. For Compose the long-running readiness counters are
-`non_running_containers`, `restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
+reasons allowed to overlap. Swarm counters are `missing_ready_slots`,
+`duplicate_slots`, `stale_templates`, `non_running_tasks`, `invalid_task_shape`,
+`ongoing_updates`, `missing_ready_nodes`, `duplicate_node_assignments`,
+`missing_node_assignments`, and `outside_approved_nodes`. A job wait fills only
+`missing_ready_slots` (a ReplicatedJob short of `TotalCompletions`) and
+`missing_ready_nodes` (a GlobalJob with an approved node not yet complete), each
+counting affected services rather than tasks or nodes. For Compose the
+long-running readiness counters are `non_running_containers`,
+`restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
 configured healthcheck that isn't `healthy`, including still `starting` or not
 yet reported). A restarting or paused container also counts as non-running.
 `unfinished_completion_containers` counts affected completion services, not
 individual containers or replicas; the other readiness counters exclude
 completion services.
+`restart_budget_exceeded_containers` counts affected long-running services once
+each, bounded by `captured_services`, from the latest complete cycle.
 
 A `Failure.cause` or a target's `template` may hold confidential wire data; they
 stay out of `repr()`, but don't log them without a confidentiality policy.

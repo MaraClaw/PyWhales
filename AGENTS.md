@@ -114,7 +114,7 @@ After the build, CI runs `python -m scripts.delivery smoke`. The seal, prepare, 
 - `--no-runtime-skip` only affects the session `docker_client` fixture in `tests/conftest.py`: a missing executable, failed version probe, or timeout fails instead of skipping. CI passes it, but it doesn't gate separately built or global clients, plugins, or the collection-time `compose.is_installed()` skip in `tests/pywhales/components/test_compose.py`, which skips independently. See `tests/AGENTS.md`.
 - `scripts/ci-setup.sh` calls `scripts/add-local-docker-registry.sh`, which overwrites `/etc/docker/daemon.json` and restarts Docker with sudo.
 - That setup also installs plugins; it's CI provisioning, not safe workstation setup. Don't run it casually.
-- `scripts/download-docker-plugins.sh` downloads checksum-pinned Linux amd64 plugins into `$DOCKER_CONFIG/cli-plugins` (default `~/.docker/cli-plugins`). Treat it as CI provisioning too.
+- `scripts/download-docker-plugins.sh` downloads checksum-pinned Linux amd64 or arm64 plugins into `$DOCKER_CONFIG/cli-plugins` (default `~/.docker/cli-plugins`). Treat it as CI provisioning too.
 - Don't run publication, release, or deployment operations of `scripts.delivery` against the production repository. Local delivery tests use inert stubs.
 - `scripts/fleet_contract` and `scripts/fleet_harness` are offline: no Docker, daemon, or network. Their output never qualifies or authorizes a live run, so keep credentials and private endpoints out of their input files.
 - `PYWHALES_DEBUG=1` enables execution diagnostics that withhold command, environment, and captured-output values by default.

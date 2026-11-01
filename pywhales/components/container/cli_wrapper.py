@@ -501,7 +501,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             timestamps: Include timestamps in log records.
             until: Upper log timestamp or relative time limit; `None` omits it.
             timeout: Positive finite seconds for the local logs CLI, or `None`
-                for no deadline. Inspection before launch is outside the budget.
+                to inherit the client default. Inspection before launch is outside the budget.
 
         Returns:
             Decoded stdout and stderr records joined in arrival order.
@@ -1270,7 +1270,7 @@ class ContainerCLI(DockerCLICaller):
                 `("stderr", bytes)` records. Incompatible with TTY or detach.
             detach_keys: Override the key sequence for detaching a container.
             timeout: Positive finite seconds from local exec CLI launch, or
-                `None` for no deadline. A stream's deadline advances even before
+                `None` to inherit the client default. A stream's deadline advances even before
                 or between iterations.
 
         Returns:
@@ -1573,7 +1573,7 @@ class ContainerCLI(DockerCLICaller):
             stream: Return an owned output stream instead of collecting text.
                 Records are `("stdout", bytes)` and `("stderr", bytes)` pairs.
             timeout: Positive finite seconds from local logs CLI launch, or `None`
-                for no deadline. Timing advances while consumption pauses.
+                to inherit the client default. Timing advances while consumption pauses.
                 Inspection runs outside this deadline. Expiry raises `DockerTimeout`
                 without stopping the container or changing post-exit pipe draining.
 
@@ -1590,6 +1590,7 @@ class ContainerCLI(DockerCLICaller):
             DockerException: The logs CLI exits unsuccessfully.
         """
 
+        validate_timeout(timeout)
         # first we verify that the container exists and raise an exception if not.
         self.inspect(container)
 
@@ -2075,7 +2076,7 @@ class ContainerCLI(DockerCLICaller):
             volumes_from: Containers whose volumes should be mounted.
             workdir: The directory in the container where the process will be executed.
             timeout: Positive finite seconds from run subprocess launch, or None
-                for no deadline. Does not budget image preflight or handle lookup.
+                to inherit the client default. Does not budget image preflight or handle lookup.
 
         Returns:
             A container handle with detach=True; an owned stream of
@@ -2627,13 +2628,18 @@ class ContainerCLI(DockerCLICaller):
         run(full_cmd)
 
     @overload
-    def wait(self, x: ValidContainer) -> int: ...
+    def wait(self, x: ValidContainer, *, timeout: float | None = None) -> int: ...
 
     @overload
-    def wait(self, x: Iterable[ValidContainer]) -> builtins.list[int]: ...
+    def wait(
+        self, x: Iterable[ValidContainer], *, timeout: float | None = None
+    ) -> builtins.list[int]: ...
 
     def wait(
-        self, x: ValidContainer | Iterable[ValidContainer]
+        self,
+        x: ValidContainer | Iterable[ValidContainer],
+        *,
+        timeout: float | None = None,
     ) -> int | builtins.list[int]:
         """Block until selected containers stop and return their exit codes.
 
@@ -2642,14 +2648,20 @@ class ContainerCLI(DockerCLICaller):
 
         Args:
             x: Containers to wait for; an empty iterable skips execution.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before empty input returns.
 
         Returns:
             One exit code for a scalar reference, or codes in Docker's output
             order for iterable input, including [] for empty input.
 
         Raises:
+            ValueError: Timeout is boolean, nonfinite, zero or negative.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped. Waiting containers are not stopped.
             NoSuchContainer: If a selected container does not exist.
         """
+        validate_timeout(timeout)
         containers = to_list(x)
         if len(containers) == 0:
             # nothing to do
@@ -2657,10 +2669,10 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd = Command([*self.docker_cmd, "container", "wait", *containers])
         if isinstance(x, Iterable) and not isinstance(x, str):
-            exit_codes = run(full_cmd)
+            exit_codes = run(full_cmd, timeout=timeout)
             return [int(exit_code) for exit_code in exit_codes.splitlines()]
         else:
-            return int(run(full_cmd))
+            return int(run(full_cmd, timeout=timeout))
 
 
 class ContainerStats:

@@ -119,7 +119,7 @@ def test_modern_build_entrypoints_execute_buildx(
         "--progress",
         "plain",
         "--build-arg",
-        "VERSION=3",
+        "VERSION",
         "--load",
         "--file",
         "Containerfile",
@@ -130,6 +130,10 @@ def test_modern_build_entrypoints_execute_buildx(
     ]
     assert builds[0][-3] == "--iidfile"
     assert builds[0][-1] == "context"
+    build_call = next(
+        call for call in commands.call_args_list if "build" in call.args[0]
+    )
+    assert build_call.kwargs["env"]["VERSION"] == "3"
 
 
 @pytest.mark.parametrize("call", [None, "build", "check", "outline", "targets"])

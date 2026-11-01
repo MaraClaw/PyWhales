@@ -97,6 +97,17 @@ def _check_compose_deadlines(
 ) -> None:
     run_args: ComposeRunArgs = {"timeout": timeout}
     assert_type(client.compose.run("app", **run_args), str)
+    assert_type(client.compose.execute("app", ["cmd"], timeout=timeout), str | None)
+    assert_type(client.compose.build(timeout=timeout), None)
+    assert_type(
+        client.compose.build(stream_logs=True, timeout=timeout), ProcessStream | None
+    )
+    assert_type(
+        client.compose.build(stream_logs=flag, timeout=timeout), ProcessStream | None
+    )
+    assert_type(client.container.wait("app", timeout=timeout), int)
+    assert_type(client.wait(["app"], timeout=timeout), list[int])
+    assert_type(docker.wait("app", timeout=timeout), int)
     assert_type(client.compose.run("app", detach=True, timeout=timeout), Container)
     assert_type(
         client.compose.run("app", stream=True, timeout=timeout),

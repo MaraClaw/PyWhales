@@ -7,8 +7,9 @@ from typing import Final, Literal, assert_never
 import pytest
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from scripts.fleet_contract.__main__ import safe_errors
 from scripts.fleet_contract.report import Evidence, classify
-from scripts.fleet_contract.results import Sample
+from scripts.fleet_contract.results import RunResult, Sample
 
 FIXTURES: Final = (
     Path(__file__).resolve().parents[2] / "scripts/fleet_contract/fixtures"
@@ -66,6 +67,7 @@ def test_sample_preserved_when_missing_or_excluded_is_explicit(
 ) -> None:
     raw = json.dumps(
         {
+            "submission": 1,
             "outcome": "failed",
             "reason": reason,
             "seconds": seconds,
@@ -77,6 +79,53 @@ def test_sample_preserved_when_missing_or_excluded_is_explicit(
 
     assert sample.seconds == seconds and sample.excluded is excluded
     assert Sample.model_validate_json(sample.model_dump_json()) == sample
+
+
+def linked(links: tuple[int | None, ...]) -> str:
+    """Return the fixture result with its queue-wait sample links replaced."""
+    data = JSON_OBJECT.validate_json((FIXTURES / "synthetic-result.json").read_text())
+    latency = data["latency"]
+    assert isinstance(latency, list) and isinstance(latency[0], dict)
+    samples = latency[0]["samples"]
+    assert isinstance(samples, list)
+    for sample, link in zip(samples, links, strict=True):
+        assert isinstance(sample, dict)
+        if link is None:
+            del sample["submission"]
+        else:
+            sample["submission"] = link
+    return json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    ("links", "path"),
+    [
+        ((None, 2), "$.latency.0.samples.0.submission"),
+        ((0, 2), "$.latency.0.samples.0.submission"),
+        ((1, 3), "$.latency"),
+        ((1, 1), "$.latency.0"),
+    ],
+)
+def test_unlinked_result_when_sample_links_are_malformed_fails_safely(
+    links: tuple[int | None, ...], path: str
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        RunResult.model_validate_json(linked(links))
+
+    rendered = json.loads(safe_errors(caught.value, RunResult))
+    assert [error["path"] for error in rendered["errors"]] == [path]
+    assert set(rendered["errors"][0]) == {"code", "path"}
+    assert rendered["errors"][0]["code"] in {"missing", "invalid"}
+
+
+@pytest.mark.parametrize("link", ["1", 1.0, True])
+def test_sample_link_when_not_a_strict_integer_is_rejected(link: JsonValue) -> None:
+    raw = linked((1, 2)).replace(
+        '"submission": 1', f'"submission": {json.dumps(link)}', 1
+    )
+
+    with pytest.raises(ValidationError):
+        RunResult.model_validate_json(raw)
 
 
 @pytest.mark.parametrize(

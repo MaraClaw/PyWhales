@@ -1,5 +1,6 @@
 """Simulation artifacts with explicit collection boundaries and ownership."""
 
+from dataclasses import dataclass
 from typing import Literal, Self, assert_never
 
 from pydantic import field_validator, model_validator
@@ -11,13 +12,20 @@ from scripts.fleet_contract.common import (
     Count,
     Digest,
     Positive,
+    PositiveCount,
     Token,
 )
 from scripts.fleet_contract.platform import Platform, Topology
 from scripts.fleet_contract.results import Outcome, Outcomes
-from scripts.fleet_contract.workload import Artifact, Boundary, Image, Workload
+from scripts.fleet_contract.workload import (
+    Artifact,
+    Boundary,
+    Image,
+    Workload,
+)
 
 from .models import Metric, Step
+from .timeline import is_ordered, peak_counts, reconcile
 
 
 class OwnedResource(Contract):
@@ -96,6 +104,43 @@ class Environment(Contract):
         )
 
 
+class Receipt(Contract):
+    """Arrival, admission and terminal time of one submission.
+
+    A null admission means the submission never launched: it timed out in the
+    queue or was cancelled there by an early stop.
+    """
+
+    submission: PositiveCount
+    arrival_seconds: Amount
+    admitted_seconds: Amount | None
+    terminal_seconds: Amount
+    outcome: Outcome
+
+
+class Peaks(Contract):
+    """Largest settled active and queued submission counts over one run."""
+
+    active: Count
+    queued: Count
+
+
+class Schedule(Contract):
+    """Frozen overlap receipts in submission order with their observed peaks."""
+
+    peaks: Peaks
+    receipts: tuple[Receipt, ...]
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        """Reject receipts that break FIFO order or peaks the receipts do not give."""
+        if not is_ordered(self.receipts):
+            raise PydanticCustomError("schedule_order", "schedule_order")
+        if (self.peaks.active, self.peaks.queued) != peak_counts(self.receipts):
+            raise PydanticCustomError("schedule_peaks", "schedule_peaks")
+        return self
+
+
 class RunReport(Contract):
     """Always simulated and unqualified, irrespective of scripted success."""
 
@@ -132,6 +177,7 @@ class RunReport(Contract):
     metrics_boundary: Literal["after_each_submission_simulated"] = (
         "after_each_submission_simulated"
     )
+    schedule: Schedule | None = None
 
     @model_validator(mode="after")
     def coherent_outcomes(self) -> Self:
@@ -172,6 +218,24 @@ class RunReport(Contract):
             case unreachable:
                 assert_never(unreachable)
         return self
+
+    @model_validator(mode="after")
+    def coherent_schedule(self) -> Self:
+        """Treat a report without receipts as sequential; verify scheduled ones."""
+        code = reconcile(self)
+        if code is not None:
+            raise PydanticCustomError(code, code)
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class Load:
+    """What a load loop observed: samples, submissions, stop reasons and receipts."""
+
+    samples: tuple[Observation, ...]
+    submitted: int
+    reasons: tuple[str, ...]
+    schedule: Schedule | None = None
 
 
 def terminal_outcomes(samples: tuple[Observation, ...]) -> Outcomes:

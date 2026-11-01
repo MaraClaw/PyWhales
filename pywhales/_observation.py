@@ -2,8 +2,8 @@
 
 import math
 import time
-from collections.abc import Generator
-from contextlib import contextmanager
+from collections.abc import Callable, Generator
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Event, Lock
@@ -38,6 +38,15 @@ class _StreamAccount(_ResponseAccount):
     """
 
 
+@dataclass(slots=True)
+class _StdinAccount(_ResponseAccount):
+    """Track the child stdin bytes a local pipe accepted during one scope.
+
+    Kept apart from the response and stream accounts. ``write_stdin`` holds the
+    lock across each write, so ``consumed`` never passes ``limit``.
+    """
+
+
 def _charge(accounts: tuple[_ResponseAccount, ...], size: int, reason: str) -> None:
     """Charge every account under its own lock before reporting any overflow."""
     exceeded: tuple[int, int] | None = None
@@ -60,6 +69,7 @@ class ObservationState:
     cancel_tokens: tuple[Event, ...]
     response_accounts: tuple[_ResponseAccount, ...]
     stream_accounts: tuple[_StreamAccount, ...] = ()
+    stdin_accounts: tuple[_StdinAccount, ...] = ()
 
     @property
     def binds_launches(self) -> bool:
@@ -67,12 +77,13 @@ class ObservationState:
 
         A launch retains the snapshot only when it has something to enforce after
         the scope's ``with`` block exits: a deadline, a cancel token, or a stream
-        budget. Only a deadline or a token ever needs a timed wait.
+        or stdin budget. Only a deadline or a token ever needs a timed wait.
         """
         return (
             self.deadline is not None
             or bool(self.cancel_tokens)
             or bool(self.stream_accounts)
+            or bool(self.stdin_accounts)
         )
 
     def response_allowance(self, command_remaining: int) -> int:
@@ -131,6 +142,43 @@ class ObservationState:
         """
         _charge(self.stream_accounts, size, "total_stream")
 
+    def write_stdin(self, size: int, write: Callable[[int], int]) -> int:
+        """Run one pipe write bounded by, and charged to, every stdin account.
+
+        Every enclosing account stays locked, outermost first, while ``write``
+        runs, so writers sharing an account never pass its limit and none holds
+        back capacity another could still use. ``write`` must not block: pass a
+        nonblocking pipe write and wait for readiness outside this call.
+
+        Args:
+            size: Positive bytes the caller still wants to send.
+            write: Perform one write of at most the given bytes and return how
+                many the pipe accepted. An exception it raises charges nothing.
+
+        Returns:
+            Bytes the pipe accepted, charged to every enclosing account; fewer
+            than ``size`` when cut to the tightest remaining allowance.
+
+        Raises:
+            ObservationLimitError: With reason ``total_stdin`` when an enclosing
+                account has no allowance left. Nothing is written or charged.
+        """
+        accounts = self.stdin_accounts
+        with ExitStack() as locked:
+            for account in accounts:
+                locked.enter_context(account.lock)
+            for account in accounts:
+                if account.consumed >= account.limit:
+                    raise ObservationLimitError(
+                        "total_stdin", account.limit, account.limit + 1
+                    )
+            written = write(
+                min((size, *(account.limit - account.consumed for account in accounts)))
+            )
+            for account in accounts:
+                account.consumed += written
+        return written
+
 
 _current_observation: ContextVar[ObservationState | None] = ContextVar(
     "pywhales_observation", default=None
@@ -185,6 +233,7 @@ def observation(
     parent = get_observation()
     response_limit = policy.max_total_response_bytes
     stream_limit = policy.max_total_stream_bytes
+    stdin_limit = policy.max_total_stdin_bytes
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
@@ -201,6 +250,9 @@ def observation(
             max_total_stream_bytes=_minimum_optional(
                 parent.policy.max_total_stream_bytes, policy.max_total_stream_bytes
             ),
+            max_total_stdin_bytes=_minimum_optional(
+                parent.policy.max_total_stdin_bytes, policy.max_total_stdin_bytes
+            ),
         )
     deadlines = tuple(
         value
@@ -210,6 +262,7 @@ def observation(
     tokens = parent.cancel_tokens if parent is not None else ()
     accounts = parent.response_accounts if parent is not None else ()
     stream_accounts = parent.stream_accounts if parent is not None else ()
+    stdin_accounts = parent.stdin_accounts if parent is not None else ()
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
@@ -223,6 +276,11 @@ def observation(
             (*stream_accounts, _StreamAccount(stream_limit))
             if stream_limit is not None
             else stream_accounts
+        ),
+        stdin_accounts=(
+            (*stdin_accounts, _StdinAccount(stdin_limit))
+            if stdin_limit is not None
+            else stdin_accounts
         ),
     )
     token = _current_observation.set(state)

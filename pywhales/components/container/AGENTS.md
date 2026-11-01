@@ -35,7 +35,7 @@
 
 ## Local Deadlines
 
-- `run`, `execute`, `start`, `copy`, `export`, and `logs` take keyword-only `timeout` on `ContainerCLI`, the matching
+- `wait`, `run`, `execute`, `start`, `copy`, `export`, and `logs` take keyword-only `timeout` on `ContainerCLI`, the matching
   root aliases (`docker.run`, `docker.start`, and so on), and the `Container` handle (`execute`, `start`, `copy_from`,
   `copy_to`, `export`, `logs`; there's no handle `run()`). `None` inherits `ClientConfig.default_timeout`.
   Expiry kills and reaps only the local CLI and raises `DockerTimeout`; it doesn't stop or cancel container-side
@@ -50,6 +50,8 @@
 - Attach and stream ownership is unchanged. Streamed `start()`, `execute()`, `run()`, and `logs()` return owned
   streams whose deadline advances even when nobody iterates; close them or use the context manager on early exit.
   TTY output is forwarded and the returned text is empty. `copy()` local paths are on the Python host.
+- `wait()` validates before consuming iterable input or returning `[]`; scalar returns stay `int` and iterable
+  returns stay `list[int]`. The root alias forwards the same keyword-only deadline.
 
 ## Batch Inspection And Top
 

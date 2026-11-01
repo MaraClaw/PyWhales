@@ -25,7 +25,7 @@ image. Without an explicit exporter, loading depends on the builder's driver.
 | Intent | Arguments |
 | --- | --- |
 | Choose Dockerfile/stage | `file="Dockerfile.dev", target="test"` |
-| Pass build arguments | `build_args={"VERSION": "dev"}` |
+| Pass build arguments | `build_args={"VERSION": "dev"}`; see [Build Arguments](#build-arguments) |
 | Disable cache | `cache=False`, not `no_cache=True` |
 | Select target platforms | `platforms=["linux/amd64", "linux/arm64"]` |
 | Export files | `output={"type": "local", "dest": "./dist"}` |
@@ -35,6 +35,34 @@ Choose an exporter for the requested result. Only push to a destination the
 task authorizes, with existing registry authentication. Multi-platform builds
 need a capable builder/exporter; don't assume the local image store can load
 every multi-platform result.
+
+## Build Arguments
+
+An eligible `build_args` name reaches Buildx as name-only `--build-arg VERSION`,
+and its value travels in that launch's child environment. This holds in every
+build branch: blocking builds, `stream_logs=True`, `call=` reports, and both load
+paths (Docker driver and other drivers). It doesn't change the parent Python
+environment.
+
+Names that need the literal form stay `--build-arg KEY=VALUE` by default. That
+covers reserved CLI or runtime names (`DOCKER_*`, `BUILDKIT_*`, `PATH`, and
+anything starting with `PYTHON`, matched case-insensitively), invalid entries
+(empty or `=`/NUL-containing names, NUL-containing values, non-string keys),
+duplicate names, and names colliding with the effective environment. With
+`DockerClient(strict_env_transport=True)` any such entry raises a value-free
+`ValueError` instead. The check runs before executable lookup or builder
+inspection, so no launch happens for that call.
+
+`PYTHON_VERSION` is reserved on purpose, because the `PYTHON` prefix is treated
+as CLI-controlling. A Dockerfile `ARG PYTHON_VERSION` therefore works only in
+the default literal mode; under strict mode rename the `ARG`, for example to
+`PY_VERSION`.
+
+Build args aren't a secret vault in either mode: values can still appear in
+image history and provenance, and in argv when a literal fallback applies. Use
+`secrets=` for sensitive build input. `bake(set=...)` isn't affected by strict
+mode and keeps its `--set` arguments. `variables=` keeps overlaying the Bake
+subprocess environment as before.
 
 `build`, `bake`, and `prune` accept a keyword-only `timeout` in positive finite
 seconds, replacing the client's `default_timeout` for that one local CLI
@@ -138,8 +166,10 @@ or an existing `Builder` handle. Limits, deadlines, and cancellation come from
 
 - References are exact builder names, not IDs, and no name reaches the command
   line. Buildx has no batch inspect, so each client configuration group runs
-  one `buildx ls --format "{{json . }}"` listing and returns one detached
-  snapshot per requested name, in request order, duplicates included.
+  one `buildx ls --format "{{json . }}"` listing. Inventory capture returns one
+  detached record per requested occurrence, in request order, duplicates included;
+  `bulk_reload()` instead stages snapshots and refreshes the original handles,
+  returning `None`.
 - That listing is parsed strictly. Lines identical byte for byte collapse,
   because node rows repeat them. A non-builder line, a null or empty name, or
   two different lines under one name raises `ParsingError` before any snapshot

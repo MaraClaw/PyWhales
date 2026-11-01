@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from pywhales._observation import check_observation, observation
 from pywhales.client_config import ClientNotFoundError, ParsingError
 from pywhales.convergence._compose import (
+    Selection,
     capture_project,
     validate_selection,
     wait_compose,
@@ -27,8 +28,8 @@ from pywhales.convergence._types import (
     Success,
 )
 from pywhales.convergence._wire import (
-    fingerprint,
     inspect_service,
+    same_generation,
     target_from_wire,
 )
 from pywhales.docker_client import DockerClient
@@ -112,6 +113,7 @@ def capture_compose(
     services: tuple[str, ...],
     *,
     completion_services: tuple[str, ...] = (),
+    max_restarts: int | None = None,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -134,6 +136,14 @@ def capture_compose(
             captured container is ``exited`` with code 0 and not restarting, and a
             container that exited nonzero and isn't restarting ends ``wait`` with
             ``completion_failed``. Fixed at capture, unlike discovery.
+        max_restarts: ``None`` (default) leaves Docker's ``RestartCount`` unchecked.
+            A nonnegative integer, never a bool, fixes a restart budget into the
+            target: each long-running container's current ``RestartCount`` must be
+            at most this, in every cycle and the final pass, and a service above it
+            stays unsettled even while running and healthy. The counter isn't
+            assumed monotonic, so a later within-budget reading clears the blocker.
+            Completion services ignore it. A missing, negative or non-integer
+            count on an enabled long-running container is ``malformed``.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -146,12 +156,14 @@ def capture_compose(
     Raises:
         ValueError: If the timeout is invalid, services isn't a nonempty tuple of
             distinct nonempty names, completion_services isn't a tuple of distinct
-            selected names, or the client is in dry-run mode.
+            selected names, max_restarts isn't ``None`` or a nonnegative integer,
+            or the client is in dry-run mode.
     """
     _positive(timeout)
-    validate_selection(client.client_config, services, completion_services)
+    selection = Selection(services, completion_services, max_restarts)
+    validate_selection(client.client_config, selection)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
-    return capture_project(client.client_config, services, completion_services, scope)
+    return capture_project(client.client_config, selection, scope)
 
 
 def wait(
@@ -171,7 +183,8 @@ def wait(
             have a healthcheck; membership or config-hash changes are ``superseded``.
             Completion services instead need every container ``exited`` with code
             0 and not restarting, and fail as ``completion_failed`` on a nonzero
-            exit that isn't restarting.
+            exit that isn't restarting. A target with ``max_restarts`` also needs
+            every long-running container's ``RestartCount`` within that budget.
         policy: Required per-launch observation bounds.
         timeout: Positive finite total seconds from entry.
         poll_interval: Positive finite seconds between observations.
@@ -218,16 +231,15 @@ def wait(
                         latest = inspect_service(
                             service.client_config, service.service_id
                         )
-                        if (
-                            latest.version.index != service.version
-                            or fingerprint(latest) != service.fingerprint
-                        ):
+                        if not same_generation(service, latest):
                             return Failure(
                                 reason="superseded", service_id=service.service_id
                             )
                         update = (
                             latest.update.state if latest.update is not None else None
                         )
+                        if service.mode in {"replicated_job", "global_job"}:
+                            update = None
                         if update in {
                             "paused",
                             "rollback_started",

@@ -240,6 +240,49 @@ def test_collision_snapshot_is_the_launch_environment() -> None:
     assert effective["APP_VALUE"] == "container"
 
 
+@pytest.mark.parametrize(
+    "assignments",
+    [
+        {"APP_NUL": "private\0value"},
+        {7: "private"},
+        {"PYTHON_VERSION": "private"},
+        {"APP_COLLISION": "private"},
+    ],
+)
+def test_strict_transport_rejects_every_literal_fallback(
+    assignments: dict[str | int, str],
+) -> None:
+    config = ClientConfig(
+        strict_env_transport=True, environment={"APP_COLLISION": "client"}
+    )
+    with pytest.raises(ValueError) as error:
+        container_environment(assignments, config)
+    assert "private" not in str(error.value)
+
+
+def test_strict_windows_equivalent_entries_reject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pywhales._environment._WINDOWS", True)
+    with pytest.raises(ValueError):
+        container_environment(
+            {"app_key": "one", "APP_KEY": "two"},
+            ClientConfig(strict_env_transport=True),
+        )
+
+
+def test_strict_frozen_snapshot_controls_collision_and_launch() -> None:
+    config = ClientConfig(strict_env_transport=True, environment={"APP_VALUE": "newer"})
+    with frozen_environment_scope(config, {"FROZEN_VALUE": "frozen"}):
+        arguments, overrides = container_environment({"APP_VALUE": "selected"}, config)
+        assert arguments == ["APP_VALUE"]
+        assert resolve_environment(config.environment, overrides) == {
+            "FROZEN_VALUE": "frozen",
+            "APP_VALUE": "selected",
+        }
+        assert consume_frozen_environment(config) == {"FROZEN_VALUE": "frozen"}
+
+
 def test_moved_value_is_charged_to_launch_environment(
     env_client: DockerClient, tmp_path: Path
 ) -> None:

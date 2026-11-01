@@ -292,17 +292,17 @@ def test_remove_empty_services_list(docker_client: DockerClient) -> None:
 
 @pytest.mark.usefixtures("swarm_mode")
 def test_service_scale(docker_client: DockerClient) -> None:
-    service = docker_client.service.create("busybox", ["sleep", "infinity"])
-    service.scale(3)
-    time.sleep(0.4)
-    assert service.spec is not None
-    assert service.spec.mode is not None
-    assert service.spec.mode["Replicated"] == {"Replicas": 3}
-    service.update(replicas=1)
-    time.sleep(0.4)
-    assert service.spec is not None
-    assert service.spec.mode is not None
-    assert service.spec.mode["Replicated"] == {"Replicas": 1}
+    with docker_client.service.create("busybox", ["sleep", "infinity"]) as service:
+        service.scale(3)
+        service.reload()
+        assert service.spec is not None
+        assert service.spec.mode is not None
+        assert service.spec.mode["Replicated"] == {"Replicas": 3}
+        service.update(replicas=1)
+        service.reload()
+        assert service.spec is not None
+        assert service.spec.mode is not None
+        assert service.spec.mode["Replicated"] == {"Replicas": 1}
 
 
 @pytest.mark.usefixtures("swarm_mode")

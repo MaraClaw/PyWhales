@@ -18,9 +18,13 @@ from scripts.fleet_harness.experiment import (
 )
 from scripts.fleet_harness.runner import run
 from tests.pywhales.test_fleet_harness import (
+    at,
     duration_manifest,
     duration_plan,
     manifest,
+    overlap_manifest,
+    overlap_plan,
+    overlapped,
     plan,
 )
 
@@ -252,4 +256,85 @@ def test_experiment_rejects_when_imported_report_is_incoherent(
     # Then nested RunReport validation rejects the specific route with fixed codes.
     assert [(error["loc"], error["type"]) for error in caught.value.errors()] == [
         (("comparison", route), code)
+    ]
+
+
+def test_matched_overlap_when_contracts_agree_stays_no_go_without_launches() -> None:
+    # Given equal overlapping simulations with receipts, peaks and a queued waiter.
+    result = overlapped()
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+
+    # When the prerecorded comparison is decided with every contact path refused.
+    with (
+        patch.object(subprocess, "Popen", side_effect=AssertionError("process")),
+        patch.object(socket, "socket", side_effect=AssertionError("socket")),
+    ):
+        decision = decide(Experiment(comparison=comparison))
+
+    # Then overlap evidence never promotes the route beyond a simulated no-go.
+    assert decision.comparison_status == "matched_simulation"
+    assert decision.mismatches == () and decision.decision == "no_go"
+    assert decision.selected_route == "cli" and decision.simulation
+    assert decision.candidate_launches == decision.connections == 0
+    assert decision.evidence.comparison == comparison
+
+
+@pytest.mark.parametrize("change", ["offsets", "sequential"])
+def test_scope_mismatch_when_arrival_offsets_differ_rejects(change: str) -> None:
+    # Given the same operations run with other offsets, or with none at all.
+    steps = (at(0.0), at(0.5))
+    other = (at(0.0), at(0.6)) if change == "offsets" else (at(0.0), at(0.5))
+    cli = run(overlap_manifest(2), overlap_plan(*steps))
+    recipe = overlap_plan(*other)
+    if change == "sequential":
+        recipe = recipe.model_copy(
+            update={
+                "steps": tuple(
+                    step.model_copy(update={"arrival_seconds": None})
+                    for step in recipe.steps
+                )
+            }
+        )
+    candidate = run(overlap_manifest(2), recipe)
+    comparison = Comparison(
+        cli=cli,
+        candidate=candidate,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+
+    # When the comparison is decided.
+    decision = decide(Experiment(comparison=comparison))
+
+    # Then the operation digest binds the offsets and the candidate is rejected.
+    assert cli.operation_digest != candidate.operation_digest
+    assert decision.comparison_status == "rejected"
+    assert "scope.operation_digest" in decision.mismatches
+    assert decision.decision == "no_go" and decision.candidate_launches == 0
+
+
+def test_experiment_rejects_when_imported_scheduled_report_is_tampered() -> None:
+    # Given a matched overlapping comparison whose candidate misreports its peaks.
+    result = overlapped()
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    raw["comparison"]["candidate"]["schedule"]["peaks"]["active"] = 1
+
+    # When the serialized experiment is imported.
+    with pytest.raises(ValidationError) as caught:
+        Experiment.model_validate_json(json.dumps(raw))
+
+    # Then nested validation rejects only the candidate with the fixed peaks code.
+    assert [(error["loc"], error["type"]) for error in caught.value.errors()] == [
+        (("comparison", "candidate", "schedule"), "schedule_peaks")
     ]

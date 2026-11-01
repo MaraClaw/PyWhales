@@ -163,6 +163,8 @@ class ClientConfig:
         environment: Copied child environment overlay, hidden from repr but
             included in equality. Mutations affect subsequent independent launches.
         default_timeout: Positive finite seconds per CLI launch, or None for no deadline.
+        strict_env_transport: Reject container envs and build args requiring literal
+            argv fallback. Defaults to false for compatibility.
     """
 
     config: ValidPath | None = None
@@ -194,6 +196,7 @@ class ClientConfig:
     telemetry_observer: TelemetryObserver | None = field(default=None, repr=False)
     environment: Mapping[str, str] | None = field(default=None, repr=False)
     default_timeout: float | None = None
+    strict_env_transport: bool = False
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.

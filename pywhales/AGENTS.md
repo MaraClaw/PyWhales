@@ -13,13 +13,17 @@
 
 ## Container Environment Transport
 
-- `_environment.py::container_environment` is shared by container `create`/`run`/`execute`, Compose `run`/`execute`, and service `create`.
+- `_environment.py::container_environment` is shared by container `create`/`run`/`execute`, Compose `run`/`execute`, service `create`, and Buildx/Compose `build` args.
 - Safe noncolliding names become `--env KEY`; values move to per-launch overrides bound to the effective child-environment snapshot, never to process-global `os.environ`.
 - Reserved CLI/runtime names or prefixes, invalid names/values, non-string keys, and ambient/client collisions retain ordered literal `KEY=value` arguments rather than new rejection or env-file behavior.
 - A matching frozen scope supplies collision checks without consuming its one-use snapshot. Windows checks names case-insensitively; all equivalent mapping entries stay literal.
 - Existing stringification (including non-string values) and empty values survive. `_ContainerEnvironment` binds the collision snapshot so later ambient/client changes cannot change the launch decision.
 - This reduces argv exposure, not universal redaction: literal fallbacks, child environments, returned data, raw exception attributes, and caller logging can still carry values; see confidentiality below.
 - Compose receives the same child overrides for config interpolation; these are not a container-only secret channel. Tests: `tests/pywhales/components/test_env_forwarding.py` and `test_env_branch_transport.py`.
+- `strict_env_transport=True` on `DockerClient`/`ClientConfig` rejects any literal assignment fallback with a
+  value-free `ValueError`; build args reject before lookup/inspect. The default is false. Reserved prefixes
+  include `PYTHON`, so `PYTHON_VERSION` rejects in strict mode. Bake `--set` is unaffected. Image history,
+  provenance, child environments and Compose interpolation remain possible value exposure surfaces.
 
 ## Bulk Reload And Inventory
 
@@ -38,8 +42,9 @@
 
 - `observation(policy, deadline=, cancel=)` intersects per-command limits, non-`None` totals and finite monotonic deadlines; all enclosing tokens remain effective. Entry/exit check cancellation before deadline.
 - Captured bytes charge every enclosing locked `_ResponseAccount` before reporting overflow; streams charge separate `_StreamAccount`s (`ObservationState.stream_accounts`, default `()`), never each other's accounts.
-- `binds_launches` (deadline, token, or stream account) retains stream/archive scope snapshots; a budget alone adds no wait timer.
-- `run()` checks observation before timeout/input branches: observed calls always use `bounded_capture` and reject TTY, uncaptured output, or input with `ValueError`.
+- `binds_launches` (deadline, token, stream or stdin account) retains stream/archive scope snapshots; a budget alone adds no wait timer.
+- `run()` checks observation before timeout/input branches: observed calls always use `bounded_capture` and reject TTY, uncaptured output, or input without `max_total_stdin_bytes` with `ValueError`. Budgeted bytes or cooperative byte iterables upload while stdout and stderr drain.
+- Stdin writes lock all enclosing `_StdinAccount`s outermost first across one nonblocking write and charge only accepted bytes, separately from response and stream budgets. Exact-budget EOF succeeds; further nonempty input raises `total_stdin`. Archive uploads retain the same accounts after scope exit. Caller iterator code cannot be interrupted; cleanup joins the owned writer after it yields.
 - Only unobserved calls use `subprocess.run()` (no timeout/input) or `Popen.communicate()` (timeout/input, with owned stdin-writer cleanup).
 - `check_scoped_launch()` precedes `Popen` and telemetry; `E2BIG` becomes `ObservationLimitError("native_argv")`.
 - Capture precedence is cancellation, then a command deadline strictly earlier than the scope's while the child runs, then scope expiry. Tokens add only `CANCEL_CHECK` (50 ms) waits.
