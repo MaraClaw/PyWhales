@@ -53,10 +53,21 @@ def test_services_inspect(docker_client: DockerClient) -> None:
     assert "name='some_stack'" in repr(docker_client.stack.list())
 
 
-@pytest.mark.usefixtures("stack")
-def test_remove_empty_stack_list(docker_client: DockerClient) -> None:
-    docker_client.stack.remove([])
-    assert docker_client.stack.list() != []
+@pytest.mark.parametrize(
+    "make_empty",
+    [
+        pytest.param(list, id="list"),
+        pytest.param(tuple, id="tuple"),
+        pytest.param(lambda: (item for item in ()), id="generator"),
+    ],
+)
+def test_remove_empty_stack_list(make_empty: Callable[[], Iterable[str]]) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.stack.remove(make_empty())
 
 
 def test_stack_ps_and_services(docker_client: DockerClient, stack: Stack) -> None:
@@ -164,28 +175,11 @@ def test_services_not_swarm_manager(docker_client: DockerClient) -> None:
     assert "not a swarm manager" in e.value.stderr.lower()
 
 
-EMPTY_SELECTIONS = [
-    pytest.param(list, id="list"),
-    pytest.param(tuple, id="tuple"),
-    pytest.param(lambda: (item for item in ()), id="generator"),
-]
 SINGLE_SELECTIONS = [
     pytest.param(lambda: "alpha", id="str"),
     pytest.param(lambda: ["alpha"], id="list"),
     pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
 ]
-
-
-@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
-def test_stack_remove_empty_selection_skips_cli(
-    make_empty: Callable[[], Iterable[str]],
-) -> None:
-    client = DockerClient(client_call=["not-installed"])
-    with (
-        patch("shutil.which", side_effect=AssertionError("executable lookup")),
-        patch("subprocess.run", side_effect=AssertionError("subprocess")),
-    ):
-        client.stack.remove(make_empty())
 
 
 @pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
