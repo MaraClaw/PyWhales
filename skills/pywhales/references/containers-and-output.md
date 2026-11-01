@@ -107,7 +107,8 @@ returns `None` without a launch. `docker.start`, `docker.container.start`, and
 positive finite seconds, replacing the client's `default_timeout` for that one
 launch; omitting it (`None`) inherits the client default, which is itself
 `None` (unbounded) unless set on `DockerClient(...)`. Expiry kills and reaps the
-local CLI and raises `DockerTimeout`, which keeps whatever output was captured.
+local CLI and raises `DockerTimeout` with retained partial output, not a replay
+of streamed stdout already delivered to the consumer.
 It is not a daemon-side container timeout: it does not stop a started or
 detached container or guarantee cancellation of the command inside it. See
 [Client, setup, and errors](client-and-errors.md) for the default-deadline
@@ -170,6 +171,8 @@ Consume the stream to exhaustion to observe a nonzero command exit as
 `DockerException`. Exiting early or calling `close()` cancels and reaps the
 local CLI; that cancellation isn't proof the command succeeded and doesn't
 remove daemon-managed containers. A bare loop `break` doesn't close a stream.
+Recorded deadline, observation, or reader errors remain deliverable once after
+`close()` or on a clean context exit; cleanup preserves an active body exception.
 
 `follow=True` can keep log collection open indefinitely. Prefer a snapshot or
 bounded `tail` unless following is requested; if following, provide a deliberate
@@ -178,3 +181,17 @@ cancellation boundary and keep the stream in a context manager.
 Container properties such as `name` and `state` can issue inspect calls and use
 a short-lived cache. Read a property once into a local variable for a coherent
 decision; use `container.reload()` when an explicit refresh is required.
+
+## Copy Files or Export a Filesystem
+
+`docker.copy(source, destination, *, timeout=None)` accepts a local path and a
+`(container, path_in_container)` endpoint, in either direction. Local paths refer
+to the Python host, unlike bind mounts. It returns `None` and doesn't accept
+byte iterators. `Container.copy_from()` and `copy_to()` forward the same
+keyword-only local deadline.
+
+`docker.export(container, output, *, timeout=None)` writes the container
+filesystem to a local tar path and returns `None`; `Container.export()` takes
+the output path and the same deadline. It doesn't return archive chunks and
+isn't an image backup. For image archives, use
+[save and load](registry-and-archives.md#save-and-load).
