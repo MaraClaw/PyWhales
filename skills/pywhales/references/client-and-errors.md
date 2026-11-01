@@ -40,9 +40,9 @@ Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
 Environment files are applied in order, with later files overriding earlier ones.
 
-`environment={"KEY": "value"}` overlays entries on top of the inherited process
-environment for every launch from that client; omitting it (`None`) inherits
-the process environment rather than replacing it. This does not affect
+`environment={"KEY": "value"}` overlays the child's base environment for every
+launch from that client. By default, `inherit_environment=True` copies the
+process environment; `environment=None` adds no overlay. This does not affect
 executable lookup or the parent Python process's own environment.
 
 Keep this CLI configuration distinct from container `envs={...}`. Eligible
@@ -53,8 +53,37 @@ Neither path is a secret vault. See
 including the Compose interpolation caveat.
 
 If passing an existing `client_config=...`, configure that object directly,
-`strict_env_transport` included: the constructor retains it unchanged and
+`inherit_environment` and `strict_env_transport` included: the constructor retains it unchanged and
 ignores the other constructor options.
+
+## Isolate The CLI Environment
+
+```python
+from pywhales import DockerClient
+
+client = DockerClient(
+    inherit_environment=False,
+    environment={"DOCKER_CONTEXT": "ci"},
+)
+```
+
+Select an existing authorized context in place of `ci`. With inheritance off,
+the child retains only the available `PATH` and `HOME` entries from the parent,
+plus `USERPROFILE` and `SYSTEMROOT` on Windows; Windows names match
+case-insensitively. The explicit client overlay and per-launch overrides are
+applied on top. Ambient `DOCKER_*`, `SSH_AUTH_SOCK`, tokens, and proxy variables
+aren't inherited: pass any needed entries explicitly through `environment=`.
+Executable lookup still uses the Python process's `PATH`, not the overlay.
+Retained home paths can still select Docker configuration and credential helpers;
+this flag controls environment inheritance, not all credential or filesystem access.
+
+The setting covers captured calls, streams, image load/save, and inventory
+capture. Each launch keeps its selected environment; staged inventory reuses its
+frozen group snapshot. Environment-only container/build forwarding checks that
+same effective environment: an ordinary name found only in excluded ambient
+state no longer collides. Reserved CLI names still require literal fallback or
+fail in strict mode. Keep the config stable when using endpoint-bound policy
+objects; changing this compared setting invalidates an existing endpoint binding.
 
 ## Strict Environment Transport
 
@@ -168,6 +197,20 @@ Safe mode suppresses the payload-bearing parsing chain; raw diagnostics chains
 the original error. Event parsing keeps the launch-time diagnostics setting.
 `version()` and container stats keep their existing exception behavior.
 
+Scalar inspection of container, image, network, volume, config, secret, node,
+service, task, plugin, and context handles requires exactly one JSON object in
+the CLI's response array. Empty/multiple results, non-object/non-array shapes,
+or invalid JSON raise `ParsingError`. A reload that returns a different stored
+ID or name also raises `ParsingError` without replacing the cached snapshot or
+its refresh timestamp. A current-context handle tracking `None` may follow a
+changed current context. Initial name/prefix resolution is still allowed;
+reloads use the resolved identity. Safe diagnostics dump no response and suppress
+payload-bearing causes; raw diagnostics can expose original errors and dumps.
+These checks don't replace command failures with parsing failures: classified
+`DockerException` subclasses retain their raw command, status, and output fields.
+Builder listings, manifest object responses, and batch inspection retain their
+separate contracts; don't assume the scalar array rule for them.
+
 If an argument is rejected, inspect that method in the installed package before
 changing versions or guessing SDK-style names. New Compose flags are forwarded
 to the plugin without a compatibility probe or automatic fallback.
@@ -175,7 +218,7 @@ to the plugin without a compatibility probe or automatic fallback.
 For opt-in sanitized execution telemetry or application-owned concurrency
 limits around specific calls, see
 [Telemetry and admission](telemetry-and-admission.md). For bounding batch
-inspection or waiting for Swarm service/stack or Compose project convergence,
+inspection or waiting for Swarm service/job/stack, Compose project, or standalone container convergence,
 see [Observation budgets and convergence](observation-and-convergence.md).
 
 Application policy APIs also require explicit imports from `pywhales.profiles`,
