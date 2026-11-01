@@ -52,6 +52,13 @@ class ArchiveDeadline:
     drain after a kill and ``record_read()`` only count bytes for telemetry:
     neither charges, so a stderr-selected ``DockerException`` still wins. A
     budget alone adds no timer to a wait.
+
+    The snapshot's stdin accounts are charged by ``write()`` for the bytes each
+    pipe write accepted, so partial writes count and competing uploads never pass
+    a shared limit. A write that finds an account exhausted while input remains
+    stops the transfer like a stream overflow: ``check()`` raises reason
+    ``total_stdin`` once the child is reaped. An upload ending exactly at the
+    limit succeeds, and the transfer keeps charging after its scope exits.
     """
 
     def __init__(
@@ -242,7 +249,9 @@ class ArchiveDeadline:
             ObservationTimeout: The observation deadline passed first.
             ObservationCancelled: An observation token was set.
             ObservationLimitError: A caller-thread read overflowed a stream
-                account (reason ``total_stream``) and the child was reaped.
+                account (reason ``total_stream``), or a write found a stdin
+                account exhausted (reason ``total_stdin``), and the child was
+                reaped.
         """
         released = self.released.is_set()
         if self.expired:
@@ -268,13 +277,22 @@ class ArchiveDeadline:
             if stop == "timeout":
                 raise ObservationTimeout()
 
+    def _exceed(self, error: ObservationLimitError) -> None:
+        """Stop the transfer for an exhausted budget; the lock is held.
+
+        Kills the child and marks the transfer expired, so the next ``check()``
+        raises ``error`` after the watchdog reaps and drains, exactly as a scope
+        cancellation does. The watchdog is woken by the child's exit, so a budget
+        needs no timer.
+        """
+        self._limit = error.with_traceback(None)
+        self._claim("limit")
+        self.expired = True
+        with suppress(ProcessLookupError):
+            self.process.kill()
+
     def _charge(self, chunk: bytes) -> bool:
         """Charge a caller-thread read to the stream accounts; the lock is held.
-
-        An overflow kills the child and marks the transfer expired, so the next
-        ``check()`` raises it after the watchdog reaps and drains, exactly as a
-        scope cancellation does. The watchdog is woken by the child's exit, so a
-        budget needs no timer.
 
         Returns:
             Whether the read overflowed and the chunk must be discarded.
@@ -285,13 +303,18 @@ class ArchiveDeadline:
         try:
             scope.charge_stream(len(chunk))
         except ObservationLimitError as error:
-            self._limit = error.with_traceback(None)
-            self._claim("limit")
-            self.expired = True
-            with suppress(ProcessLookupError):
-                self.process.kill()
+            self._exceed(error)
             return True
         return False
+
+    def _send(self, pipe: IO[bytes], view: memoryview) -> int:
+        """Write once, limited by and charged to the stdin accounts; lock held."""
+        descriptor = pipe.fileno()
+        if self._scope is None:
+            return os.write(descriptor, view)
+        return self._scope.write_stdin(
+            len(view), lambda allowed: os.write(descriptor, view[:allowed])
+        )
 
     def read(self, pipe: IO[bytes], size: int = 65536) -> bytes:
         while True:
@@ -330,9 +353,11 @@ class ArchiveDeadline:
                     continue
                 try:
                     end = offset + 4096 if os.name == "nt" else len(view)
-                    written = os.write(pipe.fileno(), view[offset:end])
+                    written = self._send(pipe, view[offset:end])
                 except BlockingIOError:
                     settle = not self._wait(pipe, writable=True)
+                except ObservationLimitError as error:
+                    self._exceed(error)
                 else:
                     assert self.stdin_bytes is not None
                     self.stdin_bytes += written

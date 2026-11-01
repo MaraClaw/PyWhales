@@ -42,8 +42,9 @@
 
 - `observation(policy, deadline=, cancel=)` intersects per-command limits, non-`None` totals and finite monotonic deadlines; all enclosing tokens remain effective. Entry/exit check cancellation before deadline.
 - Captured bytes charge every enclosing locked `_ResponseAccount` before reporting overflow; streams charge separate `_StreamAccount`s (`ObservationState.stream_accounts`, default `()`), never each other's accounts.
-- `binds_launches` (deadline, token, or stream account) retains stream/archive scope snapshots; a budget alone adds no wait timer.
-- `run()` checks observation before timeout/input branches: observed calls always use `bounded_capture` and reject TTY, uncaptured output, or input with `ValueError`.
+- `binds_launches` (deadline, token, stream or stdin account) retains stream/archive scope snapshots; a budget alone adds no wait timer.
+- `run()` checks observation before timeout/input branches: observed calls always use `bounded_capture` and reject TTY, uncaptured output, or input without `max_total_stdin_bytes` with `ValueError`. Budgeted bytes or cooperative byte iterables upload while stdout and stderr drain.
+- Stdin writes lock all enclosing `_StdinAccount`s outermost first across one nonblocking write and charge only accepted bytes, separately from response and stream budgets. Exact-budget EOF succeeds; further nonempty input raises `total_stdin`. Archive uploads retain the same accounts after scope exit. Caller iterator code cannot be interrupted; cleanup joins the owned writer after it yields.
 - Only unobserved calls use `subprocess.run()` (no timeout/input) or `Popen.communicate()` (timeout/input, with owned stdin-writer cleanup).
 - `check_scoped_launch()` precedes `Popen` and telemetry; `E2BIG` becomes `ObservationLimitError("native_argv")`.
 - Capture precedence is cancellation, then a command deadline strictly earlier than the scope's while the child runs, then scope expiry. Tokens add only `CANCEL_CHECK` (50 ms) waits.

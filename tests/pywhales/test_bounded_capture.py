@@ -7,10 +7,11 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Buffer, Generator, Iterable, Iterator, Mapping, Sequence
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 from typing import TypedDict, override
 from unittest.mock import patch
 
@@ -18,7 +19,7 @@ import pytest
 
 import pywhales._readiness
 from pywhales._capture_pipes import CapturePipes
-from pywhales._observation import observation
+from pywhales._observation import ObservationState, observation
 from pywhales.client_config import ClientConfig
 from pywhales.exceptions import (
     DockerTimeout,
@@ -37,11 +38,14 @@ def policy(response: int = 1024, argv: int = 65536) -> InspectionPolicy:
     )
 
 
-class RunOptions(TypedDict, total=False):
+class OutputOptions(TypedDict, total=False):
     tty: bool
     capture_stdout: bool
     capture_stderr: bool
-    input: bytes
+
+
+class RunOptions(OutputOptions, total=False):
+    input: bytes | Iterable[bytes]
 
 
 def test_combined_streams_at_exact_limit_and_decode() -> None:
@@ -116,6 +120,7 @@ def test_invalid_environment_during_observation_is_safe_and_never_launches(
         {"capture_stdout": False},
         {"capture_stderr": False},
         {"input": b""},
+        {"input": ()},
     ],
 )
 def test_unsupported_modes_fail_before_launch(options: RunOptions) -> None:
@@ -457,3 +462,359 @@ def test_capture_helper_start_failure_unwinds_child_and_pipes(
     assert process.stdout is not None and process.stdout.closed
     assert process.stderr is not None and process.stderr.closed
     assert set(threading.enumerate()) == before
+
+
+COUNT_STDIN = "import sys; sys.stdout.write(str(len(sys.stdin.buffer.read())))"
+NEVER_READS_STDIN = "import threading; threading.Event().wait()"
+
+
+def stdin_policy(limit: int, *, response: int = 1024) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=response,
+        max_total_stdin_bytes=limit,
+    )
+
+
+def pieces(payload: bytes, size: int) -> Iterator[bytes]:
+    for start in range(0, len(payload), size):
+        yield payload[start : start + size]
+
+
+@pytest.fixture
+def children() -> Generator[list[subprocess.Popen[bytes]]]:
+    """Record every child a bounded capture launches, stdin pipe included."""
+    processes: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def launch(
+        args: list[str],
+        *,
+        stdout: int,
+        stderr: int,
+        env: Mapping[str, str],
+        pass_fds: Sequence[int],
+        stdin: int | None = None,
+    ) -> subprocess.Popen[bytes]:
+        process = popen(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+        )
+        processes.append(process)
+        return process
+
+    with patch("pywhales._bounded_capture.subprocess.Popen", side_effect=launch):
+        yield processes
+
+
+@pytest.fixture
+def owned_threads_end() -> Generator[None]:
+    """Fail a test that leaves a writer, reaper or watcher thread behind."""
+    before = set(threading.enumerate())
+    yield
+    assert set(threading.enumerate()) - before == set()
+
+
+def assert_released(process: subprocess.Popen[bytes]) -> None:
+    """Check the child was reaped and none of its pipes is left open."""
+    assert process.returncode is not None
+    assert all(
+        pipe.closed
+        for pipe in (process.stdin, process.stdout, process.stderr)
+        if pipe is not None
+    )
+
+
+@pytest.mark.parametrize("form", ["bytes", "chunks"])
+def test_upload_ending_exactly_at_the_budget_succeeds(form: str) -> None:
+    payload = b"0123456789"
+
+    with observation(stdin_policy(10)) as state:
+        result = run(
+            [sys.executable, "-c", COUNT_STDIN],
+            input=payload if form == "bytes" else pieces(payload, 3),
+        )
+
+    assert result == "10"
+    assert state.stdin_accounts[0].consumed == 10
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("form", ["bytes", "chunks"])
+def test_upload_past_the_budget_stops_at_the_limit_and_reaps_the_child(
+    form: str, children: list[subprocess.Popen[bytes]]
+) -> None:
+    payload = b"0123456789A"
+
+    with (
+        observation(stdin_policy(10)) as state,
+        pytest.raises(ObservationLimitError) as failure,
+    ):
+        run(
+            [sys.executable, "-c", COUNT_STDIN],
+            input=payload if form == "bytes" else pieces(payload, 4),
+        )
+
+    assert (failure.value.reason, failure.value.limit, failure.value.measured) == (
+        "total_stdin",
+        10,
+        11,
+    )
+    assert state.stdin_accounts[0].consumed == 10
+    (child,) = children
+    assert_released(child)
+
+
+@pytest.mark.parametrize("payload", [b"", (), (b"", b"")])
+def test_empty_input_sends_eof_and_consumes_nothing(
+    payload: bytes | Iterable[bytes],
+) -> None:
+    with observation(stdin_policy(1)) as state:
+        assert run([sys.executable, "-c", COUNT_STDIN], input=payload) == "0"
+
+    assert state.stdin_accounts[0].consumed == 0
+
+
+def test_input_is_pulled_lazily_and_never_past_the_failing_chunk() -> None:
+    pulled: list[int] = []
+
+    def chunks() -> Generator[bytes]:
+        for index in range(3):
+            pulled.append(index)
+            yield b"x" * 6
+
+    with observation(stdin_policy(10)) as state, pytest.raises(ObservationLimitError):
+        run([sys.executable, "-c", COUNT_STDIN], input=chunks())
+
+    assert pulled == [0, 1]
+    assert state.stdin_accounts[0].consumed == 10
+
+
+def test_a_failing_producer_surfaces_unchanged_after_the_child_is_reaped(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    original = ValueError("private-producer-error")
+
+    def chunks() -> Generator[bytes]:
+        yield b"accepted"
+        raise original
+
+    with observation(stdin_policy(100)) as state, pytest.raises(ValueError) as raised:
+        run([sys.executable, "-c", COUNT_STDIN], input=chunks())
+
+    assert raised.value is original
+    assert state.stdin_accounts[0].consumed == 8
+    assert_released(children[0])
+
+
+def test_output_is_drained_while_a_large_upload_is_pending() -> None:
+    flood = 1024 * 1024
+    upload = b"u" * (512 * 1024)
+    code = (
+        "import sys\n"
+        f"sys.stdout.buffer.write(b'o' * {flood}); sys.stdout.buffer.flush()\n"
+        f"sys.stderr.buffer.write(b'e' * {flood}); sys.stderr.buffer.flush()\n"
+        "sys.stdout.write(str(len(sys.stdin.buffer.read())))\n"
+    )
+    scope = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=4 * flood,
+        max_total_stdin_bytes=len(upload),
+    )
+
+    # The child fills both output pipes before it reads any input, so a call that
+    # finished the upload first would deadlock until the timeout.
+    with observation(scope) as state:
+        out, err = run(
+            [sys.executable, "-c", code],
+            input=pieces(upload, 65536),
+            return_stderr=True,
+            timeout=30,
+        )
+
+    assert out == "o" * flood + str(len(upload))
+    assert err == "e" * flood
+    assert state.stdin_accounts[0].consumed == len(upload)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("stop", ["cancel", "scope_deadline", "timeout"])
+def test_a_blocked_upload_stops_on_its_first_stop_and_reaps_the_child(
+    stop: str, children: list[subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocked, cancel = Event(), Event()
+    write = os.write
+
+    def watch(fd: int, data: Buffer) -> int:
+        try:
+            return write(fd, data)
+        except BlockingIOError:
+            blocked.set()
+            raise
+
+    def cancel_once_blocked() -> None:
+        if blocked.wait(timeout=10):
+            cancel.set()
+
+    monkeypatch.setattr(os, "write", watch)
+    payload = b"x" * (4 * 1024 * 1024)
+    expected = {
+        "cancel": ObservationCancelled,
+        "scope_deadline": ObservationTimeout,
+        "timeout": DockerTimeout,
+    }[stop]
+    canceller = Thread(target=cancel_once_blocked) if stop == "cancel" else None
+    if canceller is not None:
+        canceller.start()
+    scopes: list[ObservationState] = []
+    try:
+        with (
+            pytest.raises(expected),
+            observation(
+                stdin_policy(2 * len(payload)),
+                deadline=time.monotonic() + 0.5 if stop == "scope_deadline" else None,
+                cancel=cancel if stop == "cancel" else None,
+            ) as state,
+        ):
+            scopes.append(state)
+            run(
+                [sys.executable, "-c", NEVER_READS_STDIN],
+                input=payload,
+                timeout=0.5 if stop == "timeout" else None,
+            )
+    finally:
+        if canceller is not None:
+            canceller.join(timeout=10)
+
+    assert 0 < scopes[0].stdin_accounts[0].consumed < len(payload)
+    assert_released(children[0])
+
+
+def test_child_exiting_early_keeps_only_the_accepted_input(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    payload = b"x" * (2 * 1024 * 1024)
+
+    with observation(stdin_policy(len(payload))) as state:
+        result = run(
+            [sys.executable, "-c", "import os; os.read(0, 1); print('done')"],
+            input=payload,
+        )
+
+    assert result == "done"
+    assert 0 < state.stdin_accounts[0].consumed < len(payload)
+    assert_released(children[0])
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("layout", ["shared", "nested"])
+def test_competing_uploads_charge_every_enclosing_account_and_never_pass_a_limit(
+    layout: str,
+) -> None:
+    gate = Barrier(2)
+    outcomes: list[str | BaseException] = []
+    inner_totals: list[int] = []
+
+    def upload() -> Iterator[bytes]:
+        yield b"a" * 30
+        # Both uploads have had their first chunk accepted before either goes on.
+        gate.wait(timeout=10)
+        yield b"b" * 40
+
+    def compete() -> None:
+        try:
+            if layout == "nested":
+                with observation(stdin_policy(80)) as inner:
+                    try:
+                        outcomes.append(
+                            run([sys.executable, "-c", COUNT_STDIN], input=upload())
+                        )
+                    finally:
+                        inner_totals.append(inner.stdin_accounts[1].consumed)
+            else:
+                outcomes.append(
+                    run([sys.executable, "-c", COUNT_STDIN], input=upload())
+                )
+        except BaseException as error:
+            outcomes.append(error)
+
+    with observation(stdin_policy(100)) as state:
+        workers = [Thread(target=copy_context().run, args=(compete,)) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+            assert not worker.is_alive()
+
+    # One upload fits whole, the other is cut at the shared limit: none is lost,
+    # and no capacity is left reserved by the writer that finished first.
+    assert sorted(type(outcome).__name__ for outcome in outcomes) == [
+        "ObservationLimitError",
+        "str",
+    ]
+    assert "70" in outcomes
+    assert state.stdin_accounts[0].consumed == 100
+    if layout == "nested":
+        assert sorted(inner_totals) == [30, 70]
+
+
+def test_stdin_bytes_never_count_against_the_response_budget() -> None:
+    scope = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_response_bytes=10,
+        max_total_stdin_bytes=1000,
+    )
+
+    with observation(scope) as state:
+        result = run(
+            [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); print('ok')"],
+            input=b"x" * 500,
+        )
+
+    assert result == "ok"
+    assert state.stdin_accounts[0].consumed == 500
+    assert state.response_accounts[0].consumed == 3
+
+
+@pytest.mark.parametrize(
+    "options", [{"tty": True}, {"capture_stdout": False}, {"capture_stderr": False}]
+)
+def test_a_stdin_budget_keeps_the_tty_and_uncaptured_output_refusals(
+    options: OutputOptions,
+) -> None:
+    with (
+        patch("pywhales._bounded_capture.subprocess.Popen") as launch,
+        observation(stdin_policy(10)),
+        pytest.raises(ValueError),
+    ):
+        run(["does-not-exist"], input=b"x", **options)
+
+    launch.assert_not_called()
+
+
+def test_a_stopped_scope_launches_nothing_and_never_pulls_input() -> None:
+    pulled: list[int] = []
+    cancel = Event()
+
+    def chunks() -> Generator[bytes]:
+        pulled.append(1)
+        yield b"x"
+
+    with (
+        patch("pywhales._bounded_capture.subprocess.Popen") as launch,
+        pytest.raises(ObservationCancelled),
+        observation(stdin_policy(10), cancel=cancel),
+    ):
+        cancel.set()
+        run([sys.executable, "-c", COUNT_STDIN], input=chunks())
+
+    launch.assert_not_called()
+    assert pulled == []
