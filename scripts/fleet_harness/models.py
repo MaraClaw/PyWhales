@@ -1,6 +1,6 @@
 """Strict simulation inputs and resolved contributor declarations."""
 
-from typing import Final, Literal, Self
+from typing import Final, Literal, Self, assert_never
 
 from pydantic import model_validator
 from pydantic_core import PydanticCustomError
@@ -47,7 +47,12 @@ class RunnableManifest(Contract):
 
 
 class Step(Contract):
-    """One scripted fake operation; timings are seconds on the fake clock."""
+    """One scripted fake operation; timings are seconds on the fake clock.
+
+    `arrival_seconds` opts a plan into overlapping execution: the submission
+    arrives at that offset and waits for admission, so a scripted `queue_seconds`
+    would double-count the wait and is rejected beside it.
+    """
 
     scenario: Token
     endpoint: Token
@@ -55,6 +60,7 @@ class Step(Contract):
     asset: Token | None = None
     fault: Token | None = None
     outcome: Outcome = "succeeded"
+    arrival_seconds: Amount | None = None
     queue_seconds: Amount = 0.0
     local_seconds: Amount = 0.1
     readiness_seconds: Amount | None = 0.1
@@ -73,6 +79,8 @@ class Step(Contract):
             raise PydanticCustomError("cleanup_reserved", "cleanup_reserved")
         if self.action != "fault" and self.recovery_seconds is not None:
             raise PydanticCustomError("recovery_population", "recovery_population")
+        if self.arrival_seconds is not None and self.queue_seconds:
+            raise PydanticCustomError("scheduled_queue", "scheduled_queue")
         return self
 
 
@@ -132,6 +140,96 @@ class Plan(Contract):
         if len({metric.name for metric in self.metrics}) != len(self.metrics):
             raise PydanticCustomError("duplicate_metric", "duplicate_metric")
         return self
+
+    @model_validator(mode="after")
+    def arrivals(self) -> Self:
+        """Require all-or-none nondecreasing offsets and one repetition when scheduled."""
+        offsets = tuple(step.arrival_seconds for step in self.steps)
+        present = tuple(offset for offset in offsets if offset is not None)
+        if not present:
+            return self
+        if len(present) != len(offsets):
+            raise PydanticCustomError("arrival_incomplete", "arrival_incomplete")
+        if self.repetitions != 1:
+            raise PydanticCustomError("arrival_repetitions", "arrival_repetitions")
+        if present != tuple(sorted(present)):
+            raise PydanticCustomError("arrival_order", "arrival_order")
+        return self
+
+    @property
+    def offsets(self) -> tuple[float, ...]:
+        """Return every arrival offset of a scheduled plan; empty when sequential."""
+        return tuple(
+            step.arrival_seconds
+            for step in self.steps
+            if step.arrival_seconds is not None
+        )
+
+    @property
+    def scheduled(self) -> bool:
+        """Report whether the plan overlaps submissions (all steps, or none, have offsets)."""
+        return bool(self.offsets)
+
+
+def load_deadline(manifest: RunnableManifest) -> float:
+    """Return the fake-clock limit shared by the sequential and scheduled loads."""
+    return min(
+        manifest.authorization.maximum_run_seconds,
+        manifest.authorization.expires_after_seconds,
+        manifest.budgets.early_stop_duration_seconds,
+        manifest.workload.duration_seconds,
+    )
+
+
+def deadline_reasons(manifest: RunnableManifest) -> tuple[str, ...]:
+    """Return the stop reason when the load deadline ends an operation-count target."""
+    match manifest.workload.termination:
+        case "duration":
+            return ()
+        case "operation_count":
+            return ("duration_limit",)
+        case unreachable:
+            assert_never(unreachable)
+
+
+def exhausted(manifest: RunnableManifest, now: float, submitted: int) -> bool:
+    """Report whether a short script ended before the declared termination threshold."""
+    match manifest.workload.termination:
+        case "duration":
+            return now < manifest.workload.duration_seconds
+        case "operation_count":
+            return submitted < (manifest.workload.termination_operations or 0)
+        case unreachable:
+            assert_never(unreachable)
+
+
+def metrics_for(plan: Plan) -> tuple[Metric, ...]:
+    """Return every known metric, null where the plan scripts no observation."""
+    return tuple(
+        Metric(
+            name=name,
+            value=next(
+                (metric.value for metric in plan.metrics if metric.name == name), None
+            ),
+        )
+        for name in METRIC_NAMES
+    )
+
+
+def resource_reasons(
+    manifest: RunnableManifest, metrics: tuple[Metric, ...]
+) -> list[str]:
+    """Return the early-stop reasons the scripted metrics trigger after a submission."""
+    reasons: list[str] = []
+    for budget in manifest.budgets.resources:
+        value = next(
+            metric.value for metric in metrics if metric.name == budget.resource
+        )
+        if value is None:
+            reasons.append("resource_metrics_unavailable")
+        elif value >= budget.early_stop:
+            reasons.append("resource_limit")
+    return reasons
 
 
 def authorize(manifest: RunnableManifest, plan: Plan) -> tuple[str, ...]:

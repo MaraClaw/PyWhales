@@ -57,6 +57,20 @@ Unavailable budgeted resource observations stop load rather than pretending the
 limit was enforced. A short script is reported as `plan_exhausted` unless it
 reaches the manifest's duration or operation-submission termination threshold.
 
+To simulate overlapping submissions, put a finite nonnegative `arrival_seconds`
+offset on every step in nondecreasing order and use one repetition. Scheduled
+steps leave `queue_seconds` at zero: the harness measures queue time from arrival
+to FIFO admission under the workload's global `concurrent_submissions` limit.
+Plans without offsets keep sequential execution and their existing digests;
+scheduled digests bind the offsets. Per-action concurrency is not simulated.
+
+Operations advance their phases and exact asset identities at event time. At a
+shared timestamp the order is active phase ends, queued deadline expiries,
+arrivals in plan order, then FIFO admissions. Queue time consumes the operation
+deadline, including submissions that time out without launching. Arrivals at or
+beyond the load deadline are excluded. An early stop cancels queued work while
+active operations drain within their deadlines before cleanup.
+
 Cleanup has its own finite budget. It visits only exact acquired live identities
 in reverse order, scoped by effective endpoint, kind, ID, namespace and marker.
 Failed or timed-out cleanup remains visible as exact residual identities and a
@@ -81,6 +95,12 @@ rank across all observed outcome timings, not successes only. Unavailable second
 and resource high-water values are `null`, never silently zero-filled. The report
 includes command counts, CPU, RSS, file descriptors, children, disk bytes/inodes,
 network and daemon observations; omitted metrics are explicitly unavailable.
+
+Scheduled reports also carry per-submission arrival, admission (null if never
+admitted), terminal time and outcome receipts, plus settled active and queued
+peaks. Imports validate FIFO order, receipt/sample times, recomputed peaks and
+the global concurrency bound; old sequential reports remain accepted. These
+receipts describe only fake execution and do not authorize a real connection.
 
 `load_elapsed_seconds` excludes cleanup; `elapsed_seconds` includes it. Metrics
 are scripted high-waters sampled after each simulated submission, not OS counters.

@@ -18,6 +18,7 @@ import pytest
 from scripts.benchmark_docker_overhead import main as benchmark
 from scripts.fleet_harness.models import Plan, RunnableManifest
 from scripts.fleet_harness.runner import run
+from tests.pywhales.test_fleet_harness import at, overlap_manifest, overlap_plan
 
 ROOT: Final = Path(__file__).resolve().parents[2]
 FIXTURES: Final = ROOT / "scripts/fleet_harness/fixtures"
@@ -91,6 +92,57 @@ def test_fleet_harness_run_loads_no_sdk_module_and_keeps_digest(tmp_path: Path) 
     assert json.loads(completed.stdout) == {
         "code": 0,
         "digest": OPERATION_DIGEST,
+        "sdk": [],
+    }
+
+
+def test_scheduled_run_digest_binds_offsets_and_keeps_sequential_digest() -> None:
+    # Given overlapping plans that differ only in one arrival offset.
+    declaration = overlap_manifest(2)
+    recipe = overlap_plan(at(0.0), at(0.5))
+    moved = overlap_plan(at(0.0), at(0.6))
+    operations = [
+        {key: step.get(key) for key in (*OPERATION_KEYS, "arrival_seconds")}
+        for step in json.loads(recipe.model_dump_json())["steps"]
+    ]
+
+    # When each is run, and the sequential fixture is run again.
+    scheduled = run(declaration, recipe).operation_digest
+    shifted = run(declaration, moved).operation_digest
+    sequential = run(
+        RunnableManifest.model_validate_json((FIXTURES / "manifest.json").read_text()),
+        Plan.model_validate_json((FIXTURES / "plan.json").read_text()),
+    ).operation_digest
+
+    # Then the offsets sit in the same stdlib-hashed form, and sequential is unchanged.
+    spaced = hashlib.sha256(json.dumps(operations, sort_keys=True).encode()).hexdigest()
+    assert scheduled == f"sha256:{spaced}"
+    assert shifted != scheduled
+    assert sequential == OPERATION_DIGEST
+
+
+def test_scheduled_fleet_harness_run_loads_no_sdk_module(tmp_path: Path) -> None:
+    # Given fictional overlapping inputs on disk and a PATH without Docker.
+    declaration, recipe = tmp_path / "manifest.json", tmp_path / "plan.json"
+    declaration.write_text(overlap_manifest(2).model_dump_json())
+    steps = (at(0.0), at(0.5, 2.0), at(0.5))
+    recipe.write_text(overlap_plan(*steps).model_dump_json())
+
+    # When the harness CLI runs them in a fresh interpreter.
+    completed = subprocess.run(
+        [sys.executable, "-c", CHILD, str(declaration), str(recipe)],
+        cwd=ROOT,
+        env={**os.environ, "PATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+
+    # Then it succeeds with the in-process digest and imported no SDK module.
+    assert json.loads(completed.stdout) == {
+        "code": 0,
+        "digest": run(overlap_manifest(2), overlap_plan(*steps)).operation_digest,
         "sdk": [],
     }
 

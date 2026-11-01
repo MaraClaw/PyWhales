@@ -1,5 +1,6 @@
 """Simulation artifacts with explicit collection boundaries and ownership."""
 
+from dataclasses import dataclass
 from typing import Literal, Self, assert_never
 
 from pydantic import field_validator, model_validator
@@ -11,28 +12,20 @@ from scripts.fleet_contract.common import (
     Count,
     Digest,
     Positive,
+    PositiveCount,
     Token,
 )
 from scripts.fleet_contract.platform import Platform, Topology
-from scripts.fleet_contract.results import (
-    HighWater,
-    LatencyEvidence,
-    Outcome,
-    Outcomes,
-    Population,
-    Populations,
-    RunResult,
-    Sample,
-)
+from scripts.fleet_contract.results import Outcome, Outcomes
 from scripts.fleet_contract.workload import (
     Artifact,
     Boundary,
     Image,
-    Resource,
     Workload,
 )
 
-from .models import Metric, RunnableManifest, Step
+from .models import Metric, Step
+from .timeline import is_ordered, peak_counts, reconcile
 
 
 class OwnedResource(Contract):
@@ -111,6 +104,43 @@ class Environment(Contract):
         )
 
 
+class Receipt(Contract):
+    """Arrival, admission and terminal time of one submission.
+
+    A null admission means the submission never launched: it timed out in the
+    queue or was cancelled there by an early stop.
+    """
+
+    submission: PositiveCount
+    arrival_seconds: Amount
+    admitted_seconds: Amount | None
+    terminal_seconds: Amount
+    outcome: Outcome
+
+
+class Peaks(Contract):
+    """Largest settled active and queued submission counts over one run."""
+
+    active: Count
+    queued: Count
+
+
+class Schedule(Contract):
+    """Frozen overlap receipts in submission order with their observed peaks."""
+
+    peaks: Peaks
+    receipts: tuple[Receipt, ...]
+
+    @model_validator(mode="after")
+    def coherent(self) -> Self:
+        """Reject receipts that break FIFO order or peaks the receipts do not give."""
+        if not is_ordered(self.receipts):
+            raise PydanticCustomError("schedule_order", "schedule_order")
+        if (self.peaks.active, self.peaks.queued) != peak_counts(self.receipts):
+            raise PydanticCustomError("schedule_peaks", "schedule_peaks")
+        return self
+
+
 class RunReport(Contract):
     """Always simulated and unqualified, irrespective of scripted success."""
 
@@ -147,6 +177,7 @@ class RunReport(Contract):
     metrics_boundary: Literal["after_each_submission_simulated"] = (
         "after_each_submission_simulated"
     )
+    schedule: Schedule | None = None
 
     @model_validator(mode="after")
     def coherent_outcomes(self) -> Self:
@@ -188,6 +219,24 @@ class RunReport(Contract):
                 assert_never(unreachable)
         return self
 
+    @model_validator(mode="after")
+    def coherent_schedule(self) -> Self:
+        """Treat a report without receipts as sequential; verify scheduled ones."""
+        code = reconcile(self)
+        if code is not None:
+            raise PydanticCustomError(code, code)
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class Load:
+    """What a load loop observed: samples, submissions, stop reasons and receipts."""
+
+    samples: tuple[Observation, ...]
+    submitted: int
+    reasons: tuple[str, ...]
+    schedule: Schedule | None = None
+
 
 def terminal_outcomes(samples: tuple[Observation, ...]) -> Outcomes:
     """Count each submission once, independently of its measurement boundaries."""
@@ -199,102 +248,4 @@ def terminal_outcomes(samples: tuple[Observation, ...]) -> Outcomes:
         unknown=terminal.count("unknown"),
         cancelled=terminal.count("cancelled"),
         rejected=terminal.count("rejected"),
-    )
-
-
-class ExportRefused(Exception):
-    """Fixed, input-independent refusal to export a simulation."""
-
-
-def export_result(report: RunReport, manifest: RunnableManifest) -> RunResult:
-    """Convert a fake run to synthetic evidence without inventing receipts."""
-    if (
-        manifest.provenance != "synthetic"
-        or report.status == "rejected"
-        or report.manifest_revision != manifest.identity.revision
-        or report.workload_digest != manifest.identity.workload_digest
-        or report.workload != manifest.workload
-    ):
-        raise ExportRefused
-    boundaries: tuple[tuple[Boundary, Population], ...] = (
-        ("queue_wait", "all_submissions"),
-        ("selected_cli", "launched_cli"),
-        ("readiness", "readiness_attempts"),
-        ("recovery", "faults"),
-    )
-    resources: tuple[Resource, ...] = (
-        "cpu_cores",
-        "rss_bytes",
-        "file_descriptors",
-        "children",
-        "disk_bytes",
-        "disk_inodes",
-    )
-    latency = tuple(
-        LatencyEvidence(
-            boundary=boundary,
-            unit="seconds",
-            population=population,
-            samples=tuple(
-                Sample(
-                    submission=sample.submission,
-                    outcome=sample.outcome,
-                    seconds=sample.seconds,
-                    excluded=False,
-                    reason=(
-                        "unavailable"
-                        if sample.reason == "unavailable"
-                        else "observed"
-                        if sample.seconds is not None
-                        else "collection_failed"
-                    ),
-                )
-                for sample in report.samples
-                if sample.boundary == boundary
-            ),
-        )
-        for boundary, population in boundaries
-    )
-    counts = {item.boundary: len(item.samples) for item in latency}
-    return RunResult(
-        schema_version=1,
-        provenance="synthetic",
-        manifest_revision=report.manifest_revision,
-        support_row=manifest.support_row,
-        observed_versions=None,
-        authorization_record=None,
-        run_namespace=manifest.authorization.run_namespace,
-        endpoint_aliases=manifest.workload.endpoint_aliases,
-        populations=Populations(
-            all_submissions=report.submitted,
-            launched_cli=counts["selected_cli"],
-            readiness_attempts=counts["readiness"],
-            faults=counts["recovery"],
-        ),
-        outcomes=report.outcomes,
-        latency=latency,
-        high_water=tuple(
-            HighWater(
-                resource=resource,
-                value=next(
-                    (
-                        metric.value
-                        for metric in report.metrics
-                        if metric.name == resource
-                    ),
-                    None,
-                ),
-            )
-            for resource in resources
-        ),
-        elapsed_seconds=report.load_elapsed_seconds,
-        stability_window_seconds=None,
-        stable_observations=None,
-        early_stopped=report.status == "stopped",
-        missing_evidence=("environment_unobserved", "stability_unobserved"),
-        excluded_evidence=(),
-        isolation_evidence_ref=None,
-        artifact_receipt_ref=None,
-        cleanup_receipt_ref=None,
-        residual_assets=tuple(resource.slot for resource in report.cleanup.residual),
     )
