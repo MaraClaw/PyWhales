@@ -188,6 +188,19 @@ def test_client_and_ambient_collisions_stay_literal() -> None:
     ) == ([f"{ambient}=container", "CLIENT_ONLY=container"], {})
 
 
+def test_isolated_strict_transport_ignores_ambient_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_COLLISION", "ambient")
+    config = ClientConfig(inherit_environment=False, strict_env_transport=True)
+    args, overrides = container_environment({"APP_COLLISION": "container"}, config)
+    assert args == ["APP_COLLISION"]
+    assert resolve_environment(None, overrides)["APP_COLLISION"] == "container"
+    config.environment = {"APP_COLLISION": "client"}
+    with pytest.raises(ValueError):
+        container_environment({"APP_COLLISION": "container"}, config)
+
+
 def test_windows_client_collision_stays_literal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

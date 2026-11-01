@@ -23,12 +23,27 @@ lookup or inspection, even for empty selections. Log inspection preflights remai
 outside the selected launch budget. Compose `down`, `restart` and `stop` timeouts
 are shutdown grace periods, not local CLI deadlines.
 
+## Child environment isolation
+
+`DockerClient(inherit_environment=False, environment={...})` starts each CLI child
+with only the parent's `PATH` and `HOME`, plus `USERPROFILE` and `SYSTEMROOT` on
+Windows, then applies the explicit `environment` mapping. Windows variable names
+are matched case-insensitively. The default, `inherit_environment=True`, retains
+the parent environment and applies the same mapping on top.
+
+With inheritance disabled, pass Docker connection settings, credentials, proxy
+variables and `SSH_AUTH_SOCK` explicitly if the child needs them. Executable
+lookup still uses the process `PATH`. This applies to captured commands, streams,
+archive transfers and inventory capture. Assignment collision checks use the same
+effective child environment, so a name present only in the parent no longer
+forces a literal assignment fallback.
+
 ## Assignment values and argv
 
 Container `envs` and Buildx/Compose `build_args` use name-only `--env KEY` or
 `--build-arg KEY` for eligible names, with values in that child's environment.
 Empty and multiline values are supported without changing `os.environ`. Eligibility
-uses one effective-environment snapshot: existing ambient/client names, reserved
+uses one effective-environment snapshot: existing inherited/client names, reserved
 CLI/runtime names or prefixes, invalid names/values, non-string keys and Windows
 case-equivalent duplicates retain ordered literal `KEY=value` fallback by default.
 

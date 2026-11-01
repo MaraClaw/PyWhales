@@ -165,6 +165,8 @@ class ClientConfig:
         default_timeout: Positive finite seconds per CLI launch, or None for no deadline.
         strict_env_transport: Reject container envs and build args requiring literal
             argv fallback. Defaults to false for compatibility.
+        inherit_environment: Inherit the parent environment for child launches;
+            false retains only the platform base and explicit overlay.
     """
 
     config: ValidPath | None = None
@@ -197,6 +199,7 @@ class ClientConfig:
     environment: Mapping[str, str] | None = field(default=None, repr=False)
     default_timeout: float | None = None
     strict_env_transport: bool = False
+    inherit_environment: bool = True
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.

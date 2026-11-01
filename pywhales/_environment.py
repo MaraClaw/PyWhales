@@ -118,7 +118,9 @@ def container_environment[K](
     scope = _frozen_environment.get()
     frozen = scope[1] if scope is not None and scope[0] is source else None
     effective = resolve_environment(
-        source.environment if frozen is None else None, frozen=frozen
+        source.environment if frozen is None else None,
+        frozen=frozen,
+        inherit=source.inherit_environment,
     )
     names = {key.upper() if _WINDOWS else key for key in effective}
     counts = Counter(name.upper() if _WINDOWS else name for _, name, _ in entries)
@@ -186,18 +188,34 @@ def resolve_environment(
     overrides: Mapping[str, str] | None = None,
     *,
     frozen: Mapping[str, str] | None = None,
+    inherit: bool = True,
 ) -> dict[str, str]:
     """Select the full child environment before argument stringification.
 
     A frozen full environment replaces ambient and client layers; operation
-    overrides still apply. Return a new mapping owned by the caller.
+    overrides still apply. Without inheritance, retain only the platform base.
+    Return a new mapping owned by the caller.
     """
     if isinstance(overrides, _ContainerEnvironment):
         frozen = overrides.effective
     if frozen is not None:
         result = dict(frozen)
     else:
-        result = copy_environment(os.environ)
+        if inherit:
+            result = copy_environment(os.environ)
+        else:
+            base_names = (
+                {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"}
+                if _WINDOWS
+                else {"PATH", "HOME"}
+            )
+            result = copy_environment(
+                {
+                    key: value
+                    for key, value in os.environ.items()
+                    if (key.upper() if _WINDOWS else key) in base_names
+                }
+            )
         if environment is not None:
             _merge_environment(result, copy_environment(environment))
     if overrides is not None:

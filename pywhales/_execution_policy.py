@@ -12,7 +12,11 @@ from enum import Enum, auto
 from types import MappingProxyType
 from typing import Final, Protocol, Self
 
-from pywhales._environment import consume_frozen_environment, copy_environment
+from pywhales._environment import (
+    consume_frozen_environment,
+    copy_environment,
+    resolve_environment,
+)
 from pywhales.telemetry import TelemetryObserver
 
 
@@ -22,6 +26,11 @@ class ExecutionPolicySource(Protocol):
     @property
     def environment(self) -> Mapping[str, str] | None:
         """Return the current client environment overlay."""
+        ...
+
+    @property
+    def inherit_environment(self) -> bool:
+        """Return whether launches inherit the complete parent environment."""
         ...
 
     @property
@@ -177,6 +186,9 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
         source = command[0].policy_source
         frozen = consume_frozen_environment(source)
         environment = source.environment if frozen is None else None
+        if frozen is None and not source.inherit_environment:
+            frozen = MappingProxyType(resolve_environment(environment, inherit=False))
+            environment = None
         return ExecutionPolicy(
             source.stream_buffer_bytes,
             source.raw_diagnostics,

@@ -296,3 +296,32 @@ def test_strict_build_rejection_precedes_lookup(
             client.build(".", build_args={"PYTHON_VERSION": "secret"})
         else:
             client.compose.build(build_args={"PYTHON_VERSION": "secret"})
+
+
+@pytest.mark.parametrize("operation", ["execute", "compose_build"])
+def test_isolated_forwarding_reaches_real_child(
+    operation: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APP_COLLISION", "ambient")
+    monkeypatch.setenv("DOCKER_HOST", "ambient-endpoint")
+    driver = tmp_path / "driver.py"
+    record = tmp_path / "record.json"
+    driver.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(json.dumps({'argv': sys.argv[2:], 'environment': dict(os.environ)}))\n"
+    )
+    client = DockerClient(
+        client_call=[sys.executable, str(driver), str(record)],
+        inherit_environment=False,
+        strict_env_transport=True,
+    )
+    if operation == "execute":
+        client.execute("container", ["cmd"], envs={"APP_COLLISION": "forwarded"})
+    else:
+        client.compose.build(build_args={"APP_COLLISION": "forwarded"})
+    launch = ChildRecord.model_validate_json(record.read_text())
+    assert launch.environment["APP_COLLISION"] == "forwarded"
+    assert "DOCKER_HOST" not in launch.environment
+    assert "APP_COLLISION" in launch.argv
+    assert "APP_COLLISION=forwarded" not in launch.argv

@@ -323,6 +323,39 @@ def test_inventory_snapshots_environment_before_argument_conversion(
     assert sentinels[0][1] == "before"
 
 
+def test_inventory_isolates_and_freezes_child_environment(
+    fake_cli: ClientConfig,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_INHERITED", "ambient")
+    fake_cli.inherit_environment = False
+    fake_cli.environment = {"PYWHALES_TEST_CLIENT": "explicit"}
+    from pywhales import _inventory_staging
+
+    inspect = _inventory_staging.inspect_group
+
+    def mutate_after_inspect(
+        resources: Sequence[InventoryResource],
+    ) -> Sequence[InventoryResource]:
+        result = inspect(resources)
+        fake_cli.inherit_environment = True
+        fake_cli.environment = {"PYWHALES_TEST_CLIENT": "changed"}
+        return result
+
+    monkeypatch.setattr(_inventory_staging, "inspect_group", mutate_after_inspect)
+    request = InventoryRequest(
+        kind="network", references=("alpha-id", "beta-id"), client_config=fake_cli
+    )
+    snapshot = capture_inventory([request], policy=policy)
+    assert [record.id for record in snapshot.records] == ["alpha-id", "beta-id"]
+    assert [
+        json.loads(line)
+        for line in (tmp_path / "sentinels.jsonl").read_text().splitlines()
+    ] == [[None, "explicit"], [None, "explicit"]]
+
+
 @pytest.mark.parametrize("entry", [("BAD=KEY", "value"), ("VALID", "bad\0value")])
 @pytest.mark.parametrize("capture", [False, True])
 def test_inventory_rejects_invalid_later_environment_before_any_inspection(
