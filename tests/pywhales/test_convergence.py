@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import select
 import subprocess
 import sys
 import time
@@ -18,13 +20,16 @@ from pywhales.convergence import (
     Cancelled,
     ComposeService,
     ComposeTarget,
+    ContainerTarget,
     Deadline,
     DeadlineDetail,
     Failure,
+    Outcome,
     ServiceTarget,
     StackTarget,
     Success,
     capture_compose,
+    capture_containers,
     capture_service,
     wait,
 )
@@ -52,6 +57,9 @@ calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
 hang = data.get("hang_at")
 if hang and args == hang["args"] and calls.count(args) == hang["occurrence"]:
     (root / "started").write_text(str(__import__("os").getpid()))
+    if "notify" in hang:
+        with open(hang["notify"], "w") as signal:
+            signal.write("started")
     threading.Event().wait()
 tasks = data["tasks"]
 for identity, sequence in data.get("task_sequences", {}).items():
@@ -70,6 +78,15 @@ elif args[:2] == ["service", "ps"]:
 elif args[:3] == ["inspect", "--type", "task"]:
     override = data.get("task_inspect_overrides", {}).get(args[3])
     print(json.dumps([override] if override is not None else [task for task in tasks if task["ID"] == args[3]]))
+elif args[:3] == ["inspect", "--type", "container"] and "standalone" in data:
+    reference = args[3]
+    entries = data["standalone"].get(reference, [])
+    count = calls.count(args)
+    result = entries[min(count - 1, len(entries) - 1)] if entries else None
+    if result is None:
+        sys.stderr.write("Error: No such container: " + reference + "\\n")
+        sys.exit(1)
+    print(json.dumps(result))
 elif args[0] == "compose" or args[:3] == ["inspect", "--type", "container"]:
     snapshots = data["compose"]
     cycle = sum(call[0] == "compose" for call in calls)
@@ -552,7 +569,19 @@ def test_each_deadline_reason_counts_services_not_tasks(
     tmp_path: Path,
     mutation: str,
     expected: DeadlineDetail,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import pywhales.convergence._wait as wait_module
+    from pywhales.exceptions import ObservationTimeout
+
+    def expire_after_cycle(seconds: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(
+        wait_module,
+        "time",
+        SimpleNamespace(monotonic=time.monotonic, sleep=expire_after_cycle),
+    )
     snapshot, current = service(), task()
     tasks = [current]
     if mutation == "empty":
@@ -581,15 +610,31 @@ def test_each_deadline_reason_counts_services_not_tasks(
         current["Spec"]["ContainerSpec"]["Image"] = "credential-payload"
         tasks.append({**current, "ID": "task-b", "Spec": None})
     store(tmp_path, [snapshot], tasks)
-    result = wait(capture(fake_cli, policy), policy=policy, timeout=2, poll_interval=10)
+    result = wait(
+        capture(fake_cli, policy), policy=policy, timeout=30, poll_interval=10
+    )
     assert isinstance(result, Deadline) and result.detail == expected
     assert "credential-payload" not in repr(result)
     assert "service-a" not in repr(result) and "task-a" not in repr(result)
 
 
 def test_mixed_stack_summary_counts_only_affected_captured_services(
-    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import pywhales.convergence._wait as wait_module
+    from pywhales.exceptions import ObservationTimeout
+
+    def expire_after_cycle(seconds: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(
+        wait_module,
+        "time",
+        SimpleNamespace(monotonic=time.monotonic, sleep=expire_after_cycle),
+    )
     updating = service("service-b")
     updating["UpdateStatus"] = {"State": "updating"}
     stale = task("task-b", "service-b")
@@ -607,7 +652,7 @@ def test_mixed_stack_summary_counts_only_affected_captured_services(
             capture(fake_cli, policy, f"service-{suffix}") for suffix in "abcd"
         )
     )
-    result = wait(target, policy=policy, timeout=3, poll_interval=10)
+    result = wait(target, policy=policy, timeout=30, poll_interval=10)
     assert isinstance(result, Deadline)
     assert result.detail == DeadlineDetail(
         4, missing_ready_slots=2, stale_templates=1, ongoing_updates=1
@@ -625,6 +670,9 @@ def test_partial_cycles_never_replace_complete_detail_and_hung_children_are_reap
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
+    import pywhales._bounded_capture as capture_module
+    from pywhales.exceptions import ObservationTimeout
+
     store(tmp_path, [service(), service("service-b")], [task("task-b", "service-b")])
     target = StackTarget(
         services=(capture(fake_cli, policy), capture(fake_cli, policy, "service-b"))
@@ -646,10 +694,26 @@ def test_partial_cycles_never_replace_complete_detail_and_hung_children_are_reap
         data["task_sequences"] = {"service-a": [[], [stale], []]}
         occurrence = 3
         expected = DeadlineDetail(2, missing_ready_slots=1, stale_templates=1)
-    data["hang_at"] = {"args": command, "occurrence": occurrence}
+    fifo = tmp_path / "notification"
+    os.mkfifo(fifo)
+    data["hang_at"] = {
+        "args": command,
+        "occurrence": occurrence,
+        "notify": str(fifo),
+    }
     (tmp_path / "data.json").write_text(json.dumps(data))
     processes: list[subprocess.Popen[bytes]] = []
     popen = subprocess.Popen
+    expired = Event()
+    descriptor = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    check = capture_module.check_observation
+
+    def expire_at_hung_child(state: ObservationState) -> None:
+        if expired.is_set():
+            raise ObservationTimeout()
+        check(state)
+
+    matching = 0
 
     def track(
         args: list[str],
@@ -659,12 +723,23 @@ def test_partial_cycles_never_replace_complete_detail_and_hung_children_are_reap
         env: Mapping[str, str],
         pass_fds: Sequence[int],
     ) -> subprocess.Popen[bytes]:
+        nonlocal matching
         process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
         processes.append(process)
+        if args[-len(command) :] == command:
+            matching += 1
+            if matching == occurrence - (1 if recheck else 0):
+                ready, _, _ = select.select([descriptor], [], [], 10)
+                assert ready and os.read(descriptor, 32) == b"started"
+                expired.set()
         return process
 
     monkeypatch.setattr(subprocess, "Popen", track)
-    result = wait(target, policy=policy, timeout=3, poll_interval=0.01)
+    monkeypatch.setattr(capture_module, "check_observation", expire_at_hung_child)
+    try:
+        result = wait(target, policy=policy, timeout=30, poll_interval=0.01)
+    finally:
+        os.close(descriptor)
     assert isinstance(result, Deadline)
     assert result.detail == expected
     assert (tmp_path / "started").exists()
@@ -2503,3 +2578,329 @@ def test_compose_restart_budget_deadline_reaps_hung_child_and_keeps_last_cycle(
     assert (tmp_path / "started").exists()
     assert_reaped(processes)
     assert calls_of(tmp_path)[-1] == command
+
+
+def store_standalone(path: Path, entries: dict[str, list[Any]]) -> None:
+    (path / "data.json").write_text(
+        json.dumps({"services": {}, "tasks": [], "standalone": entries})
+    )
+
+
+def standalone(
+    identity: str,
+    *,
+    status: str = "running",
+    health: str | None = None,
+    restarts: int | None = None,
+    exit_code: int = 0,
+) -> dict[str, Any]:
+    wire = container(
+        identity, status=status, health=health, restarts=restarts, exit_code=exit_code
+    )
+    wire["Config"]["Labels"] = None
+    return wire
+
+
+def test_standalone_resolves_names_and_prefixes_and_waits_for_completion(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    db = standalone(A, health="healthy", restarts=0)
+    db["Name"] = "/db"
+    db["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    job = standalone(B, status="exited", restarts=99)
+    store_standalone(tmp_path, {"db": [[db]], B[:12]: [[job]], A: [[db]], B: [[job]]})
+    target = capture_containers(
+        fake_cli,
+        ("db", B[:12]),
+        completion=(B[:12],),
+        max_restarts=0,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, ContainerTarget)
+    assert target.container_ids == (A, B) and target.completion == (B,)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Success()
+
+
+@pytest.mark.parametrize("invalid", [None, "0", False, 0.0])
+def test_standalone_invalid_exit_code_is_malformed_in_capture_and_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, invalid: object
+) -> None:
+    good = standalone(A, status="exited")
+    bad = standalone(A, status="exited")
+    if invalid is None:
+        del bad["State"]["ExitCode"]
+    else:
+        bad["State"]["ExitCode"] = invalid
+    store_standalone(tmp_path, {A: [[bad], [good], [bad]]})
+    assert capture_containers(
+        fake_cli, (A,), completion=(A,), policy=policy, timeout=5
+    ) == Failure(reason="malformed")
+    target = capture_containers(
+        fake_cli, (A,), completion=(A,), policy=policy, timeout=5
+    )
+    assert isinstance(target, ContainerTarget)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Failure(
+        reason="malformed"
+    )
+
+
+@pytest.mark.parametrize("changed", [None, "recreated"])
+def test_standalone_disappearance_or_recreation_is_superseded(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    changed: str | None,
+) -> None:
+    original = standalone(A)
+    later = None if changed is None else [standalone(B)]
+    store_standalone(tmp_path, {A: [[original], later]})
+    target = capture_containers(fake_cli, (A,), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Failure(
+        reason="superseded"
+    )
+
+
+def test_standalone_missing_reference_and_duplicate_resolution_fail(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    from pywhales.exceptions import NoSuchContainer
+
+    member = standalone(A)
+    member["Name"] = "/db"
+    store_standalone(tmp_path, {"db": [[member]], A[:12]: [[member]]})
+    missing = capture_containers(fake_cli, ("missing",), policy=policy, timeout=5)
+    assert isinstance(missing, Failure) and missing.reason == "observation"
+    assert isinstance(missing.cause, NoSuchContainer)
+    assert capture_containers(
+        fake_cli, ("db", A[:12]), policy=policy, timeout=5
+    ) == Failure(reason="malformed")
+
+
+@pytest.mark.parametrize("reply", [[], "multiple", "wrong-name", "short-id"])
+def test_standalone_resolver_rejects_unmatched_or_ambiguous_replies(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, reply: object
+) -> None:
+    member = standalone(A)
+    if reply == "short-id":
+        member["Id"] = A[:12]
+    payload = [member, standalone(B)] if reply == "multiple" else [member]
+    if reply == []:
+        payload = []
+    store_standalone(tmp_path, {"db": [payload]})
+    assert capture_containers(fake_cli, ("db",), policy=policy, timeout=5) == Failure(
+        reason="malformed"
+    )
+
+
+@pytest.mark.parametrize(
+    "references,completion,budget",
+    [
+        ((), (), None),
+        (("",), (), None),
+        (("a", "a"), (), None),
+        (["a"], (), None),
+        (("a",), ("b",), None),
+        (("a",), ("a", "a"), None),
+        (("a",), (["a"],), None),
+        (("a",), (), True),
+        (("a",), (), -1),
+    ],
+)
+def test_standalone_invalid_selection_fails_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    references: object,
+    completion: object,
+    budget: object,
+) -> None:
+    selected: Any = references
+    finished: Any = completion
+    limit: Any = budget
+    with pytest.raises(ValueError):
+        capture_containers(
+            fake_cli,
+            selected,
+            completion=finished,
+            max_restarts=limit,
+            policy=policy,
+            timeout=5,
+        )
+    assert not (tmp_path / "calls").exists()
+
+
+def test_standalone_dry_run_and_target_validation(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    fake_cli.client_config.compose_dry_run = True
+    with pytest.raises(ValueError):
+        capture_containers(fake_cli, (A,), policy=policy, timeout=5)
+    assert not (tmp_path / "calls").exists()
+    with pytest.raises(ValueError):
+        ContainerTarget(client_config=fake_cli.client_config, container_ids=(A, A))
+    target = ContainerTarget(client_config=fake_cli.client_config, container_ids=(A,))
+    with pytest.raises(FrozenInstanceError):
+        setattr(target, fields(target)[1].name, (B,))
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Failure(
+        reason="unsupported"
+    )
+
+
+def test_standalone_deadline_counts_health_restart_and_unfinished(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    db = standalone(A, restarts=2)
+    db["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    job = standalone(B, status="created")
+    store_standalone(tmp_path, {A: [[db]], B: [[job]]})
+    target = capture_containers(
+        fake_cli, (A, B), completion=(B,), max_restarts=1, policy=policy, timeout=5
+    )
+    assert isinstance(target, ContainerTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(
+            2,
+            unhealthy_containers=1,
+            unfinished_completion_containers=1,
+            restart_budget_exceeded_containers=1,
+        )
+    )
+
+
+def test_standalone_final_pass_rechecks_completion_failure(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    done = standalone(A, status="exited")
+    failed = standalone(A, status="exited", exit_code=2)
+    store_standalone(tmp_path, {A: [[done], [done], [failed]]})
+    target = capture_containers(
+        fake_cli, (A,), completion=(A,), policy=policy, timeout=5
+    )
+    assert isinstance(target, ContainerTarget)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Failure(
+        reason="completion_failed"
+    )
+
+
+def test_standalone_final_pass_must_stay_ready(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    ready = standalone(A, health="healthy")
+    unhealthy = standalone(A, health="unhealthy")
+    store_standalone(tmp_path, {A: [[ready], [ready], [unhealthy]]})
+    target = capture_containers(fake_cli, (A,), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(1, unhealthy_containers=1)
+    )
+
+
+@pytest.mark.parametrize("value", [None, "1", True, -1])
+def test_standalone_enabled_restart_budget_rejects_malformed_counts(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, value: object
+) -> None:
+    member = standalone(A)
+    member["RestartCount"] = value
+    store_standalone(tmp_path, {A: [[member]]})
+    assert capture_containers(
+        fake_cli, (A,), max_restarts=1, policy=policy, timeout=5
+    ) == Failure(reason="malformed")
+
+
+def test_standalone_deadline_discards_partial_later_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    import pywhales.convergence._container as container_module
+    from pywhales.client_config import ClientConfig
+    from pywhales.convergence._wire import StandaloneContainerWire
+    from pywhales.exceptions import ObservationTimeout
+
+    first = standalone(A, health="starting")
+    second = standalone(B)
+    store_standalone(tmp_path, {A: [[first]], B: [[second]]})
+    target = capture_containers(fake_cli, (A, B), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+    inspect = container_module.inspect_standalone
+    inspections = 0
+
+    def expire_during_second_cycle(
+        config: ClientConfig, identity: str
+    ) -> StandaloneContainerWire:
+        nonlocal inspections
+        inspections += 1
+        if inspections == 4:
+            raise ObservationTimeout()
+        return inspect(config, identity)
+
+    monkeypatch.setattr(
+        container_module, "inspect_standalone", expire_during_second_cycle
+    )
+    monkeypatch.setattr(compose_module, "_pause", lambda state, interval: None)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(2, unhealthy_containers=1)
+    )
+
+
+def test_standalone_cancellation_reaps_hung_inspection(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    member = standalone(A)
+    store_standalone(tmp_path, {A: [[member]]})
+    target = capture_containers(fake_cli, (A,), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+    fifo = tmp_path / "notification"
+    os.mkfifo(fifo)
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["hang_at"] = {"args": inspection(A), "occurrence": 2, "notify": str(fifo)}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    processes = track_processes(monkeypatch)
+    cancel = Event()
+    results: list[Outcome] = []
+    descriptor = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    worker = Thread(
+        target=lambda: results.append(
+            wait(target, policy=policy, timeout=30, poll_interval=1, cancel=cancel)
+        )
+    )
+    try:
+        worker.start()
+        ready, _, _ = select.select([descriptor], [], [], 10)
+        assert ready and os.read(descriptor, 32) == b"started"
+    finally:
+        cancel.set()
+        worker.join(5)
+        os.close(descriptor)
+    assert not worker.is_alive()
+    assert results == [Cancelled()]
+    assert_reaped(processes)

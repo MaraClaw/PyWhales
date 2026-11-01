@@ -94,9 +94,8 @@ class ComposeLabels(BaseModel):
     oneoff: str | None = Field(default=None, alias="com.docker.compose.oneoff")
 
 
-class ContainerConfig(BaseModel):
+class StandaloneConfig(BaseModel):
     model_config = ConfigDict(strict=True)
-    labels: ComposeLabels = Field(alias="Labels")
     healthcheck: bool = Field(default=False, alias="Healthcheck")
 
     @field_validator("healthcheck", mode="before")
@@ -112,18 +111,33 @@ class ContainerConfig(BaseModel):
         return bool(test) and test[0] != "NONE"
 
 
-class ContainerWire(BaseModel):
+class ContainerConfig(StandaloneConfig):
+    labels: ComposeLabels = Field(alias="Labels")
+
+
+class ContainerWireBase(BaseModel):
+    model_config = ConfigDict(strict=True)
+    id: str = Field(alias="Id", min_length=1)
+    state: ContainerState = Field(alias="State")
+    restart_count: JsonValue = Field(default=None, alias="RestartCount")
+
+
+class StandaloneContainerWire(ContainerWireBase):
+    """Only the identity and state required to evaluate a standalone container."""
+
+    id: str = Field(alias="Id", pattern=r"^[0-9a-f]{64}$")
+    name: str | None = Field(default=None, alias="Name")
+    config: StandaloneConfig = Field(alias="Config")
+
+
+class ContainerWire(ContainerWireBase):
     """Container identity, state, labels and raw restart count; env and command drop.
 
     ``restart_count`` is not validated here, so a disabled restart budget keeps
     ignoring whatever Docker reports; the evaluator checks it when enabled.
     """
 
-    model_config = ConfigDict(strict=True)
-    id: str = Field(alias="Id", min_length=1)
-    state: ContainerState = Field(alias="State")
     config: ContainerConfig = Field(alias="Config")
-    restart_count: JsonValue = Field(default=None, alias="RestartCount")
 
 
 def canonical(value: dict[str, JsonValue], *, template: bool = False) -> str:
@@ -196,6 +210,26 @@ def inspect_container(config: ClientConfig, container_id: str) -> ContainerWire:
     if len(results) != 1 or results[0].id != container_id:
         raise ParsingError("Container inspect identity mismatch")
     return results[0]
+
+
+def inspect_standalone(config: ClientConfig, reference: str) -> StandaloneContainerWire:
+    """Inspect exactly one container without requiring Compose labels."""
+    payload = run([*config.docker_cmd, "inspect", "--type", "container", reference])
+    results = TypeAdapter(list[StandaloneContainerWire]).validate_json(payload)
+    if len(results) != 1:
+        raise ParsingError("Container inspect identity mismatch")
+    return results[0]
+
+
+def resolve_container(config: ClientConfig, reference: str) -> StandaloneContainerWire:
+    """Resolve a name or ID prefix to one matching container projection."""
+    result = inspect_standalone(config, reference)
+    if not result.id.startswith(reference) and (
+        result.name is None
+        or result.name.removeprefix("/") != reference.removeprefix("/")
+    ):
+        raise ParsingError("Container inspect identity mismatch")
+    return result
 
 
 def target_from_wire(

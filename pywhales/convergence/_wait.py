@@ -15,10 +15,12 @@ from pywhales.convergence._compose import (
     validate_selection,
     wait_compose,
 )
+from pywhales.convergence._container import capture_selected, wait_containers
 from pywhales.convergence._service import ServiceObservation, check_service, summarize
 from pywhales.convergence._types import (
     Cancelled,
     ComposeTarget,
+    ContainerTarget,
     Deadline,
     DeadlineDetail,
     Failure,
@@ -166,19 +168,56 @@ def capture_compose(
     return capture_project(client.client_config, selection, scope)
 
 
+def capture_containers(
+    client: DockerClient,
+    references: tuple[str, ...],
+    *,
+    completion: tuple[str, ...] = (),
+    max_restarts: int | None = None,
+    policy: InspectionPolicy,
+    timeout: float,
+    cancel: Event | None = None,
+) -> ContainerTarget | Failure | Deadline | Cancelled:
+    """Capture fixed standalone container IDs without modifying daemon state.
+
+    Args:
+        client: Client selecting the daemon; dry-run configurations are rejected.
+        references: Nonempty tuple of distinct container names or ID prefixes.
+        completion: Distinct selected references expected to exit successfully.
+        max_restarts: Optional nonnegative restart budget for long-running members.
+        policy: Required observation limits.
+        timeout: Positive finite total seconds for capture.
+        cancel: Optional cancellation event.
+
+    Returns:
+        A fixed target, or a typed failure, deadline, or cancellation outcome.
+
+    Raises:
+        ValueError: If the timeout, selection, restart budget, or client is invalid.
+    """
+    _positive(timeout)
+    selection = Selection(references, completion, max_restarts)
+    validate_selection(client.client_config, selection)
+    scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
+    return capture_selected(
+        client.client_config, references, completion, max_restarts, scope
+    )
+
+
 def wait(
-    target: ServiceTarget | StackTarget | ComposeTarget,
+    target: ServiceTarget | StackTarget | ComposeTarget | ContainerTarget,
     *,
     policy: InspectionPolicy,
     timeout: float,
     poll_interval: float,
     cancel: Event | None = None,
 ) -> Outcome:
-    """Wait for the captured service, stack or Compose membership without mutation.
+    """Wait for captured service, stack, Compose or container membership without mutation.
 
     Args:
         target: Captured service generation, explicitly fixed stack membership, or
-            Compose services. Compose re-lists the project each cycle: containers
+            Compose services, or standalone containers. Compose re-lists the project
+            each cycle; standalone targets inspect their fixed IDs: containers
             must be ``running``, not restarting or paused, and ``healthy`` if they
             have a healthcheck; membership or config-hash changes are ``superseded``.
             Completion services instead need every container ``exited`` with code
@@ -203,6 +242,10 @@ def wait(
     deadline = time.monotonic() + timeout
     if isinstance(target, ComposeTarget):
         return wait_compose(
+            target, observation(policy, deadline=deadline, cancel=cancel), poll_interval
+        )
+    if isinstance(target, ContainerTarget):
+        return wait_containers(
             target, observation(policy, deadline=deadline, cancel=cancel), poll_interval
         )
     targets = (target,) if isinstance(target, ServiceTarget) else target.services
