@@ -2588,9 +2588,12 @@ def _image_copy_launches(
     policy snapshot, and the explicit `timeout` argument. Container inspect
     reports a running container so that cleanup also launches stop and rm.
     """
-    inspect_json = json.dumps([json.loads(get_all_jsons("containers")[0].read_text())])
+    inspect_result = json.loads(get_all_jsons("containers")[0].read_text())
+    container_id = inspect_result["Id"]
+    assert isinstance(container_id, str)
+    inspect_json = json.dumps([inspect_result])
     outputs = {
-        ("create", ""): "tmp-container",
+        ("create", ""): container_id,
         ("container", "inspect"): inspect_json,
         ("container", "commit"): "sha256:committed",
     }
