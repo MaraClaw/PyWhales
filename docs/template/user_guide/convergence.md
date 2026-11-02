@@ -1,4 +1,4 @@
-# Service, stack and container convergence
+# Service, stack, node and container convergence
 
 `pywhales.convergence` is an opt-in, read-only observer. Deploy, service update,
 and rollback retain their existing behavior and do not invoke it. Capture each
@@ -86,6 +86,42 @@ The target's `template` and `Failure.cause`, including exception raw attributes,
 may contain confidential service settings, command arguments, and output. Do not
 log or expose them without an appropriate confidentiality policy. The template is
 excluded from target representations and the cause from failure representations.
+
+## Swarm nodes and designated leadership
+
+`capture_nodes` fixes selected node IDs and an explicit subset of manager IDs;
+it never discovers other managers. Each node must be ready and active, and each
+designated manager must retain its role and be reachable. For a maintenance step
+that also needs leadership evidence, opt in:
+
+```python
+from pywhales.convergence import NodeTarget, capture_nodes, wait
+
+target = capture_nodes(
+    client,
+    ("node-id-1", "node-id-2"),
+    manager_ids=("node-id-1", "node-id-2"),
+    require_leader=True,
+    policy=policy,
+    timeout=10,
+)
+if isinstance(target, NodeTarget):
+    outcome = wait(target, policy=policy, timeout=120, poll_interval=1)
+```
+
+The flag defaults to false; enabling it requires a nonempty manager subset. Both
+complete clear passes must observe exactly one designated leader, but it may be a
+different manager in each pass. A missing `Leader` field in a present manager
+status means false; an explicit non-boolean leader value on a designated node that
+still reports manager role and status returns a cause-free `malformed` failure.
+Missing manager status or demotion remains pending. Unselected and undesignated
+nodes cannot satisfy or invalidate the leader count.
+
+On expiry, `Deadline.detail.leader_mismatch_managers` is zero when the condition
+is met or disabled, and otherwise the number of designated managers. It retains no
+identities or inspect payloads and describes the latest complete cycle. Inspections
+are sequential: this is neither a global election claim nor a guarantee of
+continuous leadership. Capture and waiting do not change the cluster.
 
 ## Standalone containers
 

@@ -87,6 +87,7 @@ class NodeManagerStatus(BaseModel):
     reachability: Literal["unknown", "unreachable", "reachable"] = Field(
         alias="Reachability"
     )
+    leader: JsonValue = Field(default=False, alias="Leader")
 
 
 class NodeWire(BaseModel):

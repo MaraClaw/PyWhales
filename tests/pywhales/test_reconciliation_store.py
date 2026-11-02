@@ -183,6 +183,7 @@ def test_deadline_summary_round_trips_and_is_generation_fenced() -> None:
         unfinished_completion_containers=1,
         restart_budget_exceeded_containers=1,
         non_ready_nodes=1,
+        leader_mismatch_managers=2,
     )
     claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 5))
     progress = Progress(
@@ -212,6 +213,7 @@ def test_deadline_summary_round_trips_and_is_generation_fenced() -> None:
         "unavailable_nodes": 0,
         "non_manager_nodes": 0,
         "unreachable_managers": 0,
+        "leader_mismatch_managers": 2,
     }
     stale = store.claim(published, LeaseRequest("worker-a", 5))
     clock.now += 5

@@ -161,6 +161,7 @@ class NodeTarget:
     client_config: ClientConfig = field(repr=False, compare=False)
     node_ids: tuple[str, ...]
     manager_ids: tuple[str, ...] = ()
+    require_leader: bool = False
 
     def __post_init__(self) -> None:
         """Reject invalid membership or a manager outside the selected nodes."""
@@ -176,6 +177,10 @@ class NodeTarget:
             or not set(managers) <= set(nodes)
         ):
             raise ValueError("Nodes and managers must be distinct selected IDs")
+        if type(self.require_leader) is not bool or (
+            self.require_leader and not managers
+        ):
+            raise ValueError("require_leader needs a bool and designated managers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +233,9 @@ class DeadlineDetail:
     For node targets each selected node is one captured unit. The node counters
     count non-ready state, non-active availability, designated managers no longer
     holding the manager role, and designated managers without reachable status.
-    A demoted node can contribute to both manager counters.
+    A demoted node can contribute to both manager counters. When leadership is
+    required, ``leader_mismatch_managers`` is zero for exactly one observed leader,
+    otherwise the number of designated managers.
     """
 
     captured_services: int
@@ -252,6 +259,7 @@ class DeadlineDetail:
     unavailable_nodes: int = 0
     non_manager_nodes: int = 0
     unreachable_managers: int = 0
+    leader_mismatch_managers: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -278,6 +286,7 @@ class DeadlineDetail:
             self.unavailable_nodes,
             self.non_manager_nodes,
             self.unreachable_managers,
+            self.leader_mismatch_managers,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services
