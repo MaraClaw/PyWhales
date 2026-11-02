@@ -10,6 +10,7 @@ from typing import Literal, NewType
 
 type OperationFamily = Literal["captured", "stream", "archive_load", "archive_save"]
 type Outcome = Literal["success", "failure", "timeout", "closed", "cancelled", "limit"]
+type RefusalOutcome = Literal["cancelled", "timeout", "limit"]
 AdmissionId = NewType("AdmissionId", str)
 type AdmissionOutcome = Literal[
     "granted", "busy", "queue_full", "closed", "queue_timeout", "cancelled", "failed"
@@ -24,14 +25,14 @@ class AdmissionDecisionRecord:
         admission_id: Opaque identifier shared with admitted launch records.
         outcome: Closed admission result, independent of subsequent work success.
         duration_seconds: Nonnegative monotonic seconds from activation to decision.
-        schema_version: Record schema version, currently 5.
+        schema_version: Record schema version, currently 6.
         phase: Fixed admission decision discriminator.
     """
 
     admission_id: AdmissionId
     outcome: AdmissionOutcome
     duration_seconds: float
-    schema_version: Literal[5] = field(default=5, init=False)
+    schema_version: Literal[6] = field(default=6, init=False)
     phase: Literal["admission"] = field(default="admission", init=False)
 
 
@@ -43,14 +44,14 @@ class LaunchRecord:
         family: Fixed execution family, never inferred from command arguments.
         attempt_id: Opaque identifier shared with the completion record.
         admission_id: Innermost admitted request, or None outside observed admission.
-        schema_version: Record schema version, currently 5.
+        schema_version: Record schema version, currently 6.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
     attempt_id: str = field(kw_only=True)
     admission_id: AdmissionId | None = field(default=None, kw_only=True)
-    schema_version: Literal[5] = field(default=5, init=False)
+    schema_version: Literal[6] = field(default=6, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -71,7 +72,7 @@ class CompletionRecord:
             not measure bytes processed by the child or selected Docker daemon.
         attempt_id: Opaque identifier shared with the launch record.
         return_code: Reaped local process status, or None if unavailable.
-        schema_version: Record schema version, currently 5.
+        schema_version: Record schema version, currently 6.
         phase: Fixed completion discriminator.
     """
 
@@ -83,9 +84,32 @@ class CompletionRecord:
     attempt_id: str = field(kw_only=True)
     return_code: int | None = field(default=None, kw_only=True)
     stdin_bytes: int | None = field(default=None, kw_only=True)
-    schema_version: Literal[5] = field(default=5, init=False)
+    schema_version: Literal[6] = field(default=6, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 
-type TelemetryRecord = LaunchRecord | CompletionRecord | AdmissionDecisionRecord
+@dataclass(frozen=True, slots=True)
+class RefusalRecord:
+    """Payload-free observation refusal before a local launch.
+
+    Attributes:
+        family: Fixed execution family.
+        outcome: Cancellation, observation deadline, or observation limit.
+        attempt_id: Opaque identifier for this refused attempt.
+        admission_id: Innermost observed admission, or None.
+        schema_version: Record schema version, currently 6.
+        phase: Fixed refusal discriminator.
+    """
+
+    family: OperationFamily
+    outcome: RefusalOutcome
+    attempt_id: str = field(kw_only=True)
+    admission_id: AdmissionId | None = field(default=None, kw_only=True)
+    schema_version: Literal[6] = field(default=6, init=False)
+    phase: Literal["refusal"] = field(default="refusal", init=False)
+
+
+type TelemetryRecord = (
+    LaunchRecord | CompletionRecord | RefusalRecord | AdmissionDecisionRecord
+)
 type TelemetryObserver = Callable[[TelemetryRecord], None]

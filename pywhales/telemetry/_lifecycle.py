@@ -4,6 +4,8 @@ Only opaque attempt identifiers, numeric measurements, and closed vocabularies
 cross this boundary. Observer exceptions are contained without rendering details.
 """
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from threading import Lock
 from time import monotonic
 from types import TracebackType
@@ -21,6 +23,8 @@ from pywhales.telemetry import (
     LaunchRecord,
     OperationFamily,
     Outcome,
+    RefusalOutcome,
+    RefusalRecord,
     TelemetryObserver,
     TelemetryRecord,
 )
@@ -90,6 +94,35 @@ class ExecutionTelemetry:
                 ),
             )
             self._started = monotonic()
+
+    @contextmanager
+    def preflight(self) -> Generator[None]:
+        """Report an observation refusal without changing its exception."""
+        try:
+            yield
+        except (
+            ObservationCancelled,
+            ObservationTimeout,
+            ObservationLimitError,
+        ) as error:
+            if self._observer is not None:
+                match error:
+                    case ObservationCancelled():
+                        outcome: RefusalOutcome = "cancelled"
+                    case ObservationTimeout():
+                        outcome = "timeout"
+                    case ObservationLimitError():
+                        outcome = "limit"
+                deliver(
+                    self._observer,
+                    RefusalRecord(
+                        self._family,
+                        outcome,
+                        attempt_id=uuid4().hex,
+                        admission_id=current_admission_id.get(),
+                    ),
+                )
+            raise
 
     def captured(self, stdout: bytes | None, stderr: bytes | None) -> None:
         """Measure raw captured bytes before decoding or newline removal."""

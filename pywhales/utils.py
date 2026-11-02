@@ -652,11 +652,11 @@ def _start_process(
     telemetry = ExecutionTelemetry(policy.telemetry_observer, "stream")
     args: list[str] | None = None
     if observation is not None:
-        # Like a captured run, reject before telemetry sees a launch or a
-        # process exists: a stopped scope or an oversized argv/environment.
+        # Reject a stopped scope or an oversized argv/environment before launch.
         args = [str(x) for x in full_cmd]
         subprocess_env = finalize_environment(subprocess_env, args)
-        check_scoped_launch(args, subprocess_env, observation)
+        with telemetry.preflight():
+            check_scoped_launch(args, subprocess_env, observation)
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
     try:

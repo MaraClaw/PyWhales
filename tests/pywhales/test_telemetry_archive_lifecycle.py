@@ -23,7 +23,12 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry import (
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    TelemetryRecord,
+)
 
 
 def test_unstarted_archive_save_close_has_no_launch_or_telemetry() -> None:
@@ -333,7 +338,7 @@ def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation() -> None:
 
 @pytest.mark.parametrize("operation", ["save", "load"])
 @pytest.mark.parametrize("stop", ["cancelled", "argv"])
-def test_archive_launch_is_rejected_before_input_telemetry_and_process(
+def test_archive_launch_is_rejected_before_input_and_process(
     operation: str, stop: str
 ) -> None:
     records: list[TelemetryRecord] = []
@@ -362,7 +367,11 @@ def test_archive_launch_is_rejected_before_input_telemetry_and_process(
         attempt()
 
     launch.assert_not_called()
-    assert records == [] and consumed == []
+    assert consumed == []
+    (record,) = records
+    assert isinstance(record, RefusalRecord)
+    assert record.family == ("archive_load" if operation == "load" else "archive_save")
+    assert record.outcome == ("cancelled" if stop == "cancelled" else "limit")
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancel"])

@@ -1,7 +1,8 @@
 # Sanitized execution telemetry
 
 Telemetry is optional. Set `telemetry_observer` on `DockerClient` or
-`ClientConfig` to receive immutable `LaunchRecord` and `CompletionRecord` objects
+`ClientConfig` to receive immutable `LaunchRecord`, `CompletionRecord`, and
+`RefusalRecord` objects, as well as observed admission decisions,
 from `pywhales.telemetry`. These names aren't exported from the package root.
 There is no monitoring dependency, global observer, background worker, or network
 export by default. Without an observer, command results and errors are unchanged.
@@ -26,10 +27,10 @@ from that client retain the policy through ordinary list composition, shallow
 copy, and deep copy. A supplied `client_config` takes precedence over constructor
 settings, including `telemetry_observer`.
 
-## Version 4 schema and confidentiality
+## Version 6 schema and confidentiality
 
-The vocabulary is closed. `schema_version` is `4`; `phase` is `launch` or
-`completion`; `family` is `captured`, `stream`, `archive_load`, or
+The vocabulary is closed. `schema_version` is `6`; execution `phase` is `launch`,
+`completion`, or `refusal`; `family` is `captured`, `stream`, `archive_load`, or
 `archive_save`. Family describes the shared execution path, not an operation
 inferred from argv. `archive_load`/`archive_save` cover only the filename-free
 binary transfer paths: `image.load()` given bytes or a byte iterable, and
@@ -43,8 +44,7 @@ emitted at all. Completion `outcome` is exactly one of `success`, `failure`,
 launch record, including a `max_total_stream_bytes` overflow and an operating
 system `native_argv` refusal. Both are scopes stopped on purpose, so dashboards
 can chart them apart from `failure`. `ObservationTimeout` and `DockerTimeout`
-remain `timeout`, and `KeyboardInterrupt` remains `failure`. Version 4 adds the
-two outcomes and changes no field.
+remain `timeout`, and `KeyboardInterrupt` remains `failure`.
 Each launch attempt has an opaque random `attempt_id`, shared with its completion;
 it carries no command, endpoint, credential, PID, or remote-operation meaning.
 
@@ -59,8 +59,15 @@ Launch is emitted immediately before an attempted local spawn, after shared
 preflight validation. It does not prove that spawn succeeded. A spawn failure has
 a failure completion with unavailable byte counts, except an operating system
 argument-size refusal inside an observation, which completes as `limit`.
-Rejection before the launch seam (a set cancel token, an expired deadline, or an
-argv or environment limit) emits neither record. The shared `run()` and process-stream factories are
+An observation cancellation, deadline or argv/environment limit rejected by the
+launch preflight emits exactly one `RefusalRecord` with outcome `cancelled`,
+`timeout` or `limit`, instead of a launch/completion pair. It has an opaque
+`attempt_id` and optional innermost observed `admission_id`, but no duration,
+byte counts or return code. Launch records carry the same optional admission ID;
+completion records join their launch by attempt ID. Earlier argument validation
+and environment resolution failures do not emit a refusal. No observer means no
+telemetry IDs or clock reads. Lazy saves use the observer and observation active
+at first iteration. The shared `run()` and process-stream factories are
 covered, as are the direct binary subprocesses behind `archive_load` and
 `archive_save`. Other direct subprocess paths may remain uncovered; this is not
 a complete audit of every Docker invocation.
