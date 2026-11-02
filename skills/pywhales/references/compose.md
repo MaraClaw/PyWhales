@@ -108,6 +108,14 @@ Both `compose.run` and `compose.execute` default to `tty=True`. Set `tty=False`
 for captured output and unattended jobs. `compose.run` also rejects TTY plus
 streaming, TTY plus detach, and detach plus streaming.
 
+For job stderr that may look like a Docker error, opt into
+`DockerClient(strict_workload_errors=True)`. Non-detached `compose.run`
+(captured, TTY, or streamed) and `compose.execute` (non-streamed, captured or TTY)
+then raise exact `DockerException` on nonzero exit. Detached calls and other
+Compose commands retain specialization; this doesn't add a stream option to
+`execute`. See [Workload failures](client-and-errors.md#separate-workload-failures-from-docker-errors)
+for the default, preserved raw attributes, and unaffected timeout/limit errors.
+
 A detached `compose.run(..., tty=False, detach=True)` handle retains the complete
 captured container ID and originating client configuration. Keep the full ID
 when reloading or passing it to other container APIs; don't truncate it.
@@ -179,8 +187,15 @@ takes explicit, distinct service names for the client's configured project, and
 accepts `completion_services=("migrate",)` for selected one-shot services expected
 to exit 0. Every captured completion container must have exited 0 and not be
 restarting; a non-restarting nonzero exit fails as `completion_failed`. Unmarked
-services still require running/healthy containers; an unmarked one-shot that
-exited 0 stays a blocker.
+services still require running/healthy containers; by default an unmarked
+one-shot that exited 0 stays a blocker. Set `fail_on_exit=True` on
+`capture_compose` so convergence `wait()` returns cause-free `Failure(reason="exited")` when a
+long-running member exits without restarting, whether its code is zero or
+nonzero. The choice is frozen on the target and applies to the confirming pass
+too; designated completion failures take precedence, enabled restart counts
+must remain valid, and over-budget members remain blockers. This option does
+not change `compose.up(wait=True)`; see the convergence reference for the
+capture/wait workflow and validation.
 
 `capture_compose(..., max_restarts=None, policy=..., timeout=...)` leaves restart
 counts unchecked by default. Set a nonnegative integer (never a boolean) to fix

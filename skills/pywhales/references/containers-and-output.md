@@ -107,6 +107,14 @@ and attaching more than one container raises `ValueError`; an empty iterable
 returns `None` without a launch. `docker.start`, `docker.container.start`, and
 `Container.start()` share these rules and their return shapes.
 
+For workloads whose stderr may resemble Docker errors, configure
+`DockerClient(strict_workload_errors=True)`. Attached `run`, non-detached
+`execute`, and `start(attach=True)` then raise exact `DockerException` on nonzero
+exits, in captured/TTY and supported streamed modes, including handle and root
+aliases. Detached/unattached calls and image/inspect preflights keep specialized
+errors. See [Workload failures](client-and-errors.md#separate-workload-failures-from-docker-errors)
+for defaults, preserved error attributes, and timeout/cancellation behavior.
+
 `run`, `execute`, `logs`, `start`, and `wait` each accept a keyword-only `timeout` in
 positive finite seconds, replacing the client's `default_timeout` for that one
 launch; omitting it (`None`) inherits the client default, which is itself
@@ -133,7 +141,10 @@ a `list[int]`. Expiry raises `DockerTimeout` without stopping the containers.
 For running/healthy readiness plus designated successful one-shot completion,
 use `capture_containers()` and `wait()` from `pywhales.convergence`, not
 `docker.wait()`. They return typed observation outcomes instead of exit codes;
-see [Standalone containers](observation-and-convergence.md#standalone-containers).
+set `fail_on_exit=True` at capture to fail when a long-running member exits
+without restarting, even with exit code 0. The default keeps it pending. See
+[Standalone containers](observation-and-convergence.md#standalone-containers)
+for restart-budget precedence and designated completion rules.
 
 `start` takes `timeout` in every mode (unattached, attached and captured, or
 streamed) and through all three entry points, validated before the container

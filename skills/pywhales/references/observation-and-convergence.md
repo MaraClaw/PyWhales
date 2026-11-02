@@ -321,7 +321,7 @@ match capture_compose(
     compose_client,
     services,
     completion_services=("migrate",),
-    max_restarts=0,  # optional: no observed restarts for long-running members
+    fail_on_exit=True,  # opt in to failing when a long-running member exits
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -338,7 +338,7 @@ match capture_compose(
 ```
 
 `capture_compose(client, services, *, completion_services=(), max_restarts=None,
-policy, timeout, cancel=None)` returns a
+fail_on_exit=False, policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
@@ -358,6 +358,9 @@ waiting.
   member above budget keeps its service unsettled even while healthy. This is a
   live blocker, not a permanent failure or a monotonic-counter assumption;
   completion services ignore the restart budget.
+- `fail_on_exit` must be a bool; other values raise `ValueError` before launch.
+  The target freezes this choice, which defaults to `False` for compatibility.
+  Capture does not itself treat an exit as a failure; `wait()` evaluates it.
 - Capture lists the selected services' containers with stopped ones included,
   inspects each, and skips one-off `compose run` containers. For every selected
   service the target records the full container IDs and the single
@@ -376,8 +379,8 @@ waiting.
 - An unmarked service's container counts as ready only when it is `running`, not restarting, not
   paused, and `healthy` whenever a healthcheck is configured; a configured
   healthcheck with no health status yet blocks, and a `NONE` healthcheck test
-  counts as none. A container that exited 0, such as a one-shot job, isn't
-  running and stays a blocker unless its service was marked for completion.
+  counts as none. By default, an exited container isn't running and remains a
+  blocker; mark one-shot services for completion instead.
 - A marked service completes only when every captured container is `exited`
   with `ExitCode` 0 and not restarting. Created, running, or restarting
   containers remain unfinished. A non-restarting container exited nonzero ends
@@ -385,6 +388,14 @@ waiting.
   exit code, or container ID is included. An exited completion container with a
   missing or malformed `ExitCode` yields `Failure(reason="malformed")` with no
   cause. A service with no containers is still `unsupported`, not complete.
+- With `fail_on_exit=True`, a non-restarting long-running member that has exited
+  with code 0 or nonzero produces cause-free `Failure(reason="exited")` on the
+  first complete evaluation that sees it, including the confirming pass. A
+  failed completion member takes precedence as `completion_failed`; an enabled
+  restart budget validates all long-running restart counts before checking for
+  exits, so a malformed count yields `malformed`. Restarting members and exited
+  members over budget remain blockers rather than producing `exited`. Completion
+  rules and Swarm service or stack targets are unchanged.
 - When a cycle finds all long-running services ready and completion services
   finished, `wait()` lists and checks the project again. `Success` requires
   that mandatory second pass to satisfy the same conditions and be unchanged.
@@ -401,7 +412,8 @@ designated successful completion, returning typed outcomes. See
 for the exit-code API.
 
 Check that the installed package exports `ContainerTarget` and
-`capture_containers`, that capture accepts `completion` and `max_restarts`, and
+`capture_containers`, that capture accepts `completion`, `max_restarts`, and
+`fail_on_exit`, and
 that convergence `wait` accepts `ContainerTarget`; see
 [Usage validation](validation.md). A version string alone doesn't establish
 these capabilities.
@@ -431,7 +443,7 @@ target = capture_containers(
     client,
     ("database", "migration"),
     completion=("migration",),
-    max_restarts=0,
+    fail_on_exit=True,  # opt in to failing when a long-running member exits
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -446,19 +458,20 @@ elif isinstance(target, (Deadline, Cancelled)):
 ```
 
 `capture_containers(client, references, *, completion=(), max_restarts=None,
-policy, timeout, cancel=None)` returns a `ContainerTarget` or typed
+fail_on_exit=False, policy, timeout, cancel=None)` returns a `ContainerTarget` or typed
 `Failure`/`Deadline`/`Cancelled`. Capture and wait never launch, restart, stop,
 or remove containers.
 
 `references` must be a nonempty tuple of distinct, nonempty names or ID prefixes.
 `completion` must be a tuple of distinct references drawn from that selection;
 its default `()` leaves all members long-running. `max_restarts` is `None`
-(disabled) or a nonnegative integer, never a boolean. Invalid selections,
-completion tuples, restart budgets, or timeouts, and clients configured with
+(disabled) or a nonnegative integer, never a boolean. `fail_on_exit` must be a
+bool and defaults to `False`. Invalid selections, completion tuples, restart
+budgets, exit flags, or timeouts, and clients configured with
 `compose_dry_run=True`, raise `ValueError` before any CLI launch.
 
 Capture resolves each reference once to a full lowercase 64-hex container ID.
-The target freezes those IDs, completion IDs, and restart budget; keep its
+The target freezes those IDs, completion IDs, restart budget, and exit flag; keep its
 originating client configuration stable and its IDs out of untrusted output.
 Different references resolving to the same ID produce cause-free
 `Failure(reason="malformed")`, as does unusable inspect output. A missing
@@ -473,7 +486,9 @@ standalone container: unmarked members must be running, not restarting or
 paused, and healthy when a healthcheck is configured. Marked members must exit
 0 without restarting; a nonzero exit without restarting is cause-free
 `completion_failed`, and a missing or malformed exit code is cause-free
-`malformed`. An enabled restart budget checks each long-running member's current
+`malformed`. The Compose `fail_on_exit` rules above also apply: capture does not
+evaluate exits as failures, and by default an exited long-running member remains
+a blocker. An enabled restart budget checks each long-running member's current
 `RestartCount`, not restarts since capture. Missing, negative, or non-integer
 counts are cause-free `malformed`; over-budget readings block success but a
 later within-budget reading clears the blocker. Completion members ignore the
@@ -529,4 +544,6 @@ Leases don't fence Docker itself; there is no exactly-once guarantee or built-in
 reset/retry/delete workflow. Check installed signatures and the application's
 ownership/recovery design before opting in; don't replace failed mutating calls
 with blind retries.
-The journal's convergence failure vocabulary also accepts `completion_failed`.
+The journal's convergence failure vocabulary also accepts `completion_failed`
+and `exited`. An `exited` failure projects to `FAILED` with no deadline detail,
+exit code, output, or failure cause.

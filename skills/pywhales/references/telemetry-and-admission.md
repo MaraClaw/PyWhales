@@ -28,7 +28,8 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=4`. `family` is
+The vocabulary is closed and currently at `schema_version=5` for launch,
+completion, and admission decision records. On execution records, `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
 [Registry transfers and archives](registry-and-archives.md) for exactly
@@ -43,16 +44,20 @@ launch emits no record. A stream reports the outcome of the error it delivers
 (deadline, then scope stop, then reader error), and `close()` keeps a stop
 recorded before it, such as a set cancel token; with none it reports
 `"closed"`. Each launch attempt has one opaque random `attempt_id`, shared with
-at most one completion.
+at most one completion. `LaunchRecord.admission_id` is the innermost observed
+admission's opaque ID, or `None` outside one; join completion to launch by
+`attempt_id`. Completion records don't repeat the admission ID.
 
 Records never include commands, arguments, endpoint addresses, environment
-keys or values, stdin/stdout/stderr payloads, or exception text, even with
+keys or values, endpoint aliases, pressure-class names, callables,
+stdin/stdout/stderr payloads, or exception text, even with
 `raw_diagnostics=True`. `CompletionRecord` adds `duration_seconds` (monotonic,
 including stream consumer pauses until exhaustion/failure/close),
 `stdout_bytes`/`stderr_bytes`/`stdin_bytes` (raw byte counts, `None` when
 unobserved, never a fabricated zero), and `return_code` (the reaped local
-process status, `None` on spawn failure). None of this is admission queue
-wait, Docker daemon task duration, or application readiness. A callback's own
+process status, `None` on spawn failure). Execution duration isn't admission queue
+wait, Docker daemon task duration, or application readiness; admission decisions
+measure their own wait separately below. A callback's own
 printed/logged output is the application's responsibility, not sanitized by
 this contract.
 
@@ -100,9 +105,10 @@ dropped. A sink must not recursively call `flush()` or `shutdown()`. Close or
 exhaust owned streams before shutdown if their completion records still
 matter.
 
-`queued` and `export_errors` expose buffer/sink status. Launch and completion
-records can be dropped independently: don't assume every exported launch has
-an exported completion. The application owns flushing, sink privacy, and shutdown.
+`queued` and `export_errors` expose buffer/sink status. Launch, completion,
+and admission decision records can be dropped independently: don't assume every
+exported launch has an exported completion or decision. The application owns
+flushing, sink privacy, and shutdown.
 
 ## Bounded Endpoint Admission
 
@@ -199,3 +205,69 @@ of callables lazily, admitting one at a time; it isn't a parallel scheduler.
 Reentering the same owner from an operation it already admitted fails in the
 calling context: treat a composite operation as one admission, not nested
 ones.
+
+## Measure Admission Waits And Correlate Launches
+
+Configure both observers to receive decisions and the launches they admit. They
+can use the same callable or `BoundedExporter`:
+
+```python
+from pywhales import DockerClient
+from pywhales.admission import (
+    AdmissionOwner,
+    ClassLimit,
+    EndpointIdentity,
+    PressureClass,
+    SaturationPolicy,
+)
+from pywhales.telemetry import AdmissionDecisionRecord, LaunchRecord, TelemetryRecord
+
+records: list[TelemetryRecord] = []
+client = DockerClient(telemetry_observer=records.append)
+control = PressureClass("control")
+owner = AdmissionOwner(
+    EndpointIdentity("primary"),
+    {control: ClassLimit(active=2, pending=4, policy=SaturationPolicy.WAIT)},
+    telemetry_observer=records.append,
+)
+containers = owner.request(control, queue_timeout=5).call(client.ps)
+decisions = {
+    record.admission_id: record
+    for record in records
+    if isinstance(record, AdmissionDecisionRecord)
+}
+for record in records:
+    if (
+        isinstance(record, LaunchRecord)
+        and record.admission_id is not None
+        and record.admission_id in decisions
+    ):
+        decision = decisions[record.admission_id]
+        print(record.attempt_id, decision.outcome, decision.duration_seconds)
+```
+
+The owner's `telemetry_observer` is keyword-only and defaults to `None`, separately
+from the client's launch observer. Each activated request produces one immutable
+`AdmissionDecisionRecord` (`phase="admission"`): opaque `admission_id`, closed
+`outcome`, and nonnegative monotonic `duration_seconds` from activation to the
+decision, including lock/queue wait. Outcomes are `granted`, `busy`, `queue_full`,
+`closed`, `queue_timeout`, `cancelled`, and `failed` (including reentry failure).
+`granted` records admission, not successful execution of the callable. Cancelling
+an inert request before activation emits nothing. With no owner observer, no
+admission IDs, callbacks, or extra clock reads are added; snapshot counters keep
+their existing meanings.
+
+Decisions are committed under the owner lock but observers run outside all owner
+and stream locks, on the deciding thread (which may be the cancelling/closing
+thread). Ordinary observer exceptions don't change admission results or interfere
+with permit release. Keep callbacks quick and thread-safe as for execution telemetry.
+
+Launches during the admitted call, stream factory, source entry, every `next()`,
+and source exit carry its ID. Nested different owners use the innermost ID and
+restore the outer ID on exit; an inner owner without an observer uses `None`.
+Outside admission the ID resets to `None`. Returning an unconsumed stream from
+`call()` doesn't extend admission: use `stream()` for lifecycle correlation and
+permit ownership. IDs correlate local records, not endpoints or daemon work;
+decision records contain no endpoint alias, pressure-class name, or exception
+text. With an exporter, drain owned streams before shutdown and tolerate missing
+joins when individual records are dropped.
