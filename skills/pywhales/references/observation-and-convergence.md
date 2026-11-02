@@ -34,6 +34,7 @@ policy = InspectionPolicy(
     max_response_bytes=1_048_576,
     max_total_references=200,
     max_total_response_bytes=4_194_304,
+    max_total_launch_attempts=8,
 )
 cancel = Event()
 request = InventoryRequest(
@@ -48,8 +49,8 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
-`max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`, and
-`max_total_stdin_bytes` default to `None`. An unset output total leaves that
+`max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`,
+`max_total_stdin_bytes`, and `max_total_launch_attempts` default to `None`. An unset output total leaves that
 aggregate unbounded; unset stdin still refuses captured input inside an
 observation unless an enclosing scope supplies a stdin budget. Booleans, zero,
 and negative values are invalid for every policy limit. The illustrative limits
@@ -59,6 +60,18 @@ monotonic `deadline` and a `cancel` `Event`, to synchronous list/inspect
 calls executed through it. Nested scopes can only tighten the active limits,
 never loosen them, and the scope applies to the current context only; it
 doesn't automatically propagate to worker threads you spawn inside it.
+
+`max_total_launch_attempts` bounds accepted local CLI launch reservations, not
+successful children. One reservation follows cancellation, deadline and argument
+preflight for captured calls, streams and both archive directions. Each enclosing
+account is checked and debited atomically; exhaustion raises
+`ObservationLimitError` with reason `total_launch_attempts` without charging any
+account, spawning a child or reading upload input. Accepted reservations are never
+refunded after interruption, spawn failure or CLI failure. Nested scopes cannot
+reset an outer allowance; explicitly copied contexts share its consumption.
+A separate scope created independently in each thread does not share a budget.
+Lazy saves reserve at first iteration, and their separate eager inspection costs
+its own captured reservation.
 
 The scope's restrictions belong to the shared synchronous captured path (the
 path list/inspect-style calls use). Inside a scope, that path rejects `tty`,
@@ -79,6 +92,12 @@ own cache. Supported kinds are thirteen: `container`, `image`, `network`,
 nonempty strings, else `ValueError`. Empty input launches no CLI. Request
 shape, total reference count, and each reference's argv and environment limits
 are checked for every group before the first inspect launch.
+The complete chunk plan must also fit every enclosing launch account's remaining
+allowance: one launch per ordinary chunk, one builder listing per group and one
+per singleton manifest inspect. This preliminary check consumes no reservations.
+Another worker can consume capacity afterward, so the authoritative per-launch
+check can still stop a later inspection. Detached capture and staged bulk-cache
+publication retain their failure behavior; there is no whole-inventory reservation.
 
 Builders have no batch inspect command, so they work differently. All builder
 requests sharing the same `ClientConfig` object use one strict
@@ -270,6 +289,7 @@ target = capture_nodes(
     client,
     ("exact-manager-node-id", "exact-worker-node-id"),
     manager_ids=("exact-manager-node-id",),
+    require_leader=True,
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -278,20 +298,30 @@ if isinstance(target, NodeTarget):
     outcome = wait(target, policy=policy, timeout=120, poll_interval=1, cancel=cancel)
 ```
 
-`capture_nodes(client, node_ids, *, manager_ids=(), policy, timeout, cancel=None)`
+`capture_nodes(client, node_ids, *, manager_ids=(), require_leader=False, policy, timeout, cancel=None)`
 returns `NodeTarget` or a typed `Failure`/`Deadline`/`Cancelled`. `node_ids` must
 be a nonempty tuple of distinct nonempty exact IDs. `manager_ids` must be a tuple
 of distinct selected IDs; its default `()` requests no manager-specific checks,
 not automatic discovery. Invalid selections, timeouts, or dry-run clients raise
 `ValueError` before lookup. Keep the originating config stable and target IDs
-out of untrusted output.
+out of untrusted output. `require_leader` must be exactly a bool; enabling it
+requires a nonempty `manager_ids` subset, validated before Docker lookup. The
+frozen target retains that option.
 
 Each selected node must have state `ready` and availability `active`. Designated
 managers must also remain managers and report reachability `reachable`;
-leadership is irrelevant. Demotion or missing manager status blocks success,
+leadership is ignored by default. Demotion or missing manager status blocks success,
 while workers need no manager status. Node version-index changes during recovery
 are allowed. `wait` inspects the fixed IDs and requires a second complete
 all-clear pass; it never re-lists or replaces membership.
+
+With `require_leader=True`, each complete clear pass must observe exactly one
+leader among the designated managers. The leader identity may change between
+passes. Within a present manager status, omitted `Leader` means false; explicit
+nonboolean values (including null) produce cause-free `Failure(reason="malformed")`
+only for designated nodes reporting manager role and status, at capture and wait.
+Other nodes cannot satisfy or invalidate the selected leader count. These are
+sequential selected observations, not proof of global or continuous leadership.
 
 An exact missing-node response during capture is `Failure(reason="observation")`
 with its cause; disappearance during wait is cause-free `superseded`. Unrelated
@@ -576,7 +606,10 @@ For a `NodeTarget`, each selected node is one `captured_services` unit.
 `non_ready_nodes`, `unavailable_nodes`, `non_manager_nodes`, and
 `unreachable_managers` count affected nodes once per reason, with overlapping
 reasons allowed and each count bounded by that total. Other target counters stay
-zero. Interrupted node cycles, including confirming passes, retain only the last
+zero, except `leader_mismatch_managers`: with leadership enabled it is zero for
+exactly one observed designated leader, otherwise the number of designated
+managers (not the number of leaders). It is zero when disabled and carries no
+identities. Interrupted node cycles, including confirming passes, retain only the last
 published complete cycle. Node failures have `service_id=None`; deadline detail
 contains only integer counts, never node IDs.
 
