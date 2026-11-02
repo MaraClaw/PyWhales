@@ -25,6 +25,8 @@ from pywhales.telemetry import (
     TelemetryRecord,
 )
 
+from ._context import current_admission_id
+
 
 def deliver(observer: TelemetryObserver, record: TelemetryRecord) -> None:
     """Invoke application code without exposing or propagating ordinary errors."""
@@ -80,7 +82,12 @@ class ExecutionTelemetry:
         if self._observer is not None:
             self._attempt_id = uuid4().hex
             deliver(
-                self._observer, LaunchRecord(self._family, attempt_id=self._attempt_id)
+                self._observer,
+                LaunchRecord(
+                    self._family,
+                    attempt_id=self._attempt_id,
+                    admission_id=current_admission_id.get(),
+                ),
             )
             self._started = monotonic()
 

@@ -61,7 +61,9 @@ class AdmittedStream[T](AbstractContextManager["AdmittedStream[T]"], Iterator[T]
                 raise RuntimeError("admitted streams support one consumer")
             self._reading = True
         try:
-            with operation_scope(id(self._request._owner)):
+            with operation_scope(
+                id(self._request._owner), self._request._ticket.admission_id
+            ):
                 value = next(self._iterator)
         except StopIteration:
             self._end_read(None)
@@ -142,7 +144,9 @@ class AdmittedStream[T](AbstractContextManager["AdmittedStream[T]"], Iterator[T]
             self._closing = True
         cleanup_error: BaseException | None = None
         try:
-            with operation_scope(id(self._request._owner)):
+            with operation_scope(
+                id(self._request._owner), self._request._ticket.admission_id
+            ):
                 if original is None:
                     self._source.__exit__(None, None, None)
                 else:

@@ -16,6 +16,7 @@ from pywhales.admission import (
     PressureClass,
     RejectionReason,
 )
+from pywhales.telemetry import AdmissionDecisionRecord, TelemetryRecord
 
 
 def test_concurrent_closers_wait_for_one_exit_and_inflight_next() -> None:
@@ -86,7 +87,12 @@ def test_cancel_races_grant_atomically_without_starting_cancelled_preflight(
     _repetition: int,
 ) -> None:
     pressure = PressureClass("create")
-    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 1)})
+    records: list[TelemetryRecord] = []
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 1)},
+        telemetry_observer=records.append,
+    )
     held, release, queued = Event(), Event(), Event()
     race = Barrier(2)
     calls: list[int] = []
@@ -128,6 +134,12 @@ def test_cancel_races_grant_atomically_without_starting_cancelled_preflight(
             release.set()
         first.result(3)
     assert owner.snapshot().classes[0].active == 0
+    assert all(isinstance(record, AdmissionDecisionRecord) for record in records)
+    assert [
+        record.outcome
+        for record in records
+        if isinstance(record, AdmissionDecisionRecord)
+    ] == ["granted", "cancelled" if won else "granted"]
 
 
 def test_cancelled_real_create_never_performs_pull_preflight_or_launch() -> None:

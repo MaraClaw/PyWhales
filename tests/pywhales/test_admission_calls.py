@@ -18,6 +18,7 @@ from pywhales.admission import (
     RejectionReason,
     SaturationPolicy,
 )
+from pywhales.telemetry import AdmissionDecisionRecord, TelemetryRecord
 
 
 def _spawn[T](operation: Callable[[], T]) -> tuple[Thread, Queue[T | BaseException]]:
@@ -45,8 +46,11 @@ def test_busy_rejection_invokes_zero_work(
     policy: SaturationPolicy, pending: int, reason: RejectionReason
 ) -> None:
     pressure = PressureClass("create")
+    records: list[TelemetryRecord] = []
     owner = AdmissionOwner(
-        EndpointIdentity("local"), {pressure: ClassLimit(1, pending, policy)}
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, pending, policy)},
+        telemetry_observer=records.append,
     )
     active, release = Event(), Event()
 
@@ -73,6 +77,12 @@ def test_busy_rejection_invokes_zero_work(
         thread.join(3)
     assert not thread.is_alive()
     assert output.get(timeout=3) is None
+    assert all(isinstance(record, AdmissionDecisionRecord) for record in records)
+    assert [
+        record.outcome
+        for record in records
+        if isinstance(record, AdmissionDecisionRecord)
+    ] == ["granted", reason.value]
 
 
 def test_fifo_queue_is_bounded_and_dormant_handles_are_not_registered() -> None:

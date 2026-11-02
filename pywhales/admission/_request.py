@@ -63,7 +63,7 @@ class AdmissionRequest:
         self._owner._acquire(self)
         outcome = Outcome.FAILED
         try:
-            with operation_scope(id(self._owner)):
+            with operation_scope(id(self._owner), self._ticket.admission_id):
                 result = operation()
             outcome = Outcome.COMPLETED
             return result
@@ -85,7 +85,7 @@ class AdmissionRequest:
         """
         self._owner._acquire(self)
         try:
-            with operation_scope(id(self._owner)):
+            with operation_scope(id(self._owner), self._ticket.admission_id):
                 source = factory()
                 iterator = source.__enter__()
         except BaseException:
