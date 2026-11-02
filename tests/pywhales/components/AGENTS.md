@@ -16,7 +16,7 @@ For wrapper edits, read the production [component](../../../pywhales/components/
 | Manifest model snapshots | `buildx/imagetools/test_models.py`, `jsons/` | The model module reads saved JSON without CLI launches; fixture directories aren't test selectors. |
 | Environment forwarding across output branches | `test_env_forwarding.py`, `test_env_branch_transport.py` | Fake Python CLIs record argv/environment forwarding versus literal fallback across captured, streamed, detached and TTY branches. |
 | Safe/raw JSON failures and network creation | `test_cli_json_parse_errors.py`, `test_network_create.py` | Patched captures and real Python children, not Docker. |
-| Launch/transfer/subscription deadlines | `test_command_deadlines.py`, `test_deadline_forwarding.py` | Temporary Python CLI execution versus mocked forwarding; inspect the selected fixture. |
+| Launch/transfer/subscription/prune deadlines | `test_command_deadlines.py`, `test_deadline_forwarding.py` | Temporary Python CLI execution versus mocked forwarding; inspect the selected fixture. |
 | Modern option and return contracts | `../test_buildx_modernization.py`, `../test_compose_modernization.py` | Simulated commands and local children, distinct from installed-plugin integration. |
 | Installed modern Docker capabilities | `test_docker_modern_integration.py` | Explicit `docker` mark; real executable, daemon and pinned Compose/Buildx plugins, even for dry-run/report cases. |
 | Output enums, JSON values and static types | `../test_*enum_json*.py`, `../test_*types.py`, `../test_*type_contracts.py` | See the parent's static-contract rules; pytest doesn't execute `_check_*` functions. |
@@ -44,4 +44,5 @@ uv run --locked pytest tests/pywhales/components/test_env_forwarding.py tests/py
 ```
 
 Real Python subprocesses don't imply daemon access; these samples aren't process-free tests.
+All five prune deadline wrappers are covered by those two deadline modules without running Docker prune. Keep container's unconsumed-stream expiry, once-only error delivery, early close and joined cleanup covered alongside blocking partial output, defaults/overrides, validation-before-filter side effects and natural failures. Static signatures/returns live in `../test_command_deadline_types.py` and `../test_type_contracts.py`.
 `bake_tests/`, `build_with_dependencies_test/`, `my_service_build/` and adjacent Compose YAML files are project inputs used by tests, not guide locations.

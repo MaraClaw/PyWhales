@@ -53,6 +53,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   and stream timing follow [the runtime guide](../AGENTS.md). No deadline undoes daemon or registry work.
 - Container and Compose launch/transfer/subscription rules live in their child guides.
   Image transfers/archives and Buildx `build`/`bake`/`prune` also take `timeout`; read wrapper signatures.
+- Container, image, network, volume, and system `prune()` take keyword-only `timeout`, validated before filter consumption or executable lookup. Preserve earlier positional arguments and filter grammars: system accepts mappings or pairs; the other four reject mappings. Image returns `str`; other blocking prunes return `None`, and container `stream_logs=True` returns owned `ProcessStream`. Forward the budget through both launch branches; never add an argv timeout flag or retry destructive work after timeout. Object-age filters are not execution deadlines.
 - `service.logs()` and `system.events()` take keyword-only `timeout`. Service inspect preflight is outside
   the deadline; logs keep collected text or owned byte streams. Events keep `MappedProcessStream[DockerEvent]`
   (stdout-only JSON mapping, transport ownership). There's no `Service.logs()` handle API.
@@ -74,6 +75,6 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Wire fixtures live in `tests/pywhales/components/jsons/`; static resource and top
   contracts live in `tests/pywhales/test_type_contracts.py`, with group-specific contracts
   alongside it for Buildx and Compose.
-- Deadline execution/forwarding (launches, transfers, subscriptions) lives in `components/test_command_deadlines.py`
+- Deadline execution/forwarding (launches, transfers, subscriptions, pruning) lives in `components/test_command_deadlines.py`
   and `components/test_deadline_forwarding.py` under `tests/pywhales/`; static shapes are in
   `tests/pywhales/test_command_deadline_types.py`.

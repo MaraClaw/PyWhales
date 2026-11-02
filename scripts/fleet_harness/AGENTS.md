@@ -11,7 +11,7 @@ Fake-only simulation and non-authorizing transport decisions; no README here. Re
 | `scheduler.py` | Opt-in overlapping load: event heap, FIFO queue under global and per-action limits, tie ordering, early-stop drain |
 | `slots.py` | Slot-to-identity resolution and the asset cap, shared by the sequential and scheduled paths |
 | `fake.py` | In-memory clock, operation phases (`begin`/`advance_phase`/`finish`/`lapse`), and exact-identity cleanup |
-| `records.py` | Simulation reports, frozen schedule receipts and peaks, population/call accounting, status reasons, withheld connections |
+| `records.py` | Simulation reports, versioned binding evidence and canonical fingerprints, frozen schedule receipts and peaks, population/call accounting, status reasons, withheld connections |
 | `timeline.py` | Pure receipt arithmetic: settled peaks, FIFO order, and the fixed `schedule_*` reconciliation codes |
 | `export.py` | `export_result` and `ExportRefused`: synthetic, non-authorizing contract evidence from a run report |
 | `experiment.py` | Prerecorded comparison and the permanently non-authorizing `Decision` |
@@ -52,6 +52,9 @@ Fake-only simulation and non-authorizing transport decisions; no README here. Re
   `schedule_concurrency` (global/per-action cap), `schedule_times` (sample order/times, window, deadline).
 - `RunReport` counts outcomes once per submission, retains failure/unavailable timings, and enforces `provider_calls == command_count + len(cleanup.attempted)` plus status/reason consistency.
 - Reports stay simulated/unqualified with zero connections; connection references are withheld even in imported comparisons. Declarations prove no target identity, permission, or isolation.
+- New reports carry version 1 binding fingerprints of the complete normalized manifest and the retained sanitized environment. Each hashes UTF-8 stdlib JSON with sorted keys, compact separators, ASCII escaping, finite numbers, included defaults and preserved array order. The manifest hash includes connection references; the environment hash uses `withheld` references. Import verifies the latter; legacy reports without binding remain readable but cannot export or match. Hashes establish content consistency, not authenticity or authorization.
+- Bind rejected runs too. Import rejects explicit null, partial/malformed or unknown-version bindings; never manufacture binding while loading legacy reports. Export recomputes the complete manifest fingerprint, so identical revision/workload strings cannot rebind changed policy, budgets, ownership, topology, artifacts, support rows or connection references. Keep the fixed payload-free refusal boundary.
+- Comparison requires both reports bound in both domains. A supplied baseline must match the CLI report's workload digest and binding environment digest; an unrelated environment cannot satisfy it. Binding changes neither operation digests nor schedule compatibility, and never enables transport execution.
 - `experiment.decide` always selects `no_go` and route `cli`, with zero candidate launches/connections. A real baseline or matched simulation
   can't enable an adapter; Compose/Buildx stay unchanged. Don't introduce Docker, network, or real-backend execution paths.
 
@@ -75,6 +78,7 @@ Tests under `tests/pywhales/`: `test_fleet_harness.py` covers preflight, stops, 
 and overlap (simultaneous arrivals, lease retries/exhaustion, original deadlines, no retries after launch, pending-retry cancellation, legacy digests, same-slot lifecycle, drain, injected-failure cleanup, lineage tampering); its `overlap_manifest`,
 `overlap_plan` and `at` helpers are reused. `test_fleet_harness_cli.py` covers exits/sanitized errors with Docker absent from `PATH`;
 `test_transport_experiment.py` covers comparisons, `test_fleet_report.py` overlapping exports, `test_json_tooling.py` digests/SDK independence.
+`test_fleet_binding.py` covers canonicalization, same-revision declaration changes, environment tampering, malformed and legacy imports, export rebinding and baseline mismatches. Preserve process/socket/DNS denial boundaries and Docker-absent CLI checks.
 Root ty omits scripts. Include both packages explicitly for a scoped check from the repository root:
 
 ```bash

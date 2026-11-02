@@ -53,6 +53,7 @@
   TTY output is forwarded and the returned text is empty. `copy()` local paths are on the Python host.
 - `wait()` validates before consuming iterable input or returning `[]`; scalar returns stay `int` and iterable
   returns stay `list[int]`. The root alias forwards the same keyword-only deadline.
+- `prune()` keeps positional `filters`/`stream_logs` and adds keyword-only `timeout` on every overload. Validate before consuming filters or lookup; blocking returns `None`, streaming returns eager owned `ProcessStream`. Its launch-relative deadline advances while unconsumed, retains partial output, and delivers timeout once after local cleanup. Early close is idempotent; timeout or close makes no claim that daemon-side pruning stopped or rolled back.
 
 ## Batch Inspection And Top
 
