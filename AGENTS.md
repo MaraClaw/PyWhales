@@ -14,9 +14,10 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 Bounded observation sits on top of the command groups:
 
 - `observation()` nests explicit limits, deadlines, and cancellation over launches. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
-- `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Compose services, or standalone containers. It ends in success, failure, deadline, or cancellation and never mutates anything.
+- `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Compose services, or standalone containers. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit`; see the convergence guide.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
-- `telemetry` is optional payload-free launch records with no monitoring dependency or worker.
+- `telemetry` optionally records payload-free admission decisions and launches, linking admitted launches to their decisions, with no monitoring dependency or worker.
+- `strict_workload_errors` is an opt-in client setting for marked attached workload failures; see the shared runtime and container/Compose guides.
 
 ## Structure And Navigation
 
@@ -34,7 +35,7 @@ Bounded observation sits on top of the command groups:
 | `pywhales/_process_stream.py` | Process-backed streaming and lifecycle ownership |
 | `pywhales/_stream_buffer.py` | Thread-safe output buffering and byte accounting |
 | `pywhales/_environment.py` | Effective child environments and safe container `envs` forwarding |
-| `pywhales/telemetry/` | Launch and completion records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |
+| `pywhales/telemetry/` | Admission decision, launch and completion records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |
 | `pywhales/convergence/` | Swarm, Compose, and standalone container convergence: `_wait.py` entry points, `_service.py`, `_compose.py`, `_container.py`, `_wire.py`, `_types.py` |
 | `pywhales/admission/` | Application-owned synchronous admission: class limits, saturation policy, queueing, admitted streams |
 | `pywhales/profiles/` | Application create policy: `plan_create` builds a plan, `create_from_plan` applies it |
@@ -45,7 +46,7 @@ Bounded observation sits on top of the command groups:
 | `docs/` | Editable templates, API-doc generation, MkDocs configuration |
 | `scripts/` | Contributor tooling, not installed APIs: CI provisioning, plugin installation, overhead benchmark |
 | `scripts/fleet_contract/` | Offline fleet contract: strict manifest, support, and result schemas, validators, non-qualifying reports (see its `README.md`) |
-| `scripts/fleet_harness/` | Fake-only offline capacity simulation and non-authorizing transport decisions built on the contract |
+| `scripts/fleet_harness/` | Fake-only offline capacity simulation, including leased queue retries, and non-authorizing transport decisions; see its guide |
 | `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
 | `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
 | `.github/workflows/` | Authoritative CI checks, docs/site artifact build, and the delivery chain from package build to release; no Pages deployment workflow is present |
