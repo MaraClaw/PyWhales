@@ -154,6 +154,30 @@ class ContainerTarget:
             raise ValueError("fail_on_exit must be a bool")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NodeTarget:
+    """Fixed node identities and the subset required to remain reachable managers."""
+
+    client_config: ClientConfig = field(repr=False, compare=False)
+    node_ids: tuple[str, ...]
+    manager_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Reject invalid membership or a manager outside the selected nodes."""
+        nodes, managers = self.node_ids, self.manager_ids
+        if (
+            type(nodes) is not tuple
+            or not nodes
+            or any(type(node) is not str or not node for node in nodes)
+            or len(set(nodes)) != len(nodes)
+            or type(managers) is not tuple
+            or any(type(node) is not str or not node for node in managers)
+            or len(set(managers)) != len(managers)
+            or not set(managers) <= set(nodes)
+        ):
+            raise ValueError("Nodes and managers must be distinct selected IDs")
+
+
 @dataclass(frozen=True, slots=True)
 class Success:
     """All fixed services met the captured convergence conditions."""
@@ -200,6 +224,11 @@ class DeadlineDetail:
     container whose latest observed ``RestartCount`` exceeds the target's
     ``max_restarts``. It stays zero when the budget is disabled, and a later
     within-budget observation clears it.
+
+    For node targets each selected node is one captured unit. The node counters
+    count non-ready state, non-active availability, designated managers no longer
+    holding the manager role, and designated managers without reachable status.
+    A demoted node can contribute to both manager counters.
     """
 
     captured_services: int
@@ -219,6 +248,10 @@ class DeadlineDetail:
     unhealthy_containers: int = 0
     unfinished_completion_containers: int = 0
     restart_budget_exceeded_containers: int = 0
+    non_ready_nodes: int = 0
+    unavailable_nodes: int = 0
+    non_manager_nodes: int = 0
+    unreachable_managers: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -241,6 +274,10 @@ class DeadlineDetail:
             self.unhealthy_containers,
             self.unfinished_completion_containers,
             self.restart_budget_exceeded_containers,
+            self.non_ready_nodes,
+            self.unavailable_nodes,
+            self.non_manager_nodes,
+            self.unreachable_managers,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services

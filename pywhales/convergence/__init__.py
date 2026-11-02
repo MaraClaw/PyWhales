@@ -8,6 +8,7 @@ from pywhales.convergence._types import (
     Deadline,
     DeadlineDetail,
     Failure,
+    NodeTarget,
     Outcome,
     ServiceTarget,
     StackTarget,
@@ -16,6 +17,7 @@ from pywhales.convergence._types import (
 from pywhales.convergence._wait import (
     capture_compose,
     capture_containers,
+    capture_nodes,
     capture_service,
     wait,
 )
@@ -28,12 +30,14 @@ __all__ = [
     "Deadline",
     "DeadlineDetail",
     "Failure",
+    "NodeTarget",
     "Outcome",
     "ServiceTarget",
     "StackTarget",
     "Success",
     "capture_compose",
     "capture_containers",
+    "capture_nodes",
     "capture_service",
     "wait",
 ]
