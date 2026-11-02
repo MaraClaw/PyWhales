@@ -71,7 +71,10 @@ print(signature(AdmissionOwner, annotation_format=Format.STRING))  # telemetry_o
 print([f.name for f in fields(AdmissionDecisionRecord)])
 print([f.name for f in fields(LaunchRecord)])  # includes admission_id
 for record_type in (AdmissionDecisionRecord, LaunchRecord, CompletionRecord):
-    print(record_type.__name__, {f.name: f.default for f in fields(record_type)}["schema_version"])
+    print(
+        record_type.__name__,
+        {f.name: f.default for f in fields(record_type)}["schema_version"],
+    )
 print(get_annotations(ServiceTarget, format=Format.STRING)["mode"])  # job modes?
 
 methods = [
