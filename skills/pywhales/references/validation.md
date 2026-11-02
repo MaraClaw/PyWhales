@@ -25,8 +25,8 @@ establish daemon or plugin availability.
 
 The guidance describes current source APIs with project version 1.1.3.
 An installed version string alone isn't proof of support. Check environment
-inheritance, standalone targets, completion/restart/exit keywords, strict workload
-errors, admission correlation records, stdin policy fields, inventory kinds, and typed stream returns
+inheritance, node and standalone targets, completion/restart/exit keywords, strict workload
+errors, refusal/admission correlation records, prune deadlines, stdin policy fields, inventory kinds, and typed stream returns
 before copying their examples:
 
 ```python
@@ -42,24 +42,37 @@ from pywhales.convergence import (
     ComposeTarget,
     ContainerTarget,
     DeadlineDetail,
+    NodeTarget,
     ServiceTarget,
     capture_compose,
     capture_containers,
+    capture_nodes,
     wait as wait_for_convergence,
 )
 from pywhales.inventory import InventoryKind
-from pywhales.telemetry import AdmissionDecisionRecord, CompletionRecord, LaunchRecord
+from pywhales.telemetry import (
+    AdmissionDecisionRecord,
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+)
 
 print(signature(capture_compose, annotation_format=Format.STRING))
 print(signature(capture_containers, annotation_format=Format.STRING))
+print(signature(capture_nodes, annotation_format=Format.STRING))
 print(signature(wait_for_convergence, annotation_format=Format.STRING))
 print([f.name for f in fields(ContainerTarget)])
+print([f.name for f in fields(NodeTarget)])  # client_config, node_ids, manager_ids
 print(signature(InspectionPolicy))  # max_total_stdin_bytes: int | None = None
 print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
 print({f.name: f.default for f in fields(ComposeTarget)}["fail_on_exit"])  # False
 print({f.name: f.default for f in fields(ContainerTarget)}["fail_on_exit"])  # False
 detail_defaults = {f.name: f.default for f in fields(DeadlineDetail)}
 print(detail_defaults["restart_budget_exceeded_containers"])
+print(detail_defaults["non_ready_nodes"])
+print(detail_defaults["unavailable_nodes"])
+print(detail_defaults["non_manager_nodes"])
+print(detail_defaults["unreachable_managers"])
 print(get_args(InventoryKind.__value__))  # must include "manifest_list"
 print(signature(DockerClient).parameters["strict_env_transport"])  # bool = False
 print({f.name: f.default for f in fields(ClientConfig)}["strict_env_transport"])
@@ -70,7 +83,8 @@ print({f.name: f.default for f in fields(ClientConfig)}["strict_workload_errors"
 print(signature(AdmissionOwner, annotation_format=Format.STRING))  # telemetry_observer
 print([f.name for f in fields(AdmissionDecisionRecord)])
 print([f.name for f in fields(LaunchRecord)])  # includes admission_id
-for record_type in (AdmissionDecisionRecord, LaunchRecord, CompletionRecord):
+print([f.name for f in fields(RefusalRecord)])  # no execution measurements
+for record_type in (AdmissionDecisionRecord, LaunchRecord, CompletionRecord, RefusalRecord):
     print(
         record_type.__name__,
         {f.name: f.default for f in fields(record_type)}["schema_version"],
@@ -96,6 +110,10 @@ methods += [
     docker.container.run,
     docker.container.wait,
     docker.container.prune,
+    docker.image.prune,
+    docker.network.prune,
+    docker.volume.prune,
+    docker.system.prune,
     docker.service.logs,
 ]
 for method in methods:
@@ -133,12 +151,22 @@ matching streaming overloads. Also look for:
 - Keyword-only `telemetry_observer` on `AdmissionOwner`, plus
   `AdmissionDecisionRecord`, `AdmissionId`, and `AdmissionOutcome` exports from
   `pywhales.telemetry`. Inspect the record fields and `TelemetryRecord` union;
-  schema-5 launch records have `admission_id`, while completion records join by
-  `attempt_id`. Configure both owner and client observers for correlation, not
+  schema-6 launch and refusal records have `admission_id`, while completion records join by
+  `attempt_id`. `RefusalRecord` has `phase="refusal"` and only `cancelled`,
+  `timeout`, or `limit` outcomes, without duration, byte counts or return code.
+  Configure both owner and client observers for correlation, not
   just the client's launch observer. See [Telemetry and admission](telemetry-and-admission.md#measure-admission-waits-and-correlate-launches).
 - A keyword-only `timeout: float | None = None` on Compose `build` and `execute`,
   and on `container.wait`, whose overloads return `int` for one reference and
   `list[int]` for an iterable.
+- Keyword-only `timeout: float | None = None` on container, image, network,
+  volume and system `prune`. Image returns `str`; other blocking prunes return
+  `None`, and container `stream_logs=True` returns owned `ProcessStream`.
+- `capture_nodes(client, node_ids, *, manager_ids=(), policy, timeout, cancel=None)`
+  and frozen `NodeTarget` exported from `pywhales.convergence`, accepted by `wait`.
+  Confirm the four node blocker fields on `DeadlineDetail` and matching installed
+  help: fixed exact IDs, ready/active nodes, reachable designated managers,
+  no version-index fence and a second complete all-clear pass.
 - `replicated_job` and `global_job` in the `ServiceTarget.mode` annotation;
   `help(ServiceTarget)` shows it too. `capture_service` has no job-specific
   parameter, so its signature and the version string can't establish Swarm job
@@ -185,7 +213,7 @@ Checking `default_timeout`, `telemetry_observer`, `environment`,
 (`pywhales.admission`), bounded observation (the root `observation`,
 `capture_inventory`, and `InspectionPolicy` exports, plus `bulk_reload` from
 `pywhales.client_config`), and convergence (`pywhales.convergence`, covering
-Swarm services/jobs/stacks, Compose projects, and standalone containers) are separate imports that don't
+Swarm nodes/services/jobs/stacks, Compose projects, and standalone containers) are separate imports that don't
 change default `DockerClient` behavior; verify their presence the same way
 before building on them. `pywhales.reconciliation`, `pywhales.profiles`, and
 `pywhales.storage` are likewise opt-in imports that the package root doesn't

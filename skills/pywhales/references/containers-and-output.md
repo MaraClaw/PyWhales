@@ -153,6 +153,39 @@ a valid one with `[]` returns `None` without a launch. A streamed `start`,
 `run`, `execute`, or `logs` deadline keeps advancing while nobody iterates, so
 exhaust the stream or close it on early exit; closing reaps only the local CLI.
 
+## Bound Prune CLI Launches
+
+Container, image, network, volume, and system `prune()` accept keyword-only
+`timeout=None`. Give each cleanup call its own positive finite seconds;
+`None` inherits the client's launch-snapshotted default, and an explicit value
+replaces it without changing shared configuration. Validation rejects booleans,
+zero, negative and nonfinite values before filters are consumed or the executable
+is resolved. This is a local CLI deadline, not an object-age `until` filter or a
+Docker timeout flag.
+
+| Call | Result |
+| --- | --- |
+| `client.container.prune(..., timeout=10)` | `None` |
+| `client.container.prune(..., stream_logs=True, timeout=10)` | Owned `ProcessStream` of `(source, bytes)` |
+| `client.image.prune(..., timeout=10)` | `str` CLI output |
+| `client.network.prune(..., timeout=10)` | `None` |
+| `client.volume.prune(..., timeout=10)` | `None` |
+| `client.system.prune(..., timeout=10)` | `None` |
+
+Use the explicit command-group methods, not an assumed root `prune` alias.
+Keep each method's flags and filter grammar: system accepts a mapping or pairs,
+while the other four require iterable pairs and reject mappings. Repeated pairs
+retain order. Check installed signatures before selecting filters or options.
+
+Container streaming starts eagerly and its deadline advances even before the
+first iteration. Exhaust it or use a context manager; early close is idempotent,
+and a recorded timeout is delivered once after local child/pipe/thread cleanup.
+Retained partial output does not replay streamed stdout already delivered.
+Every prune suppresses confirmation and deletes resources: run only the cleanup
+the user authorized. A timeout kills and reaps the local CLI, but doesn't prove
+daemon-side removal stopped or rolled back. Do not automatically retry a prune
+after an ambiguous timeout.
+
 ## Bound Stream Buffering
 
 Set `DockerClient(stream_buffer_bytes=1_048_576)` to bound buffered output at
