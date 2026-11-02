@@ -84,7 +84,12 @@ print(signature(AdmissionOwner, annotation_format=Format.STRING))  # telemetry_o
 print([f.name for f in fields(AdmissionDecisionRecord)])
 print([f.name for f in fields(LaunchRecord)])  # includes admission_id
 print([f.name for f in fields(RefusalRecord)])  # no execution measurements
-for record_type in (AdmissionDecisionRecord, LaunchRecord, CompletionRecord, RefusalRecord):
+for record_type in (
+    AdmissionDecisionRecord,
+    LaunchRecord,
+    CompletionRecord,
+    RefusalRecord,
+):
     print(
         record_type.__name__,
         {f.name: f.default for f in fields(record_type)}["schema_version"],
