@@ -23,7 +23,12 @@ def inventory(api: GitHub, run: Run) -> tuple[Artifact, ...]:
 def select(artifacts: tuple[Artifact, ...], name: str) -> Artifact:
     """Reject absent, duplicate and expired evidence instead of choosing one."""
     matches = [artifact for artifact in artifacts if artifact.name == name]
-    require(len(matches) == 1, "missing or ambiguous artifact")
+    require(
+        bool(matches),
+        f"missing artifact: {name}; use 'Re-run all jobs' on the producing workflow "
+        "so artifacts and checks belong to the same attempt",
+    )
+    require(len(matches) == 1, f"ambiguous artifact: {name}")
     require(not matches[0].expired, "expired artifact")
     return matches[0]
 

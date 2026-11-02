@@ -1070,6 +1070,30 @@ def test_trigger_attempt_must_match_even_with_valid_material(
     assert not (tmp_path / "upload").exists()
 
 
+def test_sealer_partial_rerun_reports_missing_current_attempt_artifact(
+    service: Service,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    uploaded(service, monkeypatch)
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+    run = service.source.model_copy(update={"run_attempt": 3})
+    service.put("actions/runs/100/attempts/3", run)
+    jobs = tuple(job.model_copy(update={"run_attempt": 3}) for job in service.jobs)
+    service.put(
+        "actions/runs/100/attempts/3/jobs?per_page=100&page=1",
+        Jobs(total_count=len(jobs), jobs=jobs),
+    )
+    output = tmp_path / "delivery-seal"
+    assert invoke(monkeypatch, "seal", "--run-id", "100", "--output", str(output)) == 1
+    error = capsys.readouterr().err
+    assert "delivery-dist-100-3" in error
+    assert "Re-run all jobs" in error
+    assert not output.exists()
+    assert not any("/zip" in url for _method, url, _body in service.calls)
+
+
 def test_sealer_checks_actual_uploader_ids_and_digests(
     service: Service, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
