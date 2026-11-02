@@ -116,6 +116,46 @@ def test_export_cli_when_input_is_refused_is_safe(defect: str, tmp_path: Path) -
     assert "private-secret" not in output.stderr
 
 
+@pytest.mark.parametrize("command", ["export", "decide"])
+def test_cli_rejects_tampered_environment_without_exposing_input(
+    command: str, tmp_path: Path
+) -> None:
+    report = run(manifest(), plan())
+    raw = json.loads(report.model_dump_json())
+    raw["environment"]["python"] = "private-canary"
+    input_path = tmp_path / "input.json"
+    if command == "decide":
+        comparison = Comparison(
+            cli=report,
+            candidate=report,
+            cli_contract=semantics(),
+            candidate_contract=semantics(),
+        )
+        experiment = json.loads(Experiment(comparison=comparison).model_dump_json())
+        experiment["comparison"]["candidate"] = raw
+        input_path.write_text(json.dumps(experiment))
+        args = ["decide", "--input", str(input_path)]
+    else:
+        input_path.write_text(json.dumps(raw))
+        args = [
+            "export",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--input",
+            str(input_path),
+        ]
+
+    result = invoke(args, tmp_path)
+
+    assert result.returncode == 2
+    assert json.loads(result.stderr)["errors"]
+    assert "private-canary" not in result.stdout + result.stderr
+    if command == "decide":
+        assert json.loads(result.stdout)["candidate_launches"] == 0
+    else:
+        assert not result.stdout
+
+
 def test_run_cli_when_docker_is_absent_writes_simulated_cleanup_report(
     tmp_path: Path,
 ) -> None:

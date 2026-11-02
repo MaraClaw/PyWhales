@@ -21,6 +21,7 @@ from .models import (
     resource_reasons,
 )
 from .records import (
+    Binding,
     Cleanup,
     Distribution,
     Environment,
@@ -29,6 +30,7 @@ from .records import (
     Peaks,
     RunReport,
     Schedule,
+    fingerprint,
     terminal_outcomes,
 )
 from .scheduler import Simulation
@@ -160,6 +162,13 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
         "sha256:"
         + hashlib.sha256(json.dumps(operations, sort_keys=True).encode()).hexdigest()
     )
+    environment = Environment(
+        python=platform.python_version(),
+        library=version("pywhales"),
+        platform=manifest.platform,
+        topology=manifest.topology,
+        images=manifest.workload.images,
+    )
     return RunReport(
         status=status,
         reasons=tuple(sorted(set(reasons))),
@@ -170,12 +179,11 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
         repetitions=plan.repetitions,
         steps=plan.steps,
         operation_timeout_seconds=plan.operation_timeout_seconds,
-        environment=Environment(
-            python=platform.python_version(),
-            library=version("pywhales"),
-            platform=manifest.platform,
-            topology=manifest.topology,
-            images=manifest.workload.images,
+        environment=environment,
+        binding=Binding(
+            version=1,
+            manifest_digest=fingerprint(manifest),
+            environment_digest=fingerprint(environment),
         ),
         artifacts=manifest.identity.artifacts,
         provider_calls=driver.calls if driver else 0,

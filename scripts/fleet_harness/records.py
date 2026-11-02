@@ -1,5 +1,7 @@
 """Simulation artifacts with explicit collection boundaries and ownership."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Literal, Self, assert_never
 
@@ -13,6 +15,7 @@ from scripts.fleet_contract.common import (
     Digest,
     Positive,
     PositiveCount,
+    SchemaVersion,
     Token,
 )
 from scripts.fleet_contract.platform import Platform, Topology
@@ -105,6 +108,26 @@ class Environment(Contract):
         )
 
 
+def fingerprint(value: Contract) -> str:
+    """Hash normalized JSON with defaults, sorted keys and preserved array order."""
+    encoded = json.dumps(
+        value.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+class Binding(Contract):
+    """Versioned content fingerprints, not authenticated provenance."""
+
+    version: SchemaVersion
+    manifest_digest: Digest
+    environment_digest: Digest
+
+
 class QueueAttempt(Contract):
     """One half-open queue interval for a logical submission."""
 
@@ -176,6 +199,9 @@ class RunReport(Contract):
     steps: tuple[Step, ...]
     operation_timeout_seconds: Positive
     environment: Environment
+    binding: Binding | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     artifacts: tuple[Artifact, ...]
     provider_calls: Count
     connections: Literal[0] = 0
@@ -193,6 +219,23 @@ class RunReport(Contract):
         "after_each_submission_simulated"
     )
     schedule: Schedule | None = None
+
+    @field_validator("binding", mode="before")
+    @classmethod
+    def binding_present_is_not_null(cls, value: object) -> object:
+        """Allow legacy absence, but reject an explicitly incomplete binding."""
+        if value is None:
+            raise PydanticCustomError("binding_invalid", "binding_invalid")
+        return value
+
+    @model_validator(mode="after")
+    def coherent_binding(self) -> Self:
+        """Verify the retained, sanitized environment before accepting evidence."""
+        if self.binding is not None and self.binding.environment_digest != fingerprint(
+            self.environment
+        ):
+            raise PydanticCustomError("binding_environment", "binding_environment")
+        return self
 
     @model_validator(mode="after")
     def coherent_outcomes(self) -> Self:
