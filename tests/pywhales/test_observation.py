@@ -2,6 +2,7 @@ import sys
 import time
 from collections.abc import Callable, Generator
 from contextvars import Context, copy_context
+from dataclasses import replace
 from threading import Barrier, Event, Thread
 from typing import override
 
@@ -15,6 +16,7 @@ from pywhales._observation import (
     get_observation,
     observation,
 )
+from pywhales._scoped_launch import check_scoped_launch
 from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
@@ -601,3 +603,118 @@ def test_concurrent_stdin_writes_never_pass_the_limit_and_every_excess_fails() -
         assert {(error.reason, error.limit, error.measured) for error in overflows} == {
             ("total_stdin", limit, limit + 1)
         }
+
+
+def launch_policy(limit: int | None) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_launch_attempts=limit,
+    )
+
+
+def test_nested_launch_reservations_are_all_or_none() -> None:
+    with observation(launch_policy(3)) as outer:
+        with observation(launch_policy(1)) as inner:
+            assert inner.policy.max_total_launch_attempts == 1
+            check_scoped_launch(["cli"], {}, inner)
+            with pytest.raises(ObservationLimitError) as refused:
+                check_scoped_launch(["cli"], {}, inner)
+            assert (
+                refused.value.reason,
+                refused.value.limit,
+                refused.value.measured,
+            ) == ("total_launch_attempts", 1, 2)
+            assert [account.consumed for account in inner.launch_accounts] == [1, 1]
+        with observation(launch_policy(None)) as inherited:
+            assert inherited.launch_accounts == outer.launch_accounts
+            assert inherited.policy.max_total_launch_attempts == 3
+        with observation(launch_policy(5)) as fresh:
+            assert fresh.policy.max_total_launch_attempts == 3
+            check_scoped_launch(["cli"], {}, fresh)
+            check_scoped_launch(["cli"], {}, fresh)
+            with pytest.raises(ObservationLimitError):
+                check_scoped_launch(["cli"], {}, fresh)
+            assert [account.consumed for account in fresh.launch_accounts] == [3, 2]
+
+
+def test_unbounded_launch_policy_has_no_account_or_postlaunch_binding() -> None:
+    with observation(launch_policy(None)) as state:
+        state.check_launch_attempts(10**9, reserve=True)
+        assert state.launch_accounts == ()
+        assert not state.binds_launches
+    with observation(launch_policy(1)) as limited:
+        assert not limited.binds_launches
+
+
+def test_copied_contexts_reserve_exactly_the_shared_outer_capacity() -> None:
+    workers_count, outer_limit, inner_limit = 8, 31, 11
+    start = Barrier(workers_count)
+    accepted = [0] * workers_count
+    inner_consumed = [0] * workers_count
+    failures: list[list[ObservationLimitError]] = [[] for _ in range(workers_count)]
+
+    def compete(index: int) -> None:
+        with observation(launch_policy(inner_limit)) as state:
+            start.wait(timeout=3)
+            for _ in range(20):
+                try:
+                    current = get_observation()
+                    assert current is not None
+                    assert current is state
+                    check_scoped_launch(["cli"], {}, current)
+                except ObservationLimitError as error:
+                    failures[index].append(error)
+                else:
+                    accepted[index] += 1
+            inner_consumed[index] = state.launch_accounts[-1].consumed
+
+    with observation(launch_policy(outer_limit)) as outer:
+        workers = [
+            Thread(target=copy_context().run, args=(compete, index))
+            for index in range(workers_count)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+            assert not worker.is_alive()
+        assert outer.launch_accounts[0].consumed == outer_limit
+
+    assert sum(accepted) == outer_limit
+    assert inner_consumed == accepted
+    assert all(count <= inner_limit for count in accepted)
+    assert sum(map(len, failures)) == workers_count * 20 - outer_limit
+    assert {error.reason for group in failures for error in group} == {
+        "total_launch_attempts"
+    }
+
+
+@pytest.mark.parametrize("failure", ["cancelled", "deadline", "argv", "environment"])
+def test_ordinary_preflight_failure_never_consumes_launch_capacity(
+    failure: str,
+) -> None:
+    cancel = Event()
+    cancel.set()
+    with observation(launch_policy(1)) as state:
+        checked = replace(
+            state,
+            cancel_tokens=(cancel,) if failure == "cancelled" else (),
+            deadline=0 if failure == "deadline" else None,
+        )
+        expected = {
+            "cancelled": ObservationCancelled,
+            "deadline": ObservationTimeout,
+            "argv": ObservationLimitError,
+            "environment": ObservationLimitError,
+        }[failure]
+        with pytest.raises(expected):
+            check_scoped_launch(
+                ["x" * 65537] if failure == "argv" else ["cli"],
+                {"PRIVATE": "value\0"} if failure == "environment" else {},
+                checked,
+            )
+        assert state.launch_accounts[0].consumed == 0
+        check_scoped_launch(["cli"], {}, state)
+        assert state.launch_accounts[0].consumed == 1

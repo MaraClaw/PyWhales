@@ -1,8 +1,9 @@
 import json
 import sys
 from collections.abc import Iterator
-from dataclasses import FrozenInstanceError, asdict
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
+from typing import Literal, assert_never
 from unittest.mock import patch
 
 import pytest
@@ -21,7 +22,13 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.telemetry import AdmissionDecisionRecord, RefusalRecord, TelemetryRecord
+from pywhales.telemetry import (
+    AdmissionDecisionRecord,
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    TelemetryRecord,
+)
 from pywhales.utils import run, stream_stdout_and_stderr
 
 
@@ -234,3 +241,88 @@ def test_admitted_refusal_correlates_and_observer_failure_preserves_error() -> N
     assert isinstance(refusal, RefusalRecord)
     assert refusal.admission_id == decision.admission_id
     assert "private" not in json.dumps([asdict(record) for record in records])
+
+
+@pytest.mark.parametrize(
+    "family", ["captured", "stream", "archive_load", "archive_save"]
+)
+@pytest.mark.parametrize("failed_spawn", [False, True], ids=["spent", "spawn-failed"])
+def test_launch_budget_refuses_each_family_without_spawn_or_input_read(
+    family: Literal["captured", "stream", "archive_load", "archive_save"],
+    failed_spawn: bool,
+) -> None:
+    records: list[TelemetryRecord] = []
+    pulled: list[bool] = []
+    client = DockerClient(
+        client_call=[sys.executable],
+        raw_diagnostics=True,
+        telemetry_observer=records.append,
+    )
+
+    def chunks() -> Iterator[bytes]:
+        pulled.append(True)
+        yield b"private-input"
+
+    def attempt() -> None:
+        match family:
+            case "captured":
+                run([*client.docker_cmd, "private-argument"], input=chunks())
+            case "stream":
+                stream_stdout_and_stderr([*client.docker_cmd, "private-argument"])
+            case "archive_load":
+                client.image.load(chunks())
+            case "archive_save":
+                next(client.image.save("private-argument"))
+            case unreachable:
+                assert_never(unreachable)
+
+    bounds = replace(policy(), max_total_launch_attempts=1, max_total_stdin_bytes=1024)
+    with observation(bounds) as state:
+        if not failed_spawn:
+            run([*client.docker_cmd, "-c", "pass"])
+            records.clear()
+        with (
+            patch.object(client.image, "inspect", return_value=[]),
+            patch("subprocess.Popen", side_effect=FileNotFoundError) as captured_spawn,
+            patch(
+                "pywhales.utils.Popen", side_effect=FileNotFoundError
+            ) as stream_spawn,
+            patch(
+                "pywhales.components.image.cli_wrapper.Popen",
+                side_effect=FileNotFoundError,
+            ) as archive_spawn,
+        ):
+            if failed_spawn:
+                with pytest.raises(FileNotFoundError):
+                    attempt()
+                assert (
+                    sum(
+                        spawn.call_count
+                        for spawn in (captured_spawn, stream_spawn, archive_spawn)
+                    )
+                    == 1
+                )
+                launch, completion = records
+                assert isinstance(launch, LaunchRecord)
+                assert isinstance(completion, CompletionRecord)
+                assert launch.family == family and completion.outcome == "failure"
+                records.clear()
+                for spawn in (captured_spawn, stream_spawn, archive_spawn):
+                    spawn.reset_mock()
+            with pytest.raises(ObservationLimitError) as refused:
+                attempt()
+            for spawn in (captured_spawn, stream_spawn, archive_spawn):
+                spawn.assert_not_called()
+
+        assert state.launch_accounts[0].consumed == 1
+    assert refused.value.reason == "total_launch_attempts"
+    assert pulled == []
+    assert "private" not in str(refused.value)
+    (record,) = records
+    assert isinstance(record, RefusalRecord)
+    assert (record.family, record.outcome, record.schema_version) == (
+        family,
+        "limit",
+        7,
+    )
+    assert "private" not in json.dumps(asdict(record))

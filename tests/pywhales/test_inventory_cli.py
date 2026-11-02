@@ -5,6 +5,7 @@ import subprocess
 import sys
 import traceback
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC
 from pathlib import Path
 from threading import Event
@@ -71,6 +72,9 @@ elif sys.argv[1:3] == ['manifest', 'inspect']:
         print('not json')
     else:
         print(json.dumps({'schemaVersion': 2, 'mediaType': 'application/vnd.docker.distribution.manifest.list.v2+json', 'manifests': [{'digest': 'sha256:' + sys.argv[3], 'platform': {'architecture': 'amd64', 'os': 'linux'}}]}))
+elif sys.argv[1:3] == ['buildx', 'ls']:
+    for name in ('a', 'b'):
+        print(json.dumps({'Name': name, 'Driver': 'docker'}))
 else:
     sys.exit(2)
 """
@@ -568,3 +572,80 @@ def test_manifest_list_bulk_reload_publishes_each_distinct_handle_once(
         ["manifest", "inspect", "same", "--insecure"],
         ["manifest", "inspect", "same"],
     ]
+
+
+@pytest.mark.parametrize("limit", [7, 8], ids=["remaining-too-small", "exact-fit"])
+def test_inventory_checks_complete_plan_against_remaining_launch_allowance(
+    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path, limit: int
+) -> None:
+    client = DockerClient(client_config=fake_cli)
+    other = ClientConfig(client_call=list(fake_cli.client_call))
+    requests = [
+        InventoryRequest(
+            kind="network",
+            references=("alpha-id", "beta-id", "alpha-id"),
+            client_config=fake_cli,
+        ),
+        InventoryRequest(
+            kind="builder", references=("b", "a", "b"), client_config=fake_cli
+        ),
+        InventoryRequest(kind="builder", references=("a",), client_config=other),
+        InventoryRequest(
+            kind="manifest_list", references=("dup", "dup"), client_config=fake_cli
+        ),
+    ]
+    with observation(replace(policy, max_total_launch_attempts=limit)) as state:
+        client.network.list()
+        if limit == 7:
+            with pytest.raises(ObservationLimitError) as failure:
+                capture_inventory(requests, policy=policy)
+            assert (
+                failure.value.reason,
+                failure.value.limit,
+                failure.value.measured,
+            ) == ("total_launch_attempts", 7, 8)
+            assert state.launch_accounts[0].consumed == 1
+            assert len(read_launches(tmp_path)) == 1
+            snapshot = capture_inventory([requests[0]], policy=policy)
+            assert [record.id for record in snapshot.records] == [
+                "alpha-id",
+                "beta-id",
+                "alpha-id",
+            ]
+            assert state.launch_accounts[0].consumed == 4
+        else:
+            snapshot = capture_inventory(requests, policy=policy)
+            assert [record.id for record in snapshot.records] == [
+                "alpha-id",
+                "beta-id",
+                "alpha-id",
+                "b",
+                "a",
+                "b",
+                "a",
+                "dup",
+                "dup",
+            ]
+            assert snapshot.records[0].payload is not snapshot.records[2].payload
+            assert state.launch_accounts[0].consumed == 8
+            assert read_launches(tmp_path) == [
+                ["network", "ls", "--no-trunc", "--quiet"],
+                ["network", "inspect", "alpha-id"],
+                ["network", "inspect", "beta-id"],
+                ["network", "inspect", "alpha-id"],
+                ["buildx", "ls", "--format", "{{json . }}"],
+                ["buildx", "ls", "--format", "{{json . }}"],
+                ["manifest", "inspect", "dup"],
+                ["manifest", "inspect", "dup"],
+            ]
+
+
+def test_empty_inventory_still_succeeds_after_launch_budget_is_exhausted(
+    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    with observation(replace(policy, max_total_launch_attempts=1)) as state:
+        DockerClient(client_config=fake_cli).network.list()
+        assert capture_inventory([], policy=policy).records == ()
+        bulk_reload([], policy=policy)
+        assert state.launch_accounts[0].consumed == 1
+    assert len(read_launches(tmp_path)) == 1

@@ -197,6 +197,7 @@ def _stage(
                     _chunks(group, prefix, environment, state.policy),
                 )
             )
+        state.check_launch_attempts(sum(len(chunks) for _, _, _, chunks in plans))
         records: dict[int, InventoryRecord] = {}
         resources: dict[int, InventoryResource] = {}
         for group, prefix, environment, chunks in plans:

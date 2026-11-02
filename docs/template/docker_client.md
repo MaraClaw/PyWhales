@@ -173,8 +173,8 @@ a first `docker.ps()` call to handle the case when pywhales won't work.
 
 ## Bounded inspection and inventory
 
-Choose an `InspectionPolicy` for your workload. All three limits are required
-positive integers; booleans aren't accepted and there are no deployment defaults.
+Choose an `InspectionPolicy` for your workload. The three per-command limits are
+required positive integers; booleans aren't accepted and there are no deployment defaults.
 The values below are illustrative, not recommendations for your deployment.
 
 ```python
@@ -196,6 +196,7 @@ policy = InspectionPolicy(
     max_references=100,
     max_argv_bytes=32768,
     max_response_bytes=1048576,
+    max_total_launch_attempts=10,
 )
 event = Event()
 remaining = 30.0  # seconds chosen by the operator
@@ -259,6 +260,37 @@ selected-launch `DockerTimeout` remains unchanged. A timeout or cancellation
 kills and reaps the local CLI child only.
 It doesn't roll back daemon operations, and the operating system's process
 creation step can't be interrupted.
+
+`max_total_launch_attempts` is an optional positive exact `int`: booleans and
+integer subclasses are rejected, and `None` leaves this total unbounded. It
+limits accepted CLI launch attempts across captured commands, streams, and
+archive transfers, not successful operations or concurrent processes. Each
+attempt reserves one unit after cancellation, deadline, argv, and environment
+preflight succeeds, before process creation and launch telemetry. Exhaustion
+raises `ObservationLimitError` with reason `total_launch_attempts`, before
+spawning a child or reading upload input. Other preflight refusals consume no
+unit. Once reserved, an attempt is never refunded: spawn errors, native `E2BIG`,
+CLI failures, timeout, cancellation, response limits, or early close can all
+consume it. It doesn't bound daemon operations, retries elsewhere, or result bytes.
+
+Nested scopes retain every enclosing account and may add their own tighter
+allowance; leaving an inner scope doesn't restore outer capacity. Copied
+contexts share those same accounts, including across explicitly propagated
+worker threads. Reservations lock outermost accounts first and check all
+allowances before debiting any, so a refusal leaves every account unchanged.
+Exact capacity is accepted even under concurrent launches. A lazy `save` charges
+its eager image inspection in the calling scope and its archive launch in the
+scope active at first iteration; constructing the iterator reserves no archive
+capacity. A launch-only budget adds no post-launch timer or stream binding.
+
+Before any inventory or bounded bulk-reload inspection starts, its complete
+group-and-chunk plan must fit every enclosing account's remaining allowance.
+Ordinary groups count their chunks, builders count one listing per exact config
+and kind group, and manifest lists count one launch per reference, preserving
+duplicates. This check reserves nothing: each actual launch still reserves its
+own unit. Concurrent work can consume capacity after the check and make a later
+chunk fail; staged records are then discarded and original caches and timestamps
+remain unchanged. Empty input consumes no capacity, even after exhaustion.
 
 These limits don't bound the complete result, staged models, decoded JSON, deep
 copies, Python object overhead, or aggregate process memory. A capture isn't a
