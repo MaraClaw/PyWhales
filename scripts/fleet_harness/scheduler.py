@@ -37,7 +37,15 @@ from .models import (
     metrics_for,
     resource_reasons,
 )
-from .records import Load, Observation, Peaks, QueueAttempt, Receipt, Schedule
+from .records import (
+    Load,
+    Observation,
+    Peaks,
+    QueueAttempt,
+    QueueBackoff,
+    Receipt,
+    Schedule,
+)
 from .slots import AssetLimit, Slots
 
 type Kind = Literal["phase", "expire", "arrive", "retry", "admit"]
@@ -63,6 +71,7 @@ class Submission:
     pending_retry: bool = False
     enqueued: float = 0.0
     attempts: list[QueueAttempt] = field(default_factory=list)
+    backoffs: list[QueueBackoff] = field(default_factory=list)
 
 
 class Simulation:
@@ -101,9 +110,11 @@ class Simulation:
         """Report an event that no longer happens: an expiry after admission or stop,
         or an arrival after the stop. Such events never move the fake clock.
         """
-        queued = self.submissions[number - 1].queued
-        return (kind == "expire" and not queued) or (
-            kind in {"arrive", "retry"} and self.stopping
+        submission = self.submissions[number - 1]
+        return (
+            (kind == "expire" and not (submission.queued or submission.pending_retry))
+            or (kind == "retry" and not submission.pending_retry)
+            or (kind in {"arrive", "retry"} and self.stopping)
         )
 
     def observe(self) -> None:
@@ -138,6 +149,16 @@ class Simulation:
             submission.attempts.append(
                 QueueAttempt(enqueued_seconds=submission.enqueued, ended_seconds=now)
             )
+        if (
+            submission.pending_retry
+            and submission.step.queue_retry_backoff_seconds is not None
+        ):
+            submission.backoffs.append(
+                QueueBackoff(
+                    started_seconds=submission.attempts[-1].ended_seconds,
+                    ended_seconds=now,
+                )
+            )
         submission.queued = submission.pending_retry = False
         launch = Launch(
             submission=submission.number,
@@ -155,6 +176,9 @@ class Simulation:
             outcome=outcome,
             attempts=tuple(submission.attempts)
             if submission.step.queue_lease_seconds is not None
+            else None,
+            backoffs=tuple(submission.backoffs)
+            if submission.step.queue_retry_backoff_seconds is not None
             else None,
         )
         self.record(receipt, self.driver.lapse(submission.step, launch, outcome))
@@ -205,6 +229,10 @@ class Simulation:
 
     def expire(self, submission: Submission) -> None:
         """Expire an attempt, retrying only before the original deadline."""
+        if submission.pending_retry:
+            self.lapse(submission, "timed_out")
+            self.settle("timed_out")
+            return
         self.queue.remove(submission)
         if self.driver.now < submission.deadline and len(submission.attempts) + 1 < (
             submission.step.max_queue_attempts or 1
@@ -216,10 +244,28 @@ class Simulation:
             )
             submission.queued = False
             submission.pending_retry = True
-            self.push(self.driver.now, "retry", submission.number)
+            eligibility = self.driver.now + (
+                submission.step.queue_retry_backoff_seconds or 0.0
+            )
+            self.push(
+                min(submission.deadline, eligibility),
+                "retry" if eligibility < submission.deadline else "expire",
+                submission.number,
+            )
             return
         self.lapse(submission, "timed_out")
         self.settle("timed_out")
+
+    def retry(self, submission: Submission) -> None:
+        """End pending backoff at eligibility before the original deadline."""
+        if submission.step.queue_retry_backoff_seconds is not None:
+            submission.backoffs.append(
+                QueueBackoff(
+                    started_seconds=submission.attempts[-1].ended_seconds,
+                    ended_seconds=self.driver.now,
+                )
+            )
+        self.arrive(submission)
 
     def admit(self) -> None:
         """Admit queued submissions FIFO into free slots at the current instant."""
@@ -279,6 +325,9 @@ class Simulation:
             attempts=tuple(self.submissions[number - 1].attempts)
             if operation.step.queue_lease_seconds is not None
             else None,
+            backoffs=tuple(self.submissions[number - 1].backoffs)
+            if operation.step.queue_retry_backoff_seconds is not None
+            else None,
         )
         self.record(receipt, observed)
         self.settle(outcome)
@@ -314,7 +363,7 @@ class Simulation:
                 case "arrive":
                     self.arrive(self.submissions[number - 1])
                 case "retry":
-                    self.arrive(self.submissions[number - 1])
+                    self.retry(self.submissions[number - 1])
                 case "admit":
                     self.admit()
                 case unreachable:
@@ -338,6 +387,11 @@ class Simulation:
             submitted=submitted,
             reasons=tuple(self.reasons),
             schedule=Schedule(
+                version=2
+                if any(
+                    s.queue_retry_backoff_seconds is not None for s in self.plan.steps
+                )
+                else 1,
                 peaks=Peaks(
                     active=self.peak_active,
                     queued=self.peak_queued,

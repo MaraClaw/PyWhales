@@ -67,6 +67,9 @@ class Step(Contract):
     max_queue_attempts: PositiveCount | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
+    queue_retry_backoff_seconds: Positive | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     queue_seconds: Amount = 0.0
     local_seconds: Amount = 0.1
     readiness_seconds: Amount | None = 0.1
@@ -88,11 +91,19 @@ class Step(Contract):
         if self.arrival_seconds is not None and self.queue_seconds:
             raise PydanticCustomError("scheduled_queue", "scheduled_queue")
         if self.arrival_seconds is None and (
-            self.queue_lease_seconds is not None or self.max_queue_attempts is not None
+            self.queue_lease_seconds is not None
+            or self.max_queue_attempts is not None
+            or self.queue_retry_backoff_seconds is not None
         ):
             raise PydanticCustomError("lease_unscheduled", "lease_unscheduled")
         if (self.max_queue_attempts or 1) > 1 and self.queue_lease_seconds is None:
             raise PydanticCustomError("lease_required", "lease_required")
+        if self.queue_retry_backoff_seconds is not None and (
+            self.queue_lease_seconds is None or (self.max_queue_attempts or 1) < 2
+        ):
+            raise PydanticCustomError(
+                "backoff_requires_retry", "backoff_requires_retry"
+            )
         return self
 
 

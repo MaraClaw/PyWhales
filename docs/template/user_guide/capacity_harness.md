@@ -60,16 +60,46 @@ reaches the manifest's duration or operation-submission termination threshold.
 To simulate overlapping submissions, put a finite nonnegative `arrival_seconds`
 offset on every step in nondecreasing order and use one repetition. Scheduled
 steps leave `queue_seconds` at zero: the harness measures queue time from arrival
-to FIFO admission under the workload's global `concurrent_submissions` limit.
+to FIFO admission under the workload's global `concurrent_submissions` and
+per-action `operation_mix.concurrency` limits. A capped FIFO head blocks later work.
 Plans without offsets keep sequential execution and their existing digests;
-scheduled digests bind the offsets. Per-action concurrency is not simulated.
+scheduled digests bind the offsets and any supplied queue policy fields.
+
+Scheduled steps can declare positive finite `queue_lease_seconds` and integer
+`max_queue_attempts >= 1`, including the first attempt (omitted means one).
+Multiple attempts require a lease. An unlaunched attempt expires at the earlier
+of enqueue plus lease and the original logical deadline. With attempts left,
+expiry before the deadline rejoins the FIFO tail immediately, unless the step
+also supplies a positive finite `queue_retry_backoff_seconds`. Backoff requires
+a scheduled lease and multiple attempts; for example:
+
+```json
+{
+  "scenario": "load",
+  "endpoint": "example-local",
+  "action": "inspect",
+  "arrival_seconds": 0.0,
+  "queue_lease_seconds": 1.0,
+  "max_queue_attempts": 3,
+  "queue_retry_backoff_seconds": 0.5
+}
+```
+
+Backoff starts at lease expiry and occupies neither queued nor active capacity.
+Eligibility at or beyond `min(load deadline, original arrival + operation timeout)`
+ends unlaunched at that deadline, without requeueing. Attempt exhaustion ends at
+the final lease expiry without another backoff. Launched operations never retry,
+including failed, unknown and timed-out work. Leaving backoff unset retains
+immediate retries and the existing serialized report and operation-digest bytes.
 
 Operations advance their phases and exact asset identities at event time. At a
-shared timestamp the order is active phase ends, queued deadline expiries,
-arrivals in plan order, then FIFO admissions. Queue time consumes the operation
+shared timestamp the order is active phase ends, lease/deadline expiries,
+original arrivals in plan order, retries in submission order, then FIFO admissions.
+Queue and backoff time consume the original operation
 deadline, including submissions that time out without launching. Arrivals at or
-beyond the load deadline are excluded. An early stop cancels queued work while
-active operations drain within their deadlines before cleanup.
+beyond the load deadline are excluded. An early stop immediately cancels queued
+and pending-backoff work, suppresses later arrivals/retries, and lets active
+operations drain within their deadlines before cleanup.
 
 Cleanup has its own finite budget. It visits only exact acquired live identities
 in reverse order, scoped by effective endpoint, kind, ID, namespace and marker.
@@ -98,8 +128,20 @@ network and daemon observations; omitted metrics are explicitly unavailable.
 
 Scheduled reports also carry per-submission arrival, admission (null if never
 admitted), terminal time and outcome receipts, plus settled active and queued
-peaks. Imports validate FIFO order, receipt/sample times, recomputed peaks and
-the global concurrency bound; old sequential reports remain accepted. These
+peaks, including canonical launched-action peaks. Leased receipts include queue
+`attempts`; enabled receipts also include explicit `backoffs` intervals with
+`started_seconds` and `ended_seconds`, empty when no backoff occurred. An interval
+connects attempts or ends at an unlaunched timeout/cancellation. Queue-wait samples
+include all time from original arrival, but queue peaks count only attempts.
+Every logical submission retains one outcome and one queue-wait sample.
+
+Backoff-enabled schedules emit schedule-local `version: 2`; legacy schedules stay
+implicitly version 1 and omit the new fields. The separate `binding.version`
+remains 1. Imports independently validate fixed delays, interval links, FIFO order,
+original deadlines, terminal events, receipt/sample times, recomputed peaks and
+global/per-action concurrency; unexplained gaps reject. Old sequential reports
+remain accepted. Changing a supplied backoff changes `operation_digest` and yields
+`scope.operation_digest` in a comparison mismatch. These
 receipts describe only fake execution and do not authorize a real connection.
 
 `load_elapsed_seconds` excludes cleanup; `elapsed_seconds` includes it. Metrics
