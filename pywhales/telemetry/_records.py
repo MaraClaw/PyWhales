@@ -6,10 +6,33 @@ even when raw diagnostics are enabled. No monitoring dependency is required.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, NewType
 
 type OperationFamily = Literal["captured", "stream", "archive_load", "archive_save"]
 type Outcome = Literal["success", "failure", "timeout", "closed", "cancelled", "limit"]
+AdmissionId = NewType("AdmissionId", str)
+type AdmissionOutcome = Literal[
+    "granted", "busy", "queue_full", "closed", "queue_timeout", "cancelled", "failed"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionDecisionRecord:
+    """Payload-free decision for one activated admission request.
+
+    Attributes:
+        admission_id: Opaque identifier shared with admitted launch records.
+        outcome: Closed admission result, independent of subsequent work success.
+        duration_seconds: Nonnegative monotonic seconds from activation to decision.
+        schema_version: Record schema version, currently 5.
+        phase: Fixed admission decision discriminator.
+    """
+
+    admission_id: AdmissionId
+    outcome: AdmissionOutcome
+    duration_seconds: float
+    schema_version: Literal[5] = field(default=5, init=False)
+    phase: Literal["admission"] = field(default="admission", init=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,13 +42,15 @@ class LaunchRecord:
     Attributes:
         family: Fixed execution family, never inferred from command arguments.
         attempt_id: Opaque identifier shared with the completion record.
-        schema_version: Record schema version, currently 4.
+        admission_id: Innermost admitted request, or None outside observed admission.
+        schema_version: Record schema version, currently 5.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
     attempt_id: str = field(kw_only=True)
-    schema_version: Literal[4] = field(default=4, init=False)
+    admission_id: AdmissionId | None = field(default=None, kw_only=True)
+    schema_version: Literal[5] = field(default=5, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -46,7 +71,7 @@ class CompletionRecord:
             not measure bytes processed by the child or selected Docker daemon.
         attempt_id: Opaque identifier shared with the launch record.
         return_code: Reaped local process status, or None if unavailable.
-        schema_version: Record schema version, currently 4.
+        schema_version: Record schema version, currently 5.
         phase: Fixed completion discriminator.
     """
 
@@ -58,9 +83,9 @@ class CompletionRecord:
     attempt_id: str = field(kw_only=True)
     return_code: int | None = field(default=None, kw_only=True)
     stdin_bytes: int | None = field(default=None, kw_only=True)
-    schema_version: Literal[4] = field(default=4, init=False)
+    schema_version: Literal[5] = field(default=5, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 
-type TelemetryRecord = LaunchRecord | CompletionRecord
+type TelemetryRecord = LaunchRecord | CompletionRecord | AdmissionDecisionRecord
 type TelemetryObserver = Callable[[TelemetryRecord], None]

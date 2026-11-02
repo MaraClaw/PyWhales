@@ -1336,9 +1336,17 @@ class ContainerCLI(DockerCLICaller):
                 pipe_stdin=interactive,
                 pass_fds=(),
                 timeout=timeout,
+                workload_status=True,
             )
         else:
-            result = run(full_cmd, env=child_env, tty=tty, pass_fds=(), timeout=timeout)
+            result = run(
+                full_cmd,
+                env=child_env,
+                tty=tty,
+                pass_fds=(),
+                timeout=timeout,
+                workload_status=not detach,
+            )
             if detach:
                 return None
             else:
@@ -2268,7 +2276,11 @@ class ContainerCLI(DockerCLICaller):
             )
         elif stream:
             return stream_stdout_and_stderr(
-                full_cmd, env=child_env, pass_fds=(), timeout=timeout
+                full_cmd,
+                env=child_env,
+                pass_fds=(),
+                timeout=timeout,
+                workload_status=True,
             )
         else:
             return run(
@@ -2278,6 +2290,7 @@ class ContainerCLI(DockerCLICaller):
                 capture_stderr=False,
                 pass_fds=(),
                 timeout=timeout,
+                workload_status=True,
             )
 
     @overload
@@ -2393,9 +2406,11 @@ class ContainerCLI(DockerCLICaller):
         full_cmd += container_list
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
+            return stream_stdout_and_stderr(
+                full_cmd, timeout=timeout, workload_status=True
+            )
         elif attach:
-            return run(full_cmd, timeout=timeout)
+            return run(full_cmd, timeout=timeout, workload_status=True)
         else:
             run(full_cmd, timeout=timeout)
 

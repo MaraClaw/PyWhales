@@ -92,11 +92,13 @@ class ComposeTarget:
     service configuration, not its replica count; the container IDs fix that.
     ``max_restarts`` is a fixed restart budget for long-running containers, or
     ``None`` to leave Docker's ``RestartCount`` unchecked.
+    ``fail_on_exit`` opts into failure for eligible long-running exits.
     """
 
     client_config: ClientConfig = field(repr=False, compare=False)
     services: tuple[ComposeService, ...]
     max_restarts: int | None = None
+    fail_on_exit: bool = False
 
     def __post_init__(self) -> None:
         """Reject empty membership, duplicate names or IDs, or a bad restart budget."""
@@ -110,6 +112,8 @@ class ComposeTarget:
         budget = self.max_restarts
         if budget is not None and (type(budget) is not int or budget < 0):
             raise ValueError("Restart budget must be None or a nonnegative integer")
+        if type(self.fail_on_exit) is not bool:
+            raise ValueError("fail_on_exit must be a bool")
         identities = [
             identity for service in services for identity in service.container_ids
         ]
@@ -121,12 +125,13 @@ class ComposeTarget:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContainerTarget:
-    """Fixed container IDs and their completion designation and restart budget."""
+    """Fixed container IDs, completion designation, restart budget and exit policy."""
 
     client_config: ClientConfig = field(repr=False, compare=False)
     container_ids: tuple[str, ...]
     completion: tuple[str, ...] = ()
     max_restarts: int | None = None
+    fail_on_exit: bool = False
 
     def __post_init__(self) -> None:
         """Reject invalid membership, completion IDs, or restart budget."""
@@ -145,6 +150,8 @@ class ContainerTarget:
         budget = self.max_restarts
         if budget is not None and (type(budget) is not int or budget < 0):
             raise ValueError("Restart budget must be None or a nonnegative integer")
+        if type(self.fail_on_exit) is not bool:
+            raise ValueError("fail_on_exit must be a bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +169,7 @@ class Failure:
         "superseded",
         "update_failed",
         "completion_failed",
+        "exited",
         "observation",
     ]
     service_id: str | None = None

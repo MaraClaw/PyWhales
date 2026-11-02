@@ -53,7 +53,7 @@ Neither path is a secret vault. See
 including the Compose interpolation caveat.
 
 If passing an existing `client_config=...`, configure that object directly,
-`inherit_environment` and `strict_env_transport` included: the constructor retains it unchanged and
+`inherit_environment`, `strict_env_transport`, and `strict_workload_errors` included: the constructor retains it unchanged and
 ignores the other constructor options.
 
 ## Isolate The CLI Environment
@@ -178,6 +178,38 @@ Omitting `password` (`None`) still requests `--password-stdin` but inherits
 the caller's own stdin instead of writing a value; pass an explicit password
 when running non-interactively. Obtain credentials from the application's
 existing secret mechanism; don't embed them in generated examples or reports.
+
+### Separate Workload Failures From Docker Errors
+
+By default, forwarded workload stderr can select a specialized exception: a job
+that prints `Error: No such container: db` can look like `NoSuchContainer`.
+For user-submitted jobs or cleanup logic that relies on those types, opt in on
+the client rather than trying to recognize workload stderr yourself:
+
+```python
+from pywhales import DockerClient
+
+jobs = DockerClient(strict_workload_errors=True)
+```
+
+The default is `False` on both `DockerClient` and `ClientConfig`. With it enabled,
+nonzero exits from attached container `run`, non-detached `execute`, attached
+`start`, and non-detached Compose `run`/`execute` raise exactly `DockerException`,
+not a stderr-selected subclass. This covers captured/TTY execution and supported
+streams, including a failure observed before iteration or at exhaustion. Compose
+`execute` still has no stream mode. The exception retains its `docker_command`,
+`return_code`, `stdout`, and `stderr` attributes (output may be `None` when
+uncaptured), with the same safe/raw rendering policy.
+
+Detached/unattached launches, implicit image pulls, inspection preflights, and
+other commands retain their existing specialization. A specialized preflight
+error can therefore still come from an attached call. The setting does not
+distinguish actual Docker errors within a marked launch: all its nonzero exits,
+including code 125, stay generic. Don't infer resource absence from workload
+stderr. `DockerTimeout`, observation cancellation/limit errors, and telemetry
+outcomes are unchanged. The originating config is snapshotted per launch, so
+later mutations don't change a stream already running. Check installed support
+as described in [Usage validation](validation.md).
 
 ## Troubleshooting Without Credential Leaks
 

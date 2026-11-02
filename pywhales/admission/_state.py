@@ -3,7 +3,9 @@
 from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+from pywhales.telemetry import AdmissionId
 
 from ._contracts import (
     ClassLimit,
@@ -12,6 +14,9 @@ from ._contracts import (
     OutcomeCounts,
     PressureClass,
 )
+
+if TYPE_CHECKING:
+    from ._telemetry import Decision
 
 UINT64_MAX: Final = (1 << 64) - 1
 
@@ -39,6 +44,12 @@ class Ticket:
     active: bool = False
     done: bool = False
     closing: bool = False
+    decision: Decision | None = None
+
+    @property
+    def admission_id(self) -> AdmissionId | None:
+        """Return correlation retained after the admission decision commits."""
+        return None if self.decision is None else self.decision.admission_id
 
 
 class Bucket:

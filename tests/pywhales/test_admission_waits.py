@@ -14,11 +14,17 @@ from pywhales.admission import (
     PressureClass,
     RejectionReason,
 )
+from pywhales.telemetry import AdmissionDecisionRecord, TelemetryRecord
 
 
 def test_interrupted_pending_wait_is_terminal_and_records_once() -> None:
     pressure = PressureClass("read")
-    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 1)})
+    records: list[TelemetryRecord] = []
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 1)},
+        telemetry_observer=records.append,
+    )
     bucket = owner._buckets[pressure]
     bucket.active = 1
     request = owner.request(pressure)
@@ -33,6 +39,9 @@ def test_interrupted_pending_wait_is_terminal_and_records_once() -> None:
     snapshot = owner.snapshot().classes[0]
     assert snapshot.pending == 0
     assert (snapshot.outcomes.failed, snapshot.outcomes.cancelled) == (1, 0)
+    assert len(records) == 1
+    assert isinstance(records[0], AdmissionDecisionRecord)
+    assert records[0].outcome == "failed"
 
 
 def test_large_finite_queue_timeout_respects_platform_wait_limit() -> None:

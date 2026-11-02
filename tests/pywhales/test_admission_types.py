@@ -1,5 +1,5 @@
 from collections.abc import Callable, Iterator
-from typing import assert_type
+from typing import Literal, assert_never, assert_type
 
 from pywhales import Container, DockerClient
 from pywhales.admission import (
@@ -7,10 +7,21 @@ from pywhales.admission import (
     AdmissionRequest,
     AdmissionSnapshot,
     AdmittedStream,
+    ClassLimit,
     DemandSnapshot,
+    EndpointIdentity,
     PressureClass,
 )
 from pywhales.components.image.streams import MultiImageStream
+from pywhales.telemetry import (
+    AdmissionDecisionRecord,
+    AdmissionId,
+    AdmissionOutcome,
+    CompletionRecord,
+    LaunchRecord,
+    TelemetryObserver,
+    TelemetryRecord,
+)
 from pywhales.utils import ProcessStream
 
 
@@ -45,3 +56,30 @@ def _check_admission_generic_inference(
     assert_type(owner.request(pressure, demand=2).try_resize(3), bool)
     assert_type(owner.request(pressure).stream(lambda: process).try_resize(2), bool)
     assert_type(owner.snapshot().classes[0].demand, DemandSnapshot)
+
+
+def _check_decision_telemetry(
+    pressure: PressureClass, observer: TelemetryObserver, record: TelemetryRecord
+) -> None:
+    assert_type(
+        AdmissionOwner(
+            EndpointIdentity("local"),
+            {pressure: ClassLimit(1, 0)},
+            telemetry_observer=observer,
+        ),
+        AdmissionOwner,
+    )
+    match record:
+        case AdmissionDecisionRecord():
+            assert_type(record.admission_id, AdmissionId)
+            assert_type(record.outcome, AdmissionOutcome)
+            assert_type(record.duration_seconds, float)
+            assert_type(record.phase, Literal["admission"])
+            assert_type(record.schema_version, Literal[5])
+        case LaunchRecord():
+            assert_type(record.admission_id, AdmissionId | None)
+            assert_type(record.schema_version, Literal[5])
+        case CompletionRecord():
+            assert_type(record.schema_version, Literal[5])
+        case unreachable:
+            assert_never(unreachable)

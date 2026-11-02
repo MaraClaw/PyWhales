@@ -7,9 +7,10 @@ chronological order; no timestamp is shifted to imitate overlap.
 
 Tie ordering. Events sharing a timestamp run in this order, then by submission:
 1. phase ends of active operations (a final one is terminal and frees its slot);
-2. deadline expiries of queued submissions (deadlines start at arrival);
+2. lease or deadline expiries of queued submissions (deadlines start at arrival);
 3. arrivals, in plan order;
-4. admissions, FIFO, after everything above at that instant.
+4. retries, in submission order;
+5. admissions, FIFO, after everything above at that instant.
 
 A terminal event that stops the load cancels submissions still queued (even
 those expiring at that instant) and keeps later arrivals from arriving; active
@@ -19,7 +20,7 @@ cleanup. Arrivals at or beyond the load deadline are never submitted.
 
 import heapq
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Literal, assert_never
 
 from scripts.fleet_contract.results import Outcome
@@ -36,12 +37,18 @@ from .models import (
     metrics_for,
     resource_reasons,
 )
-from .records import Load, Observation, Peaks, Receipt, Schedule
+from .records import Load, Observation, Peaks, QueueAttempt, Receipt, Schedule
 from .slots import AssetLimit, Slots
 
-type Kind = Literal["phase", "expire", "arrive", "admit"]
+type Kind = Literal["phase", "expire", "arrive", "retry", "admit"]
 
-RANK: Final[dict[Kind, int]] = {"phase": 0, "expire": 1, "arrive": 2, "admit": 3}
+RANK: Final[dict[Kind, int]] = {
+    "phase": 0,
+    "expire": 1,
+    "arrive": 2,
+    "retry": 3,
+    "admit": 4,
+}
 
 
 @dataclass(slots=True, eq=False)
@@ -53,6 +60,9 @@ class Submission:
     arrival: float
     deadline: float
     queued: bool = False
+    pending_retry: bool = False
+    enqueued: float = 0.0
+    attempts: list[QueueAttempt] = field(default_factory=list)
 
 
 class Simulation:
@@ -92,7 +102,9 @@ class Simulation:
         or an arrival after the stop. Such events never move the fake clock.
         """
         queued = self.submissions[number - 1].queued
-        return (kind == "expire" and not queued) or (kind == "arrive" and self.stopping)
+        return (kind == "expire" and not queued) or (
+            kind in {"arrive", "retry"} and self.stopping
+        )
 
     def observe(self) -> None:
         """Fold the settled counts of the instant just finished into the peaks."""
@@ -121,8 +133,12 @@ class Simulation:
 
     def lapse(self, submission: Submission, outcome: Outcome) -> None:
         """Terminate a submission that never launched, at the current instant."""
-        submission.queued = False
         now = self.driver.now
+        if submission.queued:
+            submission.attempts.append(
+                QueueAttempt(enqueued_seconds=submission.enqueued, ended_seconds=now)
+            )
+        submission.queued = submission.pending_retry = False
         launch = Launch(
             submission=submission.number,
             deadline=submission.deadline,
@@ -137,6 +153,9 @@ class Simulation:
             admitted_seconds=None,
             terminal_seconds=now,
             outcome=outcome,
+            attempts=tuple(submission.attempts)
+            if submission.step.queue_lease_seconds is not None
+            else None,
         )
         self.record(receipt, self.driver.lapse(submission.step, launch, outcome))
 
@@ -145,6 +164,9 @@ class Simulation:
         self.stopping = True
         while self.queue:
             self.lapse(self.queue.popleft(), "cancelled")
+        for submission in self.submissions:
+            if submission.pending_retry:
+                self.lapse(submission, "cancelled")
 
     def settle(self, outcome: Outcome) -> None:
         """Evaluate early-stop rules after one terminal event, as the sequential loop does."""
@@ -170,12 +192,32 @@ class Simulation:
     def arrive(self, submission: Submission) -> None:
         """Queue an arrival."""
         submission.queued = True
+        submission.pending_retry = False
+        submission.enqueued = self.driver.now
         self.queue.append(submission)
-        self.push(submission.deadline, "expire", submission.number)
+        lease = submission.step.queue_lease_seconds
+        expiry = (
+            min(submission.deadline, self.driver.now + lease)
+            if lease is not None
+            else submission.deadline
+        )
+        self.push(expiry, "expire", submission.number)
 
     def expire(self, submission: Submission) -> None:
-        """Time out a submission still queued at its arrival-based deadline."""
+        """Expire an attempt, retrying only before the original deadline."""
         self.queue.remove(submission)
+        if self.driver.now < submission.deadline and len(submission.attempts) + 1 < (
+            submission.step.max_queue_attempts or 1
+        ):
+            submission.attempts.append(
+                QueueAttempt(
+                    enqueued_seconds=submission.enqueued, ended_seconds=self.driver.now
+                )
+            )
+            submission.queued = False
+            submission.pending_retry = True
+            self.push(self.driver.now, "retry", submission.number)
+            return
         self.lapse(submission, "timed_out")
         self.settle("timed_out")
 
@@ -197,6 +239,11 @@ class Simulation:
                 self.stop()
                 return
             self.queue.popleft()
+            submission.attempts.append(
+                QueueAttempt(
+                    enqueued_seconds=submission.enqueued, ended_seconds=driver.now
+                )
+            )
             submission.queued = False
             launch = Launch(
                 submission=submission.number,
@@ -229,6 +276,9 @@ class Simulation:
             admitted_seconds=operation.admitted,
             terminal_seconds=operation.end,
             outcome=outcome,
+            attempts=tuple(self.submissions[number - 1].attempts)
+            if operation.step.queue_lease_seconds is not None
+            else None,
         )
         self.record(receipt, observed)
         self.settle(outcome)
@@ -251,7 +301,7 @@ class Simulation:
         instant: float | None = None
         while self.events:
             time, _, number, kind = heapq.heappop(self.events)
-            if kind in {"expire", "arrive"} and self.stale(kind, number):
+            if kind in {"expire", "arrive", "retry"} and self.stale(kind, number):
                 continue
             if instant is not None and time > instant:
                 self.observe()
@@ -262,6 +312,8 @@ class Simulation:
                 case "expire":
                     self.expire(self.submissions[number - 1])
                 case "arrive":
+                    self.arrive(self.submissions[number - 1])
+                case "retry":
                     self.arrive(self.submissions[number - 1])
                 case "admit":
                     self.admit()

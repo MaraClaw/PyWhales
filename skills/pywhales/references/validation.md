@@ -23,10 +23,10 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs with project version 1.1.2.
+The guidance describes current source APIs with project version 1.1.3.
 An installed version string alone isn't proof of support. Check environment
-inheritance, standalone targets, completion and restart keywords, stdin policy
-fields, inventory kinds, and typed stream returns
+inheritance, standalone targets, completion/restart/exit keywords, strict workload
+errors, admission correlation records, stdin policy fields, inventory kinds, and typed stream returns
 before copying their examples:
 
 ```python
@@ -36,6 +36,7 @@ from inspect import signature
 from typing import get_args, get_overloads
 
 from pywhales import DockerClient, InspectionPolicy, docker
+from pywhales.admission import AdmissionOwner
 from pywhales.client_config import ClientConfig
 from pywhales.convergence import (
     ComposeTarget,
@@ -47,6 +48,7 @@ from pywhales.convergence import (
     wait as wait_for_convergence,
 )
 from pywhales.inventory import InventoryKind
+from pywhales.telemetry import AdmissionDecisionRecord, CompletionRecord, LaunchRecord
 
 print(signature(capture_compose, annotation_format=Format.STRING))
 print(signature(capture_containers, annotation_format=Format.STRING))
@@ -54,6 +56,8 @@ print(signature(wait_for_convergence, annotation_format=Format.STRING))
 print([f.name for f in fields(ContainerTarget)])
 print(signature(InspectionPolicy))  # max_total_stdin_bytes: int | None = None
 print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
+print({f.name: f.default for f in fields(ComposeTarget)}["fail_on_exit"])  # False
+print({f.name: f.default for f in fields(ContainerTarget)}["fail_on_exit"])  # False
 detail_defaults = {f.name: f.default for f in fields(DeadlineDetail)}
 print(detail_defaults["restart_budget_exceeded_containers"])
 print(get_args(InventoryKind.__value__))  # must include "manifest_list"
@@ -61,6 +65,16 @@ print(signature(DockerClient).parameters["strict_env_transport"])  # bool = Fals
 print({f.name: f.default for f in fields(ClientConfig)}["strict_env_transport"])
 print(signature(DockerClient).parameters["inherit_environment"])  # bool = True
 print({f.name: f.default for f in fields(ClientConfig)}["inherit_environment"])
+print(signature(DockerClient).parameters["strict_workload_errors"])  # bool = False
+print({f.name: f.default for f in fields(ClientConfig)}["strict_workload_errors"])
+print(signature(AdmissionOwner, annotation_format=Format.STRING))  # telemetry_observer
+print([f.name for f in fields(AdmissionDecisionRecord)])
+print([f.name for f in fields(LaunchRecord)])  # includes admission_id
+for record_type in (AdmissionDecisionRecord, LaunchRecord, CompletionRecord):
+    print(
+        record_type.__name__,
+        {f.name: f.default for f in fields(record_type)}["schema_version"],
+    )
 print(get_annotations(ServiceTarget, format=Format.STRING)["mode"])  # job modes?
 
 methods = [
@@ -102,13 +116,26 @@ matching streaming overloads. Also look for:
   blocks convergence without creating a new terminal failure reason.
 - `strict_env_transport: bool = False` on `DockerClient` and on `ClientConfig`
   (import the latter from `pywhales.client_config`, not the package root).
+- `strict_workload_errors: bool = False` on both client types. Confirm matching
+  installed documentation describes attached workload failures, not every CLI
+  error; detached and preflight specialization remains separate.
 - `inherit_environment: bool = True` on both client types; false restricts the
   child base before overlays, independently of strict assignment transport.
+- `fail_on_exit: bool = False` on both `capture_compose` and `capture_containers`,
+  frozen on `ComposeTarget` and `ContainerTarget`. Check matching documentation
+  for cause-free `Failure(reason="exited")`, completion precedence, and restart
+  budgets; the default doesn't make exited long-running members fail fast.
 - `capture_containers(client, references, *, completion=(), max_restarts=None,
-  policy, timeout, cancel=None)` and `ContainerTarget` exported from
+  fail_on_exit=False, policy, timeout, cancel=None)` and `ContainerTarget` exported from
   `pywhales.convergence`; the target has `container_ids`, `completion`, and
-  `max_restarts`. The convergence `wait` annotation must accept that target.
+  `max_restarts` plus `fail_on_exit`. The convergence `wait` annotation must accept that target.
   This is separate from the exit-code `docker.container.wait` API.
+- Keyword-only `telemetry_observer` on `AdmissionOwner`, plus
+  `AdmissionDecisionRecord`, `AdmissionId`, and `AdmissionOutcome` exports from
+  `pywhales.telemetry`. Inspect the record fields and `TelemetryRecord` union;
+  schema-5 launch records have `admission_id`, while completion records join by
+  `attempt_id`. Configure both owner and client observers for correlation, not
+  just the client's launch observer. See [Telemetry and admission](telemetry-and-admission.md#measure-admission-waits-and-correlate-launches).
 - A keyword-only `timeout: float | None = None` on Compose `build` and `execute`,
   and on `container.wait`, whose overloads return `int` for one reference and
   `list[int]` for an iterable.
@@ -153,7 +180,7 @@ contributor tests. A version string alone doesn't establish supported arguments
 or return contracts.
 
 Checking `default_timeout`, `telemetry_observer`, `environment`,
-`strict_env_transport`, or `inherit_environment` follows the same signature-first rule: confirm it in
+`strict_env_transport`, `strict_workload_errors`, or `inherit_environment` follows the same signature-first rule: confirm it in
 `signature(DockerClient)` before assuming it is supported. Opt-in admission
 (`pywhales.admission`), bounded observation (the root `observation`,
 `capture_inventory`, and `InspectionPolicy` exports, plus `bulk_reload` from

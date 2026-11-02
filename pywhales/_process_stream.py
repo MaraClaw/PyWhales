@@ -77,6 +77,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         deadline: float | None = None,
         buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
+        strict_workload_errors: bool = False,
         telemetry: ExecutionTelemetry | None = None,
         observation: ObservationState | None = None,
     ) -> None:
@@ -93,6 +94,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             raw_diagnostics: Whether exception text may expose command and
                 captured-output values. Raw exception attributes remain available
                 regardless and must be treated as confidential.
+            strict_workload_errors: Keep this workload's failures generic.
             telemetry: Optional launch state completed by consumption or closure.
             observation: Scope snapshotted at launch, or ``None`` outside one. Its
                 deadline, cancel tokens, and stream accounts are enforced for the
@@ -104,6 +106,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._deadline = deadline
         self._buffer_bytes = buffer_bytes
         self._raw_diagnostics = raw_diagnostics
+        self._strict_workload_errors = strict_workload_errors
         self._telemetry = telemetry
         self._telemetry_outcome: Outcome | None = None
         self._observation = (
@@ -207,7 +210,11 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 return
             stderr = bytes(self._stderr)
         self._fail(
-            get_docker_exception_type(stderr)(
+            (
+                DockerException
+                if self._strict_workload_errors
+                else get_docker_exception_type(stderr)
+            )(
                 self._full_cmd,
                 exit_code,
                 stderr=stderr,
@@ -559,7 +566,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._complete_telemetry()
         if exit_code != 0:
             stderr = bytes(self._stderr)
-            raise get_docker_exception_type(stderr)(
+            exception_type = (
+                DockerException
+                if self._strict_workload_errors
+                else get_docker_exception_type(stderr)
+            )
+            raise exception_type(
                 self._full_cmd,
                 exit_code,
                 stderr=stderr,

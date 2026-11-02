@@ -51,6 +51,7 @@ type ConvergenceSummary = Literal[
     "superseded",
     "update_failed",
     "completion_failed",
+    "exited",
     "observation",
 ]
 

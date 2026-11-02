@@ -6,6 +6,9 @@ from threading import TIMEOUT_MAX, Condition
 from time import monotonic
 from typing import assert_never
 
+from pywhales.telemetry import TelemetryObserver
+from pywhales.telemetry._lifecycle import deliver
+
 from ._contracts import (
     AdmissionSnapshot,
     ClassLimit,
@@ -26,6 +29,7 @@ from ._errors import (
 from ._guard import check_reentry
 from ._request import AdmissionRequest
 from ._state import Bucket, Outcome
+from ._telemetry import acquisition, close_pending, commit
 
 
 class AdmissionOwner:
@@ -38,15 +42,30 @@ class AdmissionOwner:
     """
 
     def __init__(
-        self, endpoint: EndpointIdentity, limits: Mapping[PressureClass, ClassLimit]
+        self,
+        endpoint: EndpointIdentity,
+        limits: Mapping[PressureClass, ClassLimit],
+        *,
+        telemetry_observer: TelemetryObserver | None = None,
     ) -> None:
-        """Copy a nonempty mapping of immutable per-class limits."""
+        """Copy limits and optionally observe payload-free admission decisions.
+
+        Args:
+            endpoint: Application alias retained only by snapshots, never records.
+            limits: Nonempty mapping of immutable per-class limits.
+            telemetry_observer: Optional caller-thread callback, invoked outside
+                owner and stream locks. Ordinary callback errors are isolated.
+                None adds no admission identifiers or telemetry clock reads.
+                Keep it nonblocking; do not synchronously reenter admitted work
+                or streams whose completion it can block.
+        """
         if not limits:
             raise ValueError("limits must not be empty")
         self._endpoint = endpoint
         self._buckets = {pressure: Bucket(limit) for pressure, limit in limits.items()}
         self._condition = Condition()
         self._closed = False
+        self._telemetry_observer = telemetry_observer
 
     def close(self) -> None:
         """Permanently reject new admission and wake all pending callers.
@@ -55,17 +74,7 @@ class AdmissionOwner:
         work keeps its permits; streams still require consumption or explicit
         cleanup. Dormant requests remain unregistered and reject on activation.
         """
-        with self._condition:
-            if self._closed:
-                return
-            self._closed = True
-            for bucket in self._buckets.values():
-                for ticket in bucket.pending:
-                    ticket.done = True
-                    bucket.record(Outcome.REJECTED_CLOSED)
-                bucket.pending.clear()
-                bucket.pending_demand = 0
-            self._condition.notify_all()
+        close_pending(self)
 
     def wait_drained(self, *, timeout: float) -> bool:
         """Wait for all active permits without closing or cancelling work.
@@ -161,12 +170,7 @@ class AdmissionOwner:
     def _acquire(self, request: AdmissionRequest) -> None:
         ticket, bucket = request._ticket, request._bucket
         deadline = None if request._timeout is None else monotonic() + request._timeout
-        with self._condition:
-            if ticket.started:
-                raise RuntimeError("admission request is single-use")
-            ticket.started = True
-            if ticket.cancelled:
-                raise AdmissionCancelled()
+        with acquisition(self, ticket):
             if self._closed:
                 ticket.done = True
                 bucket.record(Outcome.REJECTED_CLOSED)
@@ -258,9 +262,12 @@ class AdmissionOwner:
             ticket.cancelled = True
             ticket.done = True
             bucket.record(Outcome.CANCELLED)
+            record = commit(ticket, "cancelled")
             bucket.dequeue(ticket)
             self._condition.notify_all()
-            return True
+        if self._telemetry_observer is not None and record is not None:
+            deliver(self._telemetry_observer, record)
+        return True
 
     def _release(self, request: AdmissionRequest, outcome: Outcome) -> None:
         with self._condition:

@@ -13,6 +13,7 @@ from pywhales.admission import (
     EndpointIdentity,
     PressureClass,
 )
+from pywhales.telemetry import AdmissionDecisionRecord, TelemetryRecord
 
 
 class Source(AbstractContextManager[Iterator[int]], Iterator[int]):
@@ -95,7 +96,13 @@ def test_close_before_read_or_after_bare_break(consume: bool) -> None:
 
 @pytest.mark.parametrize("stage", ["factory", "entry"])
 def test_setup_failure_releases_without_exiting_partial_source(stage: str) -> None:
-    owner, pressure = _owner()
+    pressure = PressureClass("stream")
+    records: list[TelemetryRecord] = []
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 0, demand_capacity=5)},
+        telemetry_observer=records.append,
+    )
     source = Source()
     error = KeyboardInterrupt()
 
@@ -111,6 +118,9 @@ def test_setup_failure_releases_without_exiting_partial_source(stage: str) -> No
     assert source.exits == []
     assert owner.snapshot().classes[0].outcomes.failed == 1
     assert owner.snapshot().classes[0].demand.active == 0
+    assert len(records) == 1
+    assert isinstance(records[0], AdmissionDecisionRecord)
+    assert records[0].outcome == "granted"
     assert owner.request(pressure).call(lambda: 4) == 4
 
 

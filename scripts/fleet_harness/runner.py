@@ -154,6 +154,7 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
     keys = {"scenario", "endpoint", "action", "asset", "fault"}
     if plan.scheduled:
         keys.add("arrival_seconds")
+    keys.update({"queue_lease_seconds", "max_queue_attempts"})
     operations = [step.model_dump(include=keys) for step in plan.steps]
     operation_digest = (
         "sha256:"

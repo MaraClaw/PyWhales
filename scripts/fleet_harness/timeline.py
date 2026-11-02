@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from scripts.fleet_contract.workload import Action
 
+from .models import Step
+
 if TYPE_CHECKING:
     from .records import Observation, Receipt, RunReport
 
@@ -46,11 +48,21 @@ def peak_counts(receipts: Sequence[Receipt]) -> tuple[int, int]:
     active: defaultdict[float, int] = defaultdict(int)
     queued: defaultdict[float, int] = defaultdict(int)
     for receipt in receipts:
-        queued[receipt.arrival_seconds] += 1
-        if receipt.admitted_seconds is None:
-            queued[receipt.terminal_seconds] -= 1
+        spans = receipt.attempts
+        if spans is None:
+            queued[receipt.arrival_seconds] += 1
+            queued[
+                receipt.admitted_seconds
+                if receipt.admitted_seconds is not None
+                else receipt.terminal_seconds
+            ] -= 1
         else:
-            queued[receipt.admitted_seconds] -= 1
+            for span in spans:
+                queued[span.enqueued_seconds] += 1
+                queued[span.ended_seconds] -= 1
+        if receipt.admitted_seconds is None:
+            continue
+        else:
             active[receipt.admitted_seconds] += 1
             active[receipt.terminal_seconds] -= 1
     return peak(active), peak(queued)
@@ -74,7 +86,8 @@ def is_ordered(receipts: Sequence[Receipt]) -> bool:
     submission was still waiting, so it waits for every earlier unlaunched
     terminal (`barrier`).
     """
-    arrival = admitted = barrier = 0.0
+    arrival = 0.0
+    attempts: list[tuple[float, int, int, float, bool]] = []
     for number, receipt in enumerate(receipts, start=1):
         if (
             receipt.submission != number
@@ -84,14 +97,41 @@ def is_ordered(receipts: Sequence[Receipt]) -> bool:
             return False
         arrival = receipt.arrival_seconds
         launched = receipt.admitted_seconds
+        end = launched if launched is not None else receipt.terminal_seconds
+        spans = receipt.attempts
+        if spans is None:
+            attempts.append((arrival, 0, number, end, launched is not None))
+        else:
+            if (
+                not spans
+                or spans[0].enqueued_seconds != arrival
+                or spans[-1].ended_seconds != end
+            ):
+                return False
+            for index, span in enumerate(spans):
+                if span.enqueued_seconds > span.ended_seconds or (
+                    index and span.enqueued_seconds != spans[index - 1].ended_seconds
+                ):
+                    return False
+                attempts.append(
+                    (
+                        span.enqueued_seconds,
+                        int(index > 0),
+                        number,
+                        span.ended_seconds,
+                        launched is not None and index == len(spans) - 1,
+                    )
+                )
         if launched is None:
             if receipt.outcome not in {"timed_out", "cancelled"}:
                 return False
-            barrier = max(barrier, receipt.terminal_seconds)
-        elif max(arrival, admitted, barrier) <= launched <= receipt.terminal_seconds:
-            admitted = launched
-        else:
+        elif not arrival <= launched <= receipt.terminal_seconds:
             return False
+    barrier = 0.0
+    for _, _, _, end, admitted in sorted(attempts):
+        if admitted and end < barrier:
+            return False
+        barrier = max(barrier, end)
     return True
 
 
@@ -171,8 +211,45 @@ def timed(report: RunReport, receipts: Sequence[Receipt]) -> bool:
         and receipt.terminal_seconds
         <= receipt.arrival_seconds + report.operation_timeout_seconds + TOLERANCE
         and consistent(receipt, by_submission[receipt.submission])
-        for receipt in receipts
+        and lineage(
+            receipt,
+            step,
+            min(window, receipt.arrival_seconds + report.operation_timeout_seconds),
+        )
+        for receipt, step in zip(receipts, report.steps, strict=False)
     )
+
+
+def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
+    """Bind recorded queue attempts to the step's lease and attempt limit."""
+    lease = step.queue_lease_seconds
+    spans = receipt.attempts
+    if lease is None:
+        return spans is None
+    if spans is None or not spans or len(spans) > (step.max_queue_attempts or 1):
+        return False
+    valid = all(
+        span.ended_seconds <= span.enqueued_seconds + lease + TOLERANCE
+        and span.ended_seconds <= deadline + TOLERANCE
+        and (
+            index == len(spans) - 1
+            or close(span.ended_seconds, span.enqueued_seconds + lease)
+        )
+        and (index == len(spans) - 1 or span.ended_seconds < deadline)
+        for index, span in enumerate(spans)
+    )
+    if receipt.admitted_seconds is not None:
+        return valid and receipt.admitted_seconds < min(
+            deadline, spans[-1].enqueued_seconds + lease
+        )
+    if receipt.outcome == "timed_out":
+        end = min(deadline, spans[-1].enqueued_seconds + lease)
+        return (
+            valid
+            and close(spans[-1].ended_seconds, end)
+            and (len(spans) == (step.max_queue_attempts or 1) or close(end, deadline))
+        )
+    return valid
 
 
 def reconcile(report: RunReport) -> Code | None:

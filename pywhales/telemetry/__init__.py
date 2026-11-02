@@ -2,6 +2,9 @@
 
 from ._exporter import BoundedExporter
 from ._records import (
+    AdmissionDecisionRecord,
+    AdmissionId,
+    AdmissionOutcome,
     CompletionRecord,
     LaunchRecord,
     OperationFamily,
@@ -11,6 +14,9 @@ from ._records import (
 )
 
 __all__ = [
+    "AdmissionDecisionRecord",
+    "AdmissionId",
+    "AdmissionOutcome",
     "BoundedExporter",
     "CompletionRecord",
     "LaunchRecord",

@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.1.3
+
+### New Features
+
+- `capture_compose()` and `capture_containers()` accept `fail_on_exit=True`,
+  frozen as a real boolean on their targets and disabled by default. A
+  non-restarting long-running container that exits with any code returns a
+  cause-free `Failure(reason="exited")` on the first complete or confirming
+  pass. Completion, restarting, and restart-budget behavior remain unchanged.
+  Reconciliation journals this as `FAILED` with reason `exited`, without output
+  or exit code.
+- `AdmissionOwner(telemetry_observer=...)` optionally emits a payload-free
+  decision ID, outcome, and activation-to-decision duration in seconds. Each
+  activated request produces one decision; dormant cancellation produces none,
+  and unobserved requests incur no telemetry overhead. IDs correlate calls and
+  stream factory, entry, iteration, and exit; observers run outside locks.
+- Scheduled offline fleet steps support `queue_lease_seconds` and
+  `max_queue_attempts` for bounded FIFO tail retries under the original
+  deadline. Launched work is never retried; receipts include every attempt but
+  retain one logical outcome and sample. Unset options preserve legacy digests
+  and reports. The harness remains offline and non-authorizing.
+
+### Behavior Changes And Fixes
+
+- `strict_workload_errors=True` opts into exact `DockerException` classification
+  for marked attached container `run`, `execute`, and `start`, and non-detached
+  Compose `run` and `execute` workload failures, including captured, TTY, and
+  supported stream paths. It defaults to `False`; exception attributes, detached
+  and preflight classification, timeouts, cancellation, and limits are unchanged.
+- Telemetry uses schema version 5 for admission decision, launch, and completion
+  records. `AdmissionDecisionRecord` joins `TelemetryRecord`, `LaunchRecord`
+  carries `admission_id`, and completion records join launches by `attempt_id`.
+
+### Documentation
+
+- Updated agent guides and the consumer skill for the new convergence, admission
+  telemetry, offline fleet, and workload-error contracts.
+
 ## 1.1.2
 
 ### New Features

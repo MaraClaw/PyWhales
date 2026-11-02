@@ -200,6 +200,7 @@ def run(
     pass_fds: Sequence[int] = ...,
     *,
     timeout: float | None = ...,
+    workload_status: bool = ...,
 ) -> str: ...
 
 
@@ -215,6 +216,7 @@ def run(
     tty: bool = ...,
     pass_fds: Sequence[int] = ...,
     timeout: float | None = ...,
+    workload_status: bool = ...,
 ) -> tuple[str, str]: ...
 
 
@@ -229,6 +231,7 @@ def run(
     pass_fds: Sequence[int] = (),
     *,
     timeout: float | None = None,
+    workload_status: bool = False,
 ) -> str | tuple[str, str]:
     """Run a command synchronously and return decoded captured output.
 
@@ -268,6 +271,7 @@ def run(
             the platform's subprocess support.
         timeout: Positive finite seconds from launch, replacing the client default;
             ``None`` inherits it. Booleans are rejected before launching.
+        workload_status: Mark a launch whose exit status belongs to the workload.
 
     Returns:
         Captured stdout, or ``(stdout, stderr)`` when return_stderr is true.
@@ -406,7 +410,11 @@ def run(
         telemetry.return_code = completed_process.returncode
         telemetry.captured(completed_process.stdout, completed_process.stderr)
         if completed_process.returncode != 0:
-            exception_type = get_docker_exception_type(completed_process.stderr)
+            exception_type = (
+                DockerException
+                if workload_status and policy.strict_workload_errors
+                else get_docker_exception_type(completed_process.stderr)
+            )
             raise exception_type(
                 args,
                 completed_process.returncode,
@@ -582,6 +590,7 @@ def _start_process(
     *,
     timeout: float | None = None,
     buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
+    workload_status: bool = False,
 ) -> ProcessStream:
     """Launch a process immediately with owned readers and a deadline watchdog.
 
@@ -596,6 +605,7 @@ def _start_process(
             ``None`` inherits it.
         buffer_bytes: Positive byte budget. Omission inherits the current client
             budget; explicit ``None`` is unbounded even if the client has a limit.
+        workload_status: Mark a launch whose exit status belongs to the workload.
 
     Returns:
         An already-running owned stream of ``(source, bytes)`` records. Its
@@ -673,6 +683,7 @@ def _start_process(
             deadline=deadline,
             buffer_bytes=buffer_bytes,
             raw_diagnostics=policy.raw_diagnostics,
+            strict_workload_errors=workload_status and policy.strict_workload_errors,
             telemetry=telemetry if policy.telemetry_observer is not None else None,
             observation=observation,
         )
@@ -689,6 +700,7 @@ def stream_stdout_and_stderr(
     *,
     timeout: float | None = None,
     buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
+    workload_status: bool = False,
 ) -> ProcessStream:
     """Launch a subprocess and return its owned stdout/stderr record stream.
 
@@ -725,6 +737,7 @@ def stream_stdout_and_stderr(
             unfinished records, and stderr history have separate limits rather
             than one total-memory cap. Producers wait for queue capacity without
             dropping output; oversized records or stderr history fail iteration.
+        workload_status: Mark a launch whose exit status belongs to the workload.
 
     Returns:
         An owned ProcessStream yielding ``(source, payload)`` pairs labelled
@@ -745,7 +758,13 @@ def stream_stdout_and_stderr(
             argv or environment size.
     """
     return _start_process(
-        full_cmd, env, pass_fds, pipe_stdin, timeout=timeout, buffer_bytes=buffer_bytes
+        full_cmd,
+        env,
+        pass_fds,
+        pipe_stdin,
+        timeout=timeout,
+        buffer_bytes=buffer_bytes,
+        workload_status=workload_status,
     )
 
 

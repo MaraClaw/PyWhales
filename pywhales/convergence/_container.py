@@ -6,6 +6,7 @@ from pywhales._observation import ObservationState, check_observation
 from pywhales.client_config import ClientConfig
 from pywhales.convergence._compose import (
     _INTERRUPTIONS,
+    Selection,
     _outcome,
     _restarts,
     evaluate_groups,
@@ -30,9 +31,7 @@ from pywhales.exceptions import NoSuchContainer
 
 def capture_selected(
     config: ClientConfig,
-    references: tuple[str, ...],
-    completion: tuple[str, ...],
-    max_restarts: int | None,
+    selection: Selection,
     scope: AbstractContextManager[ObservationState],
 ) -> ContainerTarget | Failure | Deadline | Cancelled:
     """Resolve selections within the bounded scope, retaining only full IDs."""
@@ -40,21 +39,22 @@ def capture_selected(
         with scope:
             ids: list[str] = []
             completed: list[str] = []
-            for reference in references:
+            for reference in selection.services:
                 check_observation()
                 member = resolve_container(config, reference)
                 if member.id in ids:
                     return Failure(reason="malformed")
                 ids.append(member.id)
-                if reference in completion:
+                if reference in selection.completion:
                     completed.append(member.id)
-                elif max_restarts is not None:
+                elif selection.max_restarts is not None:
                     _restarts(member)
             return ContainerTarget(
                 client_config=config,
                 container_ids=tuple(ids),
                 completion=tuple(completed),
-                max_restarts=max_restarts,
+                max_restarts=selection.max_restarts,
+                fail_on_exit=selection.fail_on_exit,
             )
     except _INTERRUPTIONS as error:
         return _outcome(error, None)
@@ -74,7 +74,7 @@ def check_containers(target: ContainerTarget) -> DeadlineDetail | Failure:
         if member.id != identity:
             return Failure(reason="superseded")
         groups.append((identity in target.completion, [member]))
-    return evaluate_groups(groups, target.max_restarts)
+    return evaluate_groups(groups, target.max_restarts, target.fail_on_exit)
 
 
 def wait_containers(

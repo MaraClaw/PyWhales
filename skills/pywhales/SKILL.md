@@ -6,10 +6,11 @@ description: >-
   managing containers or images with pywhales, pulling/pushing/saving/loading
   images, using Buildx or Compose from Python, isolating CLI child environments,
   enforcing strict environment-only transport for container envs and build args,
-  adding telemetry or admission
-  limits, bounding inspection and archive uploads, waiting for Swarm
+  separating workload failures from Docker errors, correlating admission decisions
+  with launch telemetry, adding admission limits, bounding inspection and archive
+  uploads, waiting for Swarm
   service/job/stack, Compose project, or standalone container convergence with
-  completion and restart budgets, or
+  completion, restart budgets, and opt-in fail-fast container exits, or
   troubleshooting pywhales usage, output types,
   streaming, and cleanup. This skill is for consuming pywhales, not developing
   or contributing to the library.
@@ -23,7 +24,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes current source APIs with project version 1.1.2.
+This guidance describes current source APIs with project version 1.1.3.
 An installed version string alone isn't proof of support; check actual
 capabilities before use.
 
@@ -39,8 +40,9 @@ are not part of this workflow.
 3. Check installed signatures, return annotations/overloads, and `help()` before
    adding unfamiliar arguments or assuming a closeable stream. For inventory,
    check supported kinds too; for Swarm waits, check the supported service modes.
-   For bounded uploads, isolated environments, and container convergence, check
-   the policy fields, client flags, target types, and capture options rather than
+   For bounded uploads, isolated environments, strict workload errors, admission
+   correlation, and container convergence, check the policy fields, client flags,
+   record schemas, target types, and capture options rather than
    inferring support from the version string.
    See [Usage validation](references/validation.md);
    these checks need no repository checkout or running engine.
@@ -57,13 +59,13 @@ are not part of this workflow.
 
 | Read when | Reference |
 | --- | --- |
-| Setting up imports, local/remote clients, CLI prerequisites, isolated child environments, default deadlines, strict environment transport, or inspect/reload errors | [Client, setup, and errors](references/client-and-errors.md) |
+| Setting up imports, local/remote clients, CLI prerequisites, isolated child environments, default deadlines, strict environment transport, workload-error classification, or inspect/reload errors | [Client, setup, and errors](references/client-and-errors.md) |
 | Translating run/exec/ps, passing container environment values, waiting on containers, choosing output modes, mounting files, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
 | Pulling, pushing, saving, or loading images and registry archives | [Registry transfers and archives](references/registry-and-archives.md) |
 | Building images, passing build args, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
-| Observing executions with sanitized telemetry or bounding concurrent work with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
-| Bounding inspection, inventory, streams, or stdin uploads; waiting for Swarm services/jobs/stacks, Compose services, or standalone containers with completion and restart budgets; or evaluating opt-in reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
+| Observing executions with sanitized telemetry, measuring admission waits and correlating launches, or bounding concurrent work with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
+| Bounding inspection, inventory, streams, or stdin uploads; waiting for Swarm services/jobs/stacks, Compose services, or standalone containers with completion, restart budgets, and `fail_on_exit`; or evaluating opt-in reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
 | Checking installed API support and verifying the user's automation | [Usage validation](references/validation.md) |
 
 ## Quick Translation

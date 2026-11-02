@@ -12,6 +12,7 @@ Paths are relative to `tests/`. Repository-wide checks and safety rules are in t
 | Observation, launch limits, bounded capture | `pywhales/test_observation.py`, `pywhales/test_observation_budget_integration.py`, `pywhales/test_launch_limits.py`, `pywhales/test_bounded_capture.py` |
 | Safe/raw diagnostics, validation, command-copy isolation | `pywhales/test_inspect_diagnostics.py`, `pywhales/test_logging.py`, `pywhales/test_exceptions.py`, `pywhales/test_automatic_diagnostics.py` |
 | Telemetry records, exporter, streams, archives | `pywhales/test_telemetry*.py` |
+| Admission decision telemetry and launch correlation | `pywhales/test_admission_telemetry.py`, `pywhales/test_admission_telemetry_correlation.py`, `pywhales/test_admission_telemetry_locks.py` |
 | Convergence, Compose completion, reconciliation journal/store | `pywhales/test_convergence.py`, `pywhales/test_convergence_types.py`, `pywhales/test_reconciliation.py`, `pywhales/test_reconciliation_store.py` |
 | Other opt-in policy packages | `pywhales/test_admission_*.py`, `pywhales/test_profiles*.py`, `pywhales/test_storage_*.py` |
 | Delivery chain; offline fleet and script tooling | `pywhales/test_delivery_workflows.py`; `pywhales/test_fleet_*.py`, `pywhales/test_transport_experiment.py`, `pywhales/test_plugin_installer.py`, `pywhales/test_docker_overhead_benchmark.py` |
@@ -32,6 +33,7 @@ Filenames in this section are relative to `pywhales/`.
   runtime cases are in `components/test_image.py`; static returns in `test_type_contracts.py` and `test_command_deadline_types.py`.
 - Assert raw failure details through `stderr`, `stdout`, or `docker_command`, not safe exception text. Test safe and raw rendering
   separately, including traceback chains and no inspect dumps in safe mode; raw opt-in must not change returned payloads.
+- Strict workload classification local-child cases live in `test_utils.py`, `test_exceptions.py`, and `test_client_config.py`: preserve captured and early/exhaustion stream errors, per-launch snapshots, and default, detached, and preflight controls.
 - `test_inspect_diagnostics.py` rejects empty/multiple singleton results, non-object/non-array shapes, and invalid JSON.
   Identity-changing `reload()` must preserve the cache object and refresh timestamp; matching full IDs pass.
   The current-context handle (`Context(..., None)`) is exempt from name stability and accepts a changed current name.
@@ -44,13 +46,15 @@ Filenames in this section are relative to `pywhales/`.
   Keep explicit overlay precedence, mandatory Buildx values, safe diagnostics and limits; strict transport ignores excluded ambient app-name collisions but rejects client-overlay collisions.
 - Completion tests keep exited-zero success, safe nonzero failure, unfinished counters, and final-pass revalidation. Preserve closed
   `completion_failed` journal reasons, generation-fenced deadline-detail round-trips in the store, and static completion types.
+- `test_convergence.py` covers opt-in `fail_on_exit` for Compose and standalone containers on the first and confirming passes, exit zero and nonzero, unchanged default behavior, and completion/restart budgets. `test_reconciliation.py` covers cause-free `exited` projection to the journal without exit-code/output payloads.
 - Standalone `capture_containers()` cases in `test_convergence.py` resolve names/prefixes to full IDs and reject duplicate resolved IDs.
   Disappearance/recreation is `superseded`; recheck readiness/completion on the final pass, retain the latest complete deadline cycle, and reap hung inspections on cancellation.
   Keep `ContainerTarget` and capture/wait return contracts in `test_convergence_types.py` aligned.
 - Observation tests keep nested minimum limits, shared response accounts across threads, and deadline and cancellation precedence.
   Telemetry tests keep records payload-free under raw diagnostics, one completion per launch, and results intact when the observer raises.
+- Admission telemetry tests cover decision outcomes, callbacks outside locks, cross-thread cancellation, and no new IDs or clock reads without an observer. Correlation tests cover nested calls and stream lifecycle launches.
 - Offline `test_fleet_harness.py` keeps FIFO head blocking under per-action caps, global/per-action peaks, and queue expiry without counting unlaunched actions in peaks.
-  Preserve old sequential report imports and reject contradictory schedules; `test_fleet_harness_cli.py` checks safe export/decide import rejection without candidate launches.
+  Leased retry cases in `test_fleet_harness.py`, `test_fleet_harness_cli.py`, and `test_fleet_report.py` cover attempt lineage, FIFO, the original deadline, one logical outcome and queue sample, and legacy digest compatibility. Preserve old sequential report imports and reject contradictory schedules; CLI tests check safe export/decide import rejection without candidate launches.
 
 ## Runtime fixtures and shared state
 

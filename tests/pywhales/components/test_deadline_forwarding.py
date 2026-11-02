@@ -742,7 +742,11 @@ def test_container_start_forwards_budget_for_every_mode_and_entry(
             assert_never(unreachable)
 
     execute.assert_called_once()
-    assert execute.call_args.kwargs == {"timeout": timeout}
+    assert execute.call_args.kwargs == (
+        {"timeout": timeout, "workload_status": True}
+        if attach
+        else {"timeout": timeout}
+    )
     assert [str(arg) for arg in execute.call_args.args[0]][1:3] == [
         "container",
         "start",

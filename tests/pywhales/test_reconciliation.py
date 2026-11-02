@@ -9,11 +9,13 @@ from pywhales import DockerClient
 from pywhales.admission import EndpointIdentity
 from pywhales.convergence import (
     Cancelled,
+    ComposeTarget,
     Deadline,
     DeadlineDetail,
     Failure,
     Outcome,
     Success,
+    capture_compose,
     wait,
 )
 from pywhales.inventory import InspectionPolicy
@@ -424,3 +426,35 @@ def test_real_cli_completion_failure_is_journaled_as_a_closed_reason(
     rendered = json.dumps(asdict(result.progress))
     assert "3" not in json.loads(rendered)["convergence"]
     assert B not in rendered and "migrate" not in rendered
+
+
+def test_real_cli_exited_failure_is_journaled_as_a_closed_reason(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, status="exited", exit_code=137)))
+    target = capture_compose(
+        fake_cli, ("web",), fail_on_exit=True, policy=policy, timeout=5
+    )
+    assert isinstance(target, ComposeTarget)
+
+    class CLIEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            return wait(target, policy=policy, timeout=5, poll_interval=1)
+
+    store, endpoint = MemoryJournalStore(), CLIEndpoint()
+    owner = controller(store, endpoint)
+    result = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert result.progress.state is AttemptState.FAILED
+    assert result.progress.convergence == "exited"
+    assert result.progress.deadline_detail is None
+    stored = store.read(spec().key)
+    assert stored is not None and stored.progress == result.progress
+    rendered = json.dumps(asdict(stored.progress))
+    assert "137" not in rendered and "credential-payload" not in rendered
+    assert A not in rendered and "cause" not in rendered

@@ -2,7 +2,7 @@
 
 from typing import Final, Literal, Self, assert_never
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_core import PydanticCustomError
 
 from scripts.fleet_contract.common import (
@@ -61,6 +61,12 @@ class Step(Contract):
     fault: Token | None = None
     outcome: Outcome = "succeeded"
     arrival_seconds: Amount | None = None
+    queue_lease_seconds: Positive | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    max_queue_attempts: PositiveCount | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     queue_seconds: Amount = 0.0
     local_seconds: Amount = 0.1
     readiness_seconds: Amount | None = 0.1
@@ -81,6 +87,12 @@ class Step(Contract):
             raise PydanticCustomError("recovery_population", "recovery_population")
         if self.arrival_seconds is not None and self.queue_seconds:
             raise PydanticCustomError("scheduled_queue", "scheduled_queue")
+        if self.arrival_seconds is None and (
+            self.queue_lease_seconds is not None or self.max_queue_attempts is not None
+        ):
+            raise PydanticCustomError("lease_unscheduled", "lease_unscheduled")
+        if (self.max_queue_attempts or 1) > 1 and self.queue_lease_seconds is None:
+            raise PydanticCustomError("lease_required", "lease_required")
         return self
 
 

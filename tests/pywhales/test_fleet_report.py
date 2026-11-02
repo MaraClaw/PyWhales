@@ -333,3 +333,21 @@ def test_unlaunched_submission_when_exported_is_counted_once(
         "latency_excluded",
         "latency_missing",
     } & set(report.flags)
+
+
+def test_retry_export_counts_logical_submissions_and_queue_samples_once() -> None:
+    declaration = overlap_manifest(1, "operation_count", 2)
+    simulation = run(
+        declaration,
+        overlap_plan(
+            at(0.0, 1.5), at(0.0, queue_lease_seconds=1.0, max_queue_attempts=2)
+        ),
+    )
+    result = export_result(simulation, declaration)
+    queue = next(item for item in result.latency if item.boundary == "queue_wait")
+    assert result.populations.all_submissions == result.outcomes.accounted == 2
+    assert [(sample.submission, sample.seconds) for sample in queue.samples] == [
+        (1, 0.0),
+        (2, 1.5),
+    ]
+    assert result.populations.launched_cli == 2

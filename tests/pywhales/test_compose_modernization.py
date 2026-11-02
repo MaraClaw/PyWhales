@@ -208,7 +208,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-12:] == [
+    assert [field.name for field in fields(ClientConfig)][-13:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
@@ -221,6 +221,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         "default_timeout",
         "strict_env_transport",
         "inherit_environment",
+        "strict_workload_errors",
     ]
 
 

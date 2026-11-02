@@ -1167,3 +1167,160 @@ def test_report_rejects_when_scheduled_import_is_contradictory(
 
     # Then one fixed code names the first contradiction.
     assert {error["type"] for error in caught.value.errors()} == {code}
+
+
+def test_queue_lease_retry_rejoins_after_simultaneous_arrival() -> None:
+    recipe = overlap_plan(
+        at(0.0, 2.5),
+        at(0.0, 0.5, queue_lease_seconds=1.0, max_queue_attempts=4),
+        at(1.0, 0.5),
+    )
+    report = run(overlap_manifest(1, "operation_count", 3), recipe)
+
+    assert receipts(report) == [
+        (0.0, 0.0, 2.5, "succeeded"),
+        (0.0, 3.0, 3.5, "succeeded"),
+        (1.0, 2.5, 3.0, "succeeded"),
+    ]
+    attempt_rows = schedule(report).receipts[1].attempts
+    assert attempt_rows is not None
+    assert [(a.enqueued_seconds, a.ended_seconds) for a in attempt_rows] == [
+        (0.0, 1.0),
+        (1.0, 2.0),
+        (2.0, 3.0),
+        (3.0, 3.0),
+    ]
+    assert [s.seconds for s in report.samples if s.boundary == "queue_wait"] == [
+        0.0,
+        3.0,
+        1.5,
+    ]
+    assert report.submitted == report.command_count == report.outcomes.succeeded == 3
+    assert RunReport.model_validate_json(report.model_dump_json()) == report
+
+
+@pytest.mark.parametrize(
+    ("attempts", "timeout", "end"), [(2, 10.0, 2.0), (10, 2.5, 2.5)]
+)
+def test_queue_lease_exhaustion_or_original_deadline_ends_unlaunched(
+    attempts: int, timeout: float, end: float
+) -> None:
+    report = run(
+        overlap_manifest(1, "operation_count", 3, error_fraction=1.0),
+        overlap_plan(
+            at(0.0, 0.1),
+            at(0.1, 9.0),
+            at(0.1, queue_lease_seconds=1.0, max_queue_attempts=attempts),
+            timeout=timeout,
+        ),
+    )
+    row = schedule(report).receipts[2]
+    assert row.admitted_seconds is None
+    assert row.terminal_seconds == end + 0.1
+    assert row.outcome == "timed_out"
+    assert report.command_count == 2 and report.submitted == 3
+
+
+def test_launched_lease_submission_never_retries() -> None:
+    report = run(
+        overlap_manifest(1, "operation_count", 1),
+        overlap_plan(at(0.0, 3.0, queue_lease_seconds=0.5, max_queue_attempts=5)),
+    )
+    row = schedule(report).receipts[0]
+    assert row.attempts is not None
+    assert [(a.enqueued_seconds, a.ended_seconds) for a in row.attempts] == [(0.0, 0.0)]
+    assert row.outcome == "succeeded" and report.command_count == 1
+
+
+def test_early_stop_cancels_retry_pending_at_same_instant() -> None:
+    report = run(
+        overlap_manifest(2, "operation_count", 4),
+        overlap_plan(
+            at(0.0, 5.0),
+            at(0.0, 5.0),
+            at(0.0, queue_lease_seconds=1.0, max_queue_attempts=3),
+            at(0.0, queue_lease_seconds=1.0, max_queue_attempts=1),
+        ),
+    )
+    assert [r.outcome for r in schedule(report).receipts] == [
+        "succeeded",
+        "succeeded",
+        "cancelled",
+        "timed_out",
+    ]
+    assert schedule(report).receipts[2].terminal_seconds == 1.0
+
+
+@pytest.mark.parametrize("defect", ["missing", "gap", "overlap", "lease", "count"])
+def test_retry_report_rejects_tampered_lineage(defect: str) -> None:
+    report = run(
+        overlap_manifest(1, "operation_count", 2),
+        overlap_plan(
+            at(0.0, 1.5), at(0.0, queue_lease_seconds=1.0, max_queue_attempts=2)
+        ),
+    )
+    raw = json.loads(report.model_dump_json())
+    row = raw["schedule"]["receipts"][1]
+    if defect == "missing":
+        del row["attempts"]
+    elif defect == "gap":
+        row["attempts"][1]["enqueued_seconds"] = 1.1
+    elif defect == "overlap":
+        row["attempts"][1]["enqueued_seconds"] = 0.9
+    elif defect == "lease":
+        raw["steps"][1]["queue_lease_seconds"] = 0.75
+    else:
+        raw["steps"][1]["max_queue_attempts"] = 1
+    with pytest.raises(ValidationError):
+        RunReport.model_validate_json(json.dumps(raw))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"queue_lease_seconds": 0},
+        {"queue_lease_seconds": -1},
+        {"queue_lease_seconds": float("inf")},
+        {"queue_lease_seconds": True},
+        {"max_queue_attempts": 0},
+        {"max_queue_attempts": True},
+        {"max_queue_attempts": 2},
+    ],
+)
+def test_step_rejects_invalid_lease_declarations(fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        overlap_plan(at(0.0) | fields)
+
+
+@pytest.mark.parametrize("field", ["queue_lease_seconds", "max_queue_attempts"])
+def test_unscheduled_step_rejects_lease_fields(field: str) -> None:
+    raw = json.loads(plan().model_dump_json())
+    raw["steps"][0][field] = 1
+    with pytest.raises(ValidationError):
+        Plan.model_validate_json(json.dumps(raw))
+
+
+def test_legacy_digests_and_report_shapes_remain_unchanged() -> None:
+    sequential = run(manifest(), plan())
+    scheduled = overlapped()
+    assert (
+        sequential.operation_digest
+        == "sha256:f3e241c7fc5af586e20ffd9295ddbdbb2b0ce25c3e4550336643ec6b05fe3e6f"
+    )
+    assert (
+        scheduled.operation_digest
+        == "sha256:db9fac335b961217aa419cb33f2af1a1dc3de2471af9fae4ab731d16dfb7425f"
+    )
+    assert "queue_lease_seconds" not in sequential.steps[0].model_dump()
+    assert "max_queue_attempts" not in sequential.steps[0].model_dump()
+    assert "attempts" not in schedule(scheduled).receipts[0].model_dump()
+
+
+def test_lease_declaration_changes_operation_digest() -> None:
+    declaration = overlap_manifest(1, "operation_count", 1)
+    baseline = run(declaration, overlap_plan(at(0.0)))
+    leased = run(
+        declaration,
+        overlap_plan(at(0.0, queue_lease_seconds=1.0, max_queue_attempts=2)),
+    )
+    assert baseline.operation_digest != leased.operation_digest
