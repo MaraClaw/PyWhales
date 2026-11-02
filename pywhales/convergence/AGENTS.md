@@ -36,8 +36,8 @@ Read-only observation of captured Swarm service/job generations, a fixed stack, 
 ## Standalone Capture And Membership
 
 - `capture_containers` accepts a nonempty tuple of distinct nonempty names or ID prefixes. Resolution requires one matching result with a full lowercase 64-hex ID; different references resolving to the same ID yield cause-free `malformed`.
-- `ContainerTarget` retains only resolved IDs, completion IDs, restart budget, and originating config. Each cycle inspects those fixed IDs, never re-resolves names: a missing container or changed returned ID is `superseded`. A missing container during capture remains `observation` with its cause.
-- Both container captures validate selection, completion, restart budget, and dry-run configuration before launch. `completion=()` (standalone) and `completion_services=()` (Compose) must be distinct tuples drawn from the selected references/names. Dry-run capture raises `ValueError`; checks return `unsupported`.
+- `ContainerTarget` retains only resolved IDs, completion IDs, restart budget, `fail_on_exit`, and originating config. Each cycle inspects those fixed IDs, never re-resolves names: a missing container or changed returned ID is `superseded`. A missing container during capture remains `observation` with its cause.
+- Both container captures validate selection, completion, restart budget, `fail_on_exit`, and dry-run configuration before launch. `completion=()` (standalone) and `completion_services=()` (Compose) must be distinct tuples drawn from the selected references/names. Dry-run capture raises `ValueError`; checks return `unsupported`.
 
 ## Compose Evaluation
 
@@ -47,13 +47,14 @@ Read-only observation of captured Swarm service/job generations, a fixed stack, 
 
 ## Shared Container Evaluation
 
-- `evaluate_groups` counts Compose services as groups and standalone containers as singleton groups. Long-running members need `running`, not restarting or paused; configured healthchecks need Health, and any reported Health must be `healthy`. Unmarked exited-0 one-shots still block.
+- `evaluate_groups` counts Compose services as groups and standalone containers as singleton groups. Long-running members need `running`, not restarting or paused; configured healthchecks need Health, and any reported Health must be `healthy`. With default `fail_on_exit=False`, unmarked exited-0 one-shots still block.
+- `capture_compose` and `capture_containers` accept keyword-only `fail_on_exit: bool = False`, rejecting non-bools with `ValueError` before launch and freezing it on both targets. Enabled, an exited, non-restarting long-running member within its restart budget returns cause-free `Failure(reason="exited")`, even at exit code 0, on the first complete evaluation that sees it, including the confirming pass. A failed completion member takes precedence (`completion_failed`); enabled restart-count validation also precedes the exit check. Completion rules and Swarm/stack targets are unchanged; restarting and over-budget members remain blockers.
 - Every captured completion container must be `exited`, exit code 0, and not restarting; health is not its readiness condition. A non-restarting nonzero exit returns cause-free `Failure("completion_failed")`; created, running or restarting containers remain pending.
 - Required `State.ExitCode` is a strict integer: missing or malformed values yield cause-free `malformed`. Do not default a missing code to success.
 - `unfinished_completion_containers` counts groups with any unfinished completion member, not individual containers in a Compose service; it stays bounded by `captured_services`.
 - `max_restarts` (`None` or nonnegative int, never bool) is validated before launch and frozen on both target types, unset by default. Wire `restart_count` stays an unvalidated `JsonValue`, so disabled budgets ignore bad data. Enabled, capture and every cycle require integer `RestartCount >= 0` on each long-running member, else cause-free `malformed`; completion members ignore it. `restart_budget_exceeded_containers` counts affected groups, is live (not monotonic, no new failure reason), and blocks success.
 - `wait_compose` and `wait_containers` delegate to `wait_groups`: after the first all-clear, run a second complete pass and require that pass clear too. Check observation before publishing `last_complete`; interruption retains only the previous complete cycle. `_compose._pause` uses `SLEEP_SLICE` (0.05 s), checks observation each slice, and caps the pause at the deadline.
-- Compose and standalone paths turn `ValidationError`/`ParsingError` into cause-free `malformed`; `completion_failed` is cause-free too. Other observation errors keep their cause. Swarm parsing failures stay `observation` with cause; preserve that split.
+- Compose and standalone paths turn `ValidationError`/`ParsingError` into cause-free `malformed`; `completion_failed` and `exited` are cause-free too. Other observation errors keep their cause. Swarm parsing failures stay `observation` with cause; preserve that split. Keep `Failure.reason` and reconciliation's `ConvergenceSummary` literals aligned.
 
 ## Tests
 
@@ -61,7 +62,7 @@ Read-only observation of captured Swarm service/job generations, a fixed stack, 
 
 - Tests swap `time` in `_wait`, `_compose`, and `pywhales._observation`, patch `_wait.check_service`, and spy on `_wire.run`. Keep those module-level call sites or update the tests.
 - Hung-child tests assert reaping, so cancellation and deadline paths must still kill the local CLI.
-- Coverage includes standalone name/prefix capture, fixed membership, completion/restart rules, Swarm jobs, strict malformed output, count bounds, and the second all-clear pass.
+- Coverage includes standalone name/prefix capture, fixed membership, completion/restart rules, opt-in exit failure on first/confirming passes with default compatibility, Swarm jobs, strict malformed output, count bounds, and the second all-clear pass. `tests/pywhales/test_reconciliation.py` covers the closed `exited` journal projection.
 
 ```bash
 uv run --locked pytest tests/pywhales/test_convergence.py -q

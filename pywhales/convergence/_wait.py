@@ -116,6 +116,7 @@ def capture_compose(
     *,
     completion_services: tuple[str, ...] = (),
     max_restarts: int | None = None,
+    fail_on_exit: bool = False,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -132,7 +133,8 @@ def capture_compose(
         client: Client whose configuration selects the Compose project.
         services: Explicit, distinct service names; never inferred by discovery.
             A service not marked as a completion service is long-running: its
-            containers must be ``running``, so an exited one-shot blocks ``wait``.
+            containers must be ``running``, so an exited one-shot blocks ``wait``
+            by default.
         completion_services: Distinct names, a subset of ``services``, that are
             expected to run once and exit. Such a service is done when every
             captured container is ``exited`` with code 0 and not restarting, and a
@@ -146,6 +148,8 @@ def capture_compose(
             assumed monotonic, so a later within-budget reading clears the blocker.
             Completion services ignore it. A missing, negative or non-integer
             count on an enabled long-running container is ``malformed``.
+        fail_on_exit: Fail on a non-restarting long-running container's exit,
+            regardless of exit code, unless it exceeds its restart budget.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -159,10 +163,10 @@ def capture_compose(
         ValueError: If the timeout is invalid, services isn't a nonempty tuple of
             distinct nonempty names, completion_services isn't a tuple of distinct
             selected names, max_restarts isn't ``None`` or a nonnegative integer,
-            or the client is in dry-run mode.
+            fail_on_exit isn't a bool, or the client is in dry-run mode.
     """
     _positive(timeout)
-    selection = Selection(services, completion_services, max_restarts)
+    selection = Selection(services, completion_services, max_restarts, fail_on_exit)
     validate_selection(client.client_config, selection)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
     return capture_project(client.client_config, selection, scope)
@@ -174,6 +178,7 @@ def capture_containers(
     *,
     completion: tuple[str, ...] = (),
     max_restarts: int | None = None,
+    fail_on_exit: bool = False,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -185,6 +190,8 @@ def capture_containers(
         references: Nonempty tuple of distinct container names or ID prefixes.
         completion: Distinct selected references expected to exit successfully.
         max_restarts: Optional nonnegative restart budget for long-running members.
+        fail_on_exit: Fail on a non-restarting long-running container's exit,
+            regardless of exit code, unless it exceeds its restart budget.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -193,15 +200,13 @@ def capture_containers(
         A fixed target, or a typed failure, deadline, or cancellation outcome.
 
     Raises:
-        ValueError: If the timeout, selection, restart budget, or client is invalid.
+        ValueError: If the timeout, selection, restart budget, flag, or client is invalid.
     """
     _positive(timeout)
-    selection = Selection(references, completion, max_restarts)
+    selection = Selection(references, completion, max_restarts, fail_on_exit)
     validate_selection(client.client_config, selection)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
-    return capture_selected(
-        client.client_config, references, completion, max_restarts, scope
-    )
+    return capture_selected(client.client_config, selection, scope)
 
 
 def wait(
@@ -224,6 +229,8 @@ def wait(
             0 and not restarting, and fail as ``completion_failed`` on a nonzero
             exit that isn't restarting. A target with ``max_restarts`` also needs
             every long-running container's ``RestartCount`` within that budget.
+            With ``fail_on_exit``, an exited non-restarting long-running container
+            within that budget fails as ``exited`` instead of blocking.
         policy: Required per-launch observation bounds.
         timeout: Positive finite total seconds from entry.
         poll_interval: Positive finite seconds between observations.

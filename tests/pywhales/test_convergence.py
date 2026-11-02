@@ -2904,3 +2904,224 @@ def test_standalone_cancellation_reaps_hung_inspection(
     assert not worker.is_alive()
     assert results == [Cancelled()]
     assert_reaped(processes)
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("exit_code", [0, 137])
+@pytest.mark.parametrize("confirming", [False, True])
+def test_fail_on_exit_observes_first_or_confirming_pass(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    exit_code: int,
+    confirming: bool,
+) -> None:
+    ready = container(A)
+    exited = container(A, status="exited", exit_code=exit_code)
+    stages = [ready, ready, exited] if confirming else [ready, exited]
+    if kind == "compose":
+        store_compose(tmp_path, *(snapshot(stage) for stage in stages))
+        target = capture_compose(
+            fake_cli, ("web",), fail_on_exit=True, policy=policy, timeout=5
+        )
+    else:
+        store_standalone(tmp_path, {A: [[stage] for stage in stages]})
+        target = capture_containers(
+            fake_cli, (A,), fail_on_exit=True, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_exit is True
+    attribute = next(
+        field.name for field in fields(target) if field.name == "fail_on_exit"
+    )
+    with pytest.raises(FrozenInstanceError):
+        setattr(target, attribute, False)
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="exited")
+    assert isinstance(result, Failure) and result.cause is None
+    assert len([call for call in calls_of(tmp_path) if call == inspection(A)]) == len(
+        stages
+    )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("invalid", [0, 1, None, "true", [], 1.0])
+def test_fail_on_exit_rejects_non_bool_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    invalid: object,
+) -> None:
+    value: Any = invalid
+    with pytest.raises(ValueError):
+        if kind == "compose":
+            capture_compose(
+                fake_cli, ("web",), fail_on_exit=value, policy=policy, timeout=5
+            )
+        else:
+            capture_containers(
+                fake_cli, (A,), fail_on_exit=value, policy=policy, timeout=5
+            )
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("blocker", ["restarting", "over_budget"])
+def test_fail_on_exit_preserves_restart_blockers(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    blocker: str,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    member = container(
+        A, status="exited", restarting=blocker == "restarting", restarts=2
+    )
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(member))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            fail_on_exit=True,
+            max_restarts=2 if blocker == "restarting" else 1,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[member]]})
+        target = capture_containers(
+            fake_cli,
+            (A,),
+            fail_on_exit=True,
+            max_restarts=2 if blocker == "restarting" else 1,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Deadline(
+        DeadlineDetail(
+            1,
+            non_running_containers=1,
+            restarting_containers=int(blocker == "restarting"),
+            restart_budget_exceeded_containers=int(blocker == "over_budget"),
+        )
+    )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_fail_on_exit_keeps_completion_semantics(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    exit_code: int,
+) -> None:
+    member = container(A, status="exited", exit_code=exit_code)
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(member))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            completion_services=("web",),
+            fail_on_exit=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[member]]})
+        target = capture_containers(
+            fake_cli, (A,), completion=(A,), fail_on_exit=True, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == (
+        Success() if exit_code == 0 else Failure(reason="completion_failed")
+    )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+def test_fail_on_exit_requires_valid_restart_counts_for_the_complete_evaluation(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    ready_a, ready_b = container(A, restarts=0), container(B, restarts=0)
+    exited = container(A, status="exited", restarts=0)
+    malformed = container(B, restarts=0)
+    malformed["RestartCount"] = "bad"
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(ready_a, ready_b), snapshot(exited, malformed))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            fail_on_exit=True,
+            max_restarts=0,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(
+            tmp_path, {A: [[ready_a], [exited]], B: [[ready_b], [malformed]]}
+        )
+        target = capture_containers(
+            fake_cli,
+            (A, B),
+            fail_on_exit=True,
+            max_restarts=0,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="malformed")
+    assert isinstance(result, Failure) and result.cause is None
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+def test_fail_on_exit_rejects_malformed_exit_code_without_cause(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    ready = container(A)
+    malformed = container(A, status="exited")
+    malformed["State"]["ExitCode"] = "0"
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(ready), snapshot(malformed))
+        target = capture_compose(
+            fake_cli, ("web",), fail_on_exit=True, policy=policy, timeout=5
+        )
+    else:
+        store_standalone(tmp_path, {A: [[ready], [malformed]]})
+        target = capture_containers(
+            fake_cli, (A,), fail_on_exit=True, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="malformed")
+    assert isinstance(result, Failure) and result.cause is None
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+def test_target_exit_policy_defaults_false_and_rejects_invalid_values(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(container(A)))
+        target = capture_compose(fake_cli, ("web",), policy=policy, timeout=5)
+    else:
+        store_standalone(tmp_path, {A: [[container(A)]]})
+        target = capture_containers(fake_cli, (A,), policy=policy, timeout=5)
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_exit is False
+    invalid: Any = 1
+    with pytest.raises(ValueError):
+        replace(target, fail_on_exit=invalid)
