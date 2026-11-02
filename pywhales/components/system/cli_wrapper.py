@@ -194,6 +194,8 @@ class SystemCLI(DockerCLICaller):
         all: bool = False,
         volumes: bool = False,
         filters: Mapping[str, str] | Iterable[SystemPruneFilter] = MappingProxyType({}),
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Remove unused Docker data without a confirmation prompt.
 
@@ -207,15 +209,18 @@ class SystemCLI(DockerCLICaller):
                 `filters=[("label!", "keep"), ("label!", "protect")]`. Pairs
                 keep their order and repeated keys, and an iterator is read
                 once. The documented keys are `until`, `label`, and `label!`.
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
         """
+        validate_timeout(timeout)
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "system", "prune", "--force"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_flag("--volumes", volumes)
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)

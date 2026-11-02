@@ -769,16 +769,21 @@ class ImageCLI(DockerCLICaller):
         self,
         all: bool = False,
         filters: Iterable[ImageListFilter] = (),
+        *,
+        timeout: float | None = None,
     ) -> str:
         """Remove unused images without prompting.
 
         Args:
             all: Remove all unused images, not just dangling ones
             filters: Provide filter values (e.g. `[("until", "<timestamp>")]`)
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
 
         Returns:
             The output of the CLI (the layers removed).
         """
+        validate_timeout(timeout)
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "image", "prune", "--force"])
@@ -786,7 +791,7 @@ class ImageCLI(DockerCLICaller):
         full_cmd.add_args_iterable(
             "--filter", (f"{key}={value}" for key, value in filters)
         )
-        return run(full_cmd)
+        return run(full_cmd, timeout=timeout)
 
     @overload
     def pull(

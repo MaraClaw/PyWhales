@@ -439,7 +439,7 @@ def _check_compose_push_and_watch_deadlines(
     )
 
 
-def _check_buildx_prune_deadlines(
+def _check_prune_deadlines(
     client: DockerClient, timeout: float | None, flag: bool
 ) -> None:
     assert_type(client.buildx.prune(timeout=timeout), None)
@@ -452,6 +452,16 @@ def _check_buildx_prune_deadlines(
         client.buildx.prune(stream_logs=flag, timeout=timeout),
         MappedProcessStream[str] | None,
     )
+    assert_type(client.container.prune(timeout=timeout), None)
+    assert_type(client.container.prune((), False, timeout=timeout), None)
+    assert_type(
+        client.container.prune(stream_logs=True, timeout=timeout), ProcessStream
+    )
+    assert_type(client.container.prune((), flag, timeout=timeout), ProcessStream | None)
+    assert_type(client.image.prune(True, (("until", "1h"),), timeout=timeout), str)
+    assert_type(client.network.prune((("until", "1h"),), timeout=timeout), None)
+    assert_type(client.volume.prune((("until", "1h"),), True, timeout=timeout), None)
+    assert_type(client.system.prune(True, True, {"until": "1h"}, timeout=timeout), None)
 
 
 def _check_service_deadlines(

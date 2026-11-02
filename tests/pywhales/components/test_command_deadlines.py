@@ -11,6 +11,7 @@ import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from threading import Event
 from time import perf_counter, sleep
 from typing import Literal, assert_never
 
@@ -18,12 +19,20 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pywhales import Container, DockerClient, Image, utils
+from pywhales._observation import observation
 from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.service.cli_wrapper import Service
 from pywhales.components.system.models import DockerEvent
-from pywhales.exceptions import DockerException, DockerTimeout
+from pywhales.exceptions import (
+    DockerException,
+    DockerTimeout,
+    NoSuchContainer,
+    ObservationCancelled,
+    ObservationLimitError,
+)
+from pywhales.inventory import InspectionPolicy
 from pywhales.utils import MappedProcessStream, ProcessStream
 
 type Operation = Literal["run", "execute", "instance", "compose", "build", "bake"]
@@ -72,7 +81,7 @@ for words, seconds in json.loads(os.environ.get('PYWHALES_TEST_DELAYS', '{}')).i
 if selected('PYWHALES_TEST_BLOCK_ON'):
     threading.Event().wait(60)
 if selected('PYWHALES_TEST_FAIL_ON'):
-    print('induced failure', file=sys.stderr)
+    print(os.environ.get('PYWHALES_TEST_FAILURE', 'induced failure'), file=sys.stderr)
     sys.exit(3)
 if args[:2] == ['buildx', 'inspect']:
     print('Name: selected')
@@ -1029,6 +1038,11 @@ type LongLaunch = Literal[
     "compose_push",
     "compose_watch",
     "buildx_prune",
+    "container_prune",
+    "image_prune",
+    "network_prune",
+    "volume_prune",
+    "system_prune",
 ]
 EAGER_LAUNCHES: tuple[LongLaunch, ...] = (
     "image_push",
@@ -1038,6 +1052,11 @@ EAGER_LAUNCHES: tuple[LongLaunch, ...] = (
     "handle_start",
     "compose_push",
     "buildx_prune",
+    "container_prune",
+    "image_prune",
+    "network_prune",
+    "volume_prune",
+    "system_prune",
 )
 STREAM_LAUNCHES: tuple[LongLaunch, ...] = (
     "image_push",
@@ -1047,6 +1066,7 @@ STREAM_LAUNCHES: tuple[LongLaunch, ...] = (
     "handle_start",
     "compose_watch",
     "buildx_prune",
+    "container_prune",
 )
 LAUNCH_PREFIX: dict[LongLaunch, list[str]] = {
     "image_push": ["image", "push"],
@@ -1057,6 +1077,11 @@ LAUNCH_PREFIX: dict[LongLaunch, list[str]] = {
     "compose_push": ["compose", "push"],
     "compose_watch": ["compose", "watch"],
     "buildx_prune": ["buildx", "prune"],
+    "container_prune": ["container", "prune"],
+    "image_prune": ["image", "prune"],
+    "network_prune": ["network", "prune"],
+    "volume_prune": ["volume", "prune"],
+    "system_prune": ["system", "prune"],
 }
 BAD_TIMEOUTS = [0.0, -1.0, float("inf"), float("-inf"), float("nan"), True, False]
 
@@ -1111,6 +1136,16 @@ def launch_long(
             return client.compose.watch("web", timeout=timeout)
         case "buildx_prune":
             return client.buildx.prune(stream_logs=stream, timeout=timeout)
+        case "container_prune":
+            return client.container.prune(stream_logs=stream, timeout=timeout)
+        case "image_prune":
+            return client.image.prune(timeout=timeout)
+        case "network_prune":
+            return client.network.prune(timeout=timeout)
+        case "volume_prune":
+            return client.volume.prune(timeout=timeout)
+        case "system_prune":
+            return client.system.prune(timeout=timeout)
         case unreachable:
             assert_never(unreachable)
 
@@ -1204,7 +1239,7 @@ def test_eager_long_launches_preserve_results(
 ) -> None:
     result = launch_long(client, operation, timeout=timeout)
 
-    if operation in ("container_start", "root_start", "handle_start"):
+    if operation in ("container_start", "root_start", "handle_start", "image_prune"):
         assert result == "container-id"
     else:
         assert result is None
@@ -1295,6 +1330,91 @@ def test_eager_long_launch_inherits_the_client_default_when_timeout_is_none(
 
 
 @pytest.mark.parametrize(
+    "operation",
+    ["container_prune", "image_prune", "network_prune", "volume_prune", "system_prune"],
+)
+def test_prune_override_replaces_default_without_mutating_it(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+) -> None:
+    copy_timeouts(client, monkeypatch, 600.0, " ".join(LAUNCH_PREFIX[operation]))
+
+    with pytest.raises(DockerTimeout):
+        launch_long(client, operation, timeout=0.4)
+
+    assert_reaped(tmp_path, LAUNCH_PREFIX[operation])
+    assert client.client_config.default_timeout == 600.0
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["container_prune", "image_prune", "network_prune", "volume_prune", "system_prune"],
+)
+def test_prune_longer_override_replaces_short_client_default(
+    client: DockerClient, monkeypatch: pytest.MonkeyPatch, operation: LongLaunch
+) -> None:
+    client.client_config.default_timeout = 0.4
+    monkeypatch.setenv(
+        "PYWHALES_TEST_DELAYS", json.dumps({" ".join(LAUNCH_PREFIX[operation]): 0.8})
+    )
+
+    result = launch_long(client, operation, timeout=5)
+
+    assert result == ("container-id" if operation == "image_prune" else None)
+    assert client.client_config.default_timeout == 0.4
+
+
+def test_container_prune_idle_stream_inherits_default_and_reaps(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    client.client_config.default_timeout = 1.0
+    stream = client.container.prune(stream_logs=True)
+    try:
+        assert stream._released.wait(timeout=3)
+        with pytest.raises(DockerTimeout) as expired:
+            next(stream)
+        assert expired.value.stdout is not None
+        assert "container-id" in expired.value.stdout
+        assert_released(stream)
+        assert_reaped(tmp_path, ["container", "prune"])
+        assert list(stream) == []
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize(
+    ("operation", "stream"),
+    [
+        ("container_prune", False),
+        ("container_prune", True),
+        ("image_prune", False),
+        ("network_prune", False),
+        ("volume_prune", False),
+        ("system_prune", False),
+    ],
+)
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_prune_preserves_observation_precedence(
+    client: DockerClient,
+    tmp_path: Path,
+    operation: LongLaunch,
+    stream: bool,
+    cancelled: bool,
+) -> None:
+    policy = InspectionPolicy(max_references=1, max_argv_bytes=1, max_response_bytes=1)
+    cancel = Event()
+    error = ObservationCancelled if cancelled else ObservationLimitError
+    with pytest.raises(error), observation(policy, cancel=cancel):
+        if cancelled:
+            cancel.set()
+        launch_long(client, operation, timeout=5, stream=stream)
+    assert launches_of(tmp_path) == []
+
+
+@pytest.mark.parametrize(
     ("operation", "stream"),
     [(operation, False) for operation in EAGER_LAUNCHES]
     + [(operation, True) for operation in STREAM_LAUNCHES],
@@ -1316,6 +1436,37 @@ def test_natural_nonzero_exit_keeps_exception_type(
     assert not isinstance(failed.value, DockerTimeout)
     assert failed.value.stderr is not None
     assert "induced failure" in failed.value.stderr
+
+
+@pytest.mark.parametrize(
+    ("operation", "stream"),
+    [
+        (operation, False)
+        for operation in (
+            "container_prune",
+            "image_prune",
+            "network_prune",
+            "volume_prune",
+            "system_prune",
+        )
+    ]
+    + [("container_prune", True)],
+)
+def test_prune_natural_failure_retains_stderr_classification(
+    client: DockerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+    stream: bool,
+) -> None:
+    client.client_config.strict_workload_errors = True
+    monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", " ".join(LAUNCH_PREFIX[operation]))
+    monkeypatch.setenv("PYWHALES_TEST_FAILURE", "Error: No such container: missing")
+    with pytest.raises(NoSuchContainer) as failed:
+        result = launch_long(client, operation, timeout=5, stream=stream)
+        if stream:
+            with owned_stream(result) as records:
+                list(records)
+    assert failed.value.return_code == 3
 
 
 @pytest.mark.parametrize("operation", STREAM_LAUNCHES)

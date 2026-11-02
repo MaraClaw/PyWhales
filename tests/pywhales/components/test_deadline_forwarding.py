@@ -22,6 +22,7 @@ from pywhales.components.compose import cli_wrapper as compose
 from pywhales.components.container import cli_wrapper as container
 from pywhales.components.image import cli_wrapper as image
 from pywhales.components.manifest import cli_wrapper as manifest
+from pywhales.components.network import cli_wrapper as network
 from pywhales.components.plugin import cli_wrapper as plugin
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.service import cli_wrapper as service
@@ -29,6 +30,7 @@ from pywhales.components.service.cli_wrapper import Service
 from pywhales.components.stack import cli_wrapper as stack
 from pywhales.components.swarm import cli_wrapper as swarm
 from pywhales.components.system import cli_wrapper as system
+from pywhales.components.volume import cli_wrapper as volume
 from pywhales.exceptions import DockerTimeout
 from pywhales.utils import ProcessStream, run, stream_stdout_and_stderr
 
@@ -905,6 +907,97 @@ def test_buildx_prune_validates_before_filters_and_launch(
     launch.assert_not_called()
 
 
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize(
+    "operation", ["container", "image", "network", "volume", "system"]
+)
+def test_prune_forwards_budget_and_preserves_filters_and_flags(
+    client: DockerClient,
+    mocker: MockerFixture,
+    operation: Literal["container", "image", "network", "volume", "system"],
+    timeout: float | None,
+) -> None:
+    modules = {
+        "container": container,
+        "image": image,
+        "network": network,
+        "volume": volume,
+        "system": system,
+    }
+    execute = mocker.patch.object(modules[operation], "run", return_value="removed")
+    filters: list[tuple[Literal["until"], str]] = [("until", "1h"), ("until", "2h")]
+    match operation:
+        case "container":
+            result = client.container.prune(filters, False, timeout=timeout)
+        case "image":
+            result = client.image.prune(True, filters, timeout=timeout)
+        case "network":
+            result = client.network.prune(filters, timeout=timeout)
+        case "volume":
+            result = client.volume.prune(filters, True, timeout=timeout)
+        case "system":
+            result = client.system.prune(True, True, filters, timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+    assert result == ("removed" if operation == "image" else None)
+    argv = [str(arg) for arg in execute.call_args.args[0]]
+    expected = [operation, "prune", "--force"]
+    if operation in ("image", "volume", "system"):
+        expected.append("--all")
+    if operation == "system":
+        expected.append("--volumes")
+    assert argv[1:] == [*expected, "--filter", "until=1h", "--filter", "until=2h"]
+    assert execute.call_args.kwargs == {"timeout": timeout}
+
+
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan"), True, False]
+)
+def test_prune_invalid_timeout_precedes_filter_effects_and_executable_lookup(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    lookup = mocker.spy(client.client_config, "get_client_call_with_path")
+    consumed: list[str] = []
+
+    def filters() -> Iterator[tuple[Literal["until"], str]]:
+        consumed.append("read")
+        yield ("until", "1h")
+
+    for call in (
+        lambda: client.container.prune(filters(), timeout=timeout),
+        lambda: client.container.prune(filters(), True, timeout=timeout),
+        lambda: client.image.prune(False, filters(), timeout=timeout),
+        lambda: client.network.prune(filters(), timeout=timeout),
+        lambda: client.volume.prune(filters(), timeout=timeout),
+        lambda: client.system.prune(filters=filters(), timeout=timeout),
+    ):
+        with pytest.raises(ValueError):
+            call()
+    assert consumed == []
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_container_prune_stream_forwards_budget(
+    client: DockerClient, mocker: MockerFixture, timeout: float | None
+) -> None:
+    launch = mocker.patch.object(container, "stream_stdout_and_stderr")
+    result = client.container.prune(stream_logs=True, timeout=timeout)
+    assert result is launch.return_value
+    assert launch.call_args.kwargs == {"timeout": timeout}
+
+
+@pytest.mark.parametrize("operation", ["container", "image", "network", "volume"])
+def test_prune_rejects_mapping_after_validating_timeout(
+    client: DockerClient, operation: str
+) -> None:
+    prune = getattr(client, operation).prune
+    with pytest.raises(ValueError):
+        prune(filters={"until": "1h"}, timeout=0)
+    with pytest.raises(TypeError):
+        prune(filters={"until": "1h"}, timeout=1)
+
+
 def test_long_launch_deadlines_are_keyword_only_in_every_overload(
     client: DockerClient,
 ) -> None:
@@ -924,6 +1017,16 @@ def test_long_launch_deadlines_are_keyword_only_in_every_overload(
         client.compose.push,
         buildx.BuildxCLI.prune,
         client.buildx.prune,
+        container.ContainerCLI.prune,
+        client.container.prune,
+        image.ImageCLI.prune,
+        client.image.prune,
+        network.NetworkCLI.prune,
+        client.network.prune,
+        volume.VolumeCLI.prune,
+        client.volume.prune,
+        system.SystemCLI.prune,
+        client.system.prune,
     ):
         for variant in (method, *get_overloads(method)):
             parameter = signature(variant).parameters["timeout"]
