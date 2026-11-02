@@ -6,7 +6,7 @@ Fake-only simulation and non-authorizing transport decisions; no README here. Re
 
 | File | Change here |
 | --- | --- |
-| `models.py` | Resolved manifest, `Step` with its optional `arrival_seconds`, bounded `Plan`, `authorize` preflight, load deadline and termination helpers |
+| `models.py` | Resolved manifest, `Step` with optional arrival/queue-lease settings, bounded `Plan`, `authorize` preflight, load deadline and termination helpers |
 | `runner.py` | Sequential loop, dispatch of scheduled plans, observation summaries, owned ledger, operation digest, and cleanup orchestration |
 | `scheduler.py` | Opt-in overlapping load: event heap, FIFO queue under global and per-action limits, tie ordering, early-stop drain |
 | `slots.py` | Slot-to-identity resolution and the asset cap, shared by the sequential and scheduled paths |
@@ -36,15 +36,17 @@ Fake-only simulation and non-authorizing transport decisions; no README here. Re
 - `scheduler.Simulation` admits FIFO under global `workload.concurrent_submissions` and per-action `operation_mix.concurrency`.
   A capped head blocks later actions; `wake` schedules one admission pass only when both head limits allow it, a waiter exists, and no stop/pass is pending.
   Phases, command counts, asset identities, and removals change at fake event time; never shift sequential timestamps to imitate overlap.
-- A deadline is `min(load deadline, arrival + operation timeout)`, including queue time. Queued expiry yields an unlaunched `timed_out`
-  receipt with no command or asset. Arrivals at/beyond the load deadline are excluded; `operation_count` termination slices the steps.
-- Tie order per instant, then submission: phase ends (final frees slot), queue expiries, plan-order arrivals, admissions. Preserve the `scheduler.py` docstring order.
+- A logical deadline is `min(load deadline, original arrival + operation timeout)`, including every queue attempt; retries never extend it. Arrivals at/beyond the load deadline are excluded; `operation_count` termination slices the steps.
+- Scheduled steps alone accept positive finite `queue_lease_seconds` and strict integer `max_queue_attempts >= 1` (includes the first attempt; omitted means one). More than one attempt requires a lease. Unset fields are omitted from reports and operation digests, preserving legacy plans; set fields bind the digest.
+- An unlaunched attempt expires at `min(enqueue + lease, logical deadline)`, or at the deadline without a lease. If expiry precedes the deadline and attempts remain, rejoin the FIFO tail at that instant; otherwise produce one unlaunched `timed_out` receipt with no command or asset. Launched work never retries.
+- Tie order per instant, then submission: phase ends (final frees slot), queue expiries, plan-order original arrivals, retries, admissions. Preserve the `scheduler.py` docstring order; retry FIFO uses attempt enqueue time, not original arrival.
 - A terminal event that stops the load (failure/unknown/resource limit, or the asset cap at admission) cancels queued
-  work, drops later arrivals, and lets active operations drain through their own deadlines before the `finally` cleanup.
+  and pending-retry work, drops later arrivals, and lets active operations drain through their own deadlines before the `finally` cleanup.
 - Same-slot work resolves the latest live identity at admission. A removal commits at its phase end only if that is
   before its deadline and the identity is still live; later starts then fail instead of using a stale resource.
 - `Schedule` is frozen: receipts bind actions; `peaks.per_action` is canonical, sorted by action, and includes launched actions only.
-  Recount active `[admission, terminal)` and queued `[arrival, admission or unlaunched terminal)` spans, settled per timestamp.
+  Recount active `[admission, terminal)` and every queued attempt's `[enqueued_seconds, ended_seconds)` span, settled per timestamp; legacy receipts without `attempts` retain `[arrival, admission or unlaunched terminal)`.
+- Leased receipts retain contiguous, non-overlapping attempt lineage within the lease/deadline/attempt budget, with at most one admission. `Schedule.coherent` and `timeline.lineage`/`is_ordered`/`peak_counts`/`reconcile` must agree and reject tampering. Each logical submission still has one terminal outcome and one queue-wait sample measured from original arrival; exported `all_submissions` counts submissions, not retries.
 - Pydantic validation types are fixed and payload-free: `schedule_order` (numbering/FIFO), `schedule_peaks` (receipt recount,
   including per-action peaks), `schedule_binding` (actions, offsets, repetitions, status, sequential/scheduled),
   `schedule_concurrency` (global/per-action cap), `schedule_times` (sample order/times, window, deadline).
@@ -70,7 +72,7 @@ The CLI sanitizes `schedule_*` types to `invalid` plus a schema-known path (for 
 ## Focused Checks
 
 Tests under `tests/pywhales/`: `test_fleet_harness.py` covers preflight, stops, retention, cleanup/residuals, accounting, compatibility,
-and overlap (simultaneous arrivals, expiry/ties, same-slot lifecycle, drain, injected-failure cleanup, tampering); its `overlap_manifest`,
+and overlap (simultaneous arrivals, lease retries/exhaustion, original deadlines, no retries after launch, pending-retry cancellation, legacy digests, same-slot lifecycle, drain, injected-failure cleanup, lineage tampering); its `overlap_manifest`,
 `overlap_plan` and `at` helpers are reused. `test_fleet_harness_cli.py` covers exits/sanitized errors with Docker absent from `PATH`;
 `test_transport_experiment.py` covers comparisons, `test_fleet_report.py` overlapping exports, `test_json_tooling.py` digests/SDK independence.
 Root ty omits scripts. Include both packages explicitly for a scoped check from the repository root:

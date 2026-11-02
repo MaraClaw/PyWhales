@@ -488,3 +488,31 @@ def test_decision_cli_when_scheduled_candidate_is_tampered_rejects_without_launc
     assert {error["code"] for error in json.loads(output.stderr)["errors"]} == {
         "invalid"
     }
+
+
+def test_lease_retry_cli_runs_and_rejects_tampered_lineage(tmp_path: Path) -> None:
+    declaration = tmp_path / "manifest.json"
+    declaration.write_text(overlap_manifest(1, "operation_count", 2).model_dump_json())
+    recipe = tmp_path / "plan.json"
+    recipe.write_text(
+        overlap_plan(
+            at(0.0, 1.5), at(0.0, queue_lease_seconds=1.0, max_queue_attempts=2)
+        ).model_dump_json()
+    )
+    result = invoke(
+        ["run", "--manifest", str(declaration), "--input", str(recipe)], tmp_path
+    )
+    assert result.returncode == 0
+    report = json.loads(result.stdout)
+    assert report["submitted"] == 2 and report["command_count"] == 2
+    assert len(report["schedule"]["receipts"][1]["attempts"]) == 2
+    report["schedule"]["receipts"][1]["attempts"][1]["enqueued_seconds"] = 0.9
+    path = tmp_path / "tampered.json"
+    path.write_text(json.dumps(report))
+    exported = invoke(
+        ["export", "--manifest", str(declaration), "--input", str(path)], tmp_path
+    )
+    assert exported.returncode == 2 and exported.stdout == ""
+    assert json.loads(exported.stderr) == {
+        "errors": [{"code": "invalid", "path": "$.schedule"}]
+    }

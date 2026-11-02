@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Literal, Self, assert_never
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from scripts.fleet_contract.common import (
@@ -105,6 +105,13 @@ class Environment(Contract):
         )
 
 
+class QueueAttempt(Contract):
+    """One half-open queue interval for a logical submission."""
+
+    enqueued_seconds: Amount
+    ended_seconds: Amount
+
+
 class Receipt(Contract):
     """Arrival, admission and terminal time of one submission.
 
@@ -118,6 +125,9 @@ class Receipt(Contract):
     admitted_seconds: Amount | None
     terminal_seconds: Amount
     outcome: Outcome
+    attempts: tuple[QueueAttempt, ...] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
 
 class Peaks(Contract):
