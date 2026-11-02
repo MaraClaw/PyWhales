@@ -1,22 +1,31 @@
 # Convergence Contracts
 
-Read-only observation of captured Swarm service/job generations, a fixed stack, selected Compose services, or standalone containers. Nothing here creates, updates, or rolls back daemon state. Observation scopes, launch limits, and local process cleanup are in [the shared runtime guide](../AGENTS.md).
+Read-only observation of captured Swarm service/job generations, a fixed stack, selected Swarm nodes, selected Compose services, or standalone containers. Nothing here creates, updates, or rolls back daemon state. Observation scopes, launch limits, and local process cleanup are in [the shared runtime guide](../AGENTS.md).
 
 ## Local Navigation
 
-- `__init__.py` re-exports the public names. `_wait.py` holds `capture_service`, `capture_compose`, `capture_containers`, `wait`, and the Swarm polling loop.
+- `__init__.py` re-exports the public names. `_wait.py` holds `capture_service`, `capture_nodes`, `capture_compose`, `capture_containers`, `wait`, and the Swarm polling loop.
 - `_types.py`: frozen targets and outcomes. `_wire.py`: strict Pydantic projections, inspect helpers, standalone reference resolution, and generation fences.
 - `_service.py`: `check_service` and `ServiceObservation` for Swarm. `_container.py`: standalone capture, `check_containers`, and `wait_containers`.
+- `_node.py`: fixed-node capture, `check_nodes`, and `wait_nodes`; it shares complete-pass confirmation with grouped targets, not service generation fences.
 - `_compose.py`: Compose capture and `check_compose`; shared `evaluate_groups`/`wait_groups` also serve standalone targets. `_pause` stays here, not in `_wait.py` or `_container.py`.
 
 ## Types And Outcomes
 
-- Dataclasses are frozen and slotted. `client_config` is `repr=False, compare=False` on `ServiceTarget`, `ComposeTarget`, and `ContainerTarget`, as is `Failure.cause`; `template` and `approved_node_ids` leave `repr` but stay in equality. Preserve that distinction between client settings and captured generation data.
+- Dataclasses are frozen and slotted. `client_config` is `repr=False, compare=False` on `ServiceTarget`, `NodeTarget`, `ComposeTarget`, and `ContainerTarget`, as is `Failure.cause`; `template` and `approved_node_ids` leave `repr` but stay in equality. Preserve that distinction between client settings and captured generation data.
 - `StackTarget` fixes a nonempty tuple of distinct service IDs. Global services/jobs require a nonempty tuple of distinct approved node IDs; replicated services/jobs take no approved nodes.
 - `Deadline` accepts only a concrete `DeadlineDetail` (`type(...) is`), so a subclass can't smuggle a payload. Per-reason integer counts stay in `0..captured_services`, with no identities, tasks, containers, settings, or causes. Each standalone container is one `captured_services` unit; Compose counts affected services, once per reason even with multiple blocked containers.
 - Detail is the latest complete cycle, never a partial one or a fresh inspection at expiry. It is absent when capture expired or no cycle finished.
 - Swarm readiness is `ServiceObservation.ready`; grouped container success is `_settled`, an all-zero blocker `DeadlineDetail`. A new Swarm blocker needs a flag plus `summarize`; a new group counter blocks by default once populated. Every new counter joins the bounds tuple in `DeadlineDetail.__post_init__`.
 - Capture/wait timeouts and `poll_interval` must be positive finite seconds, never bool. Required observation policies bound launches; cleanup may outlast the deadline and stops only local CLI processes, not daemon-side work.
+
+## Swarm Node Readiness
+
+- `capture_nodes()` accepts a nonempty tuple of distinct exact node IDs and an explicit distinct `manager_ids` tuple drawn from that selection. Validate inputs and dry-run settings before lookup. `NodeTarget` fixes both tuples and retains the originating config; never resolve names or refresh membership during a wait.
+- Each selected node must be `ready` and `active`. Designated managers must also retain role `manager` and report `reachable`; leadership is irrelevant. Demotion or absent manager status remains pending. Workers need no manager status, and `Version.Index` changes never supersede node recovery.
+- `_wire.py` owns strict minimal node projections, known state/availability/role/reachability values, and exact returned identity. Only the exact missing-node response is absence: during capture it is `observation` with its cause; during wait it is cause-free `superseded`. Permission and transport failures keep their existing classification.
+- Require two complete all-clear passes through `wait_groups`, including observation checkpoints before publishing a cycle. Interrupted partial or confirming passes retain only the last published complete cycle; hung inspections still require local-child cleanup.
+- Each node is one `captured_services` readiness unit. `non_ready_nodes`, `unavailable_nodes`, `non_manager_nodes`, and `unreachable_managers` are bounded strict integer counts, not identities. Keep them in deadline-detail validation and reconciliation/store serialization; do not add node IDs to service fields or new `Failure.reason` literals.
 
 ## Wire And Identity
 
@@ -63,6 +72,7 @@ Read-only observation of captured Swarm service/job generations, a fixed stack, 
 - Tests swap `time` in `_wait`, `_compose`, and `pywhales._observation`, patch `_wait.check_service`, and spy on `_wire.run`. Keep those module-level call sites or update the tests.
 - Hung-child tests assert reaping, so cancellation and deadline paths must still kill the local CLI.
 - Coverage includes standalone name/prefix capture, fixed membership, completion/restart rules, opt-in exit failure on first/confirming passes with default compatibility, Swarm jobs, strict malformed output, count bounds, and the second all-clear pass. `tests/pywhales/test_reconciliation.py` covers the closed `exited` journal projection.
+- Node cases cover recovery/version changes, manager demotion, malformed projections, disappearance, confirming-pass regression, partial-cycle retention and cancelled hung-child reaping. `test_convergence_types.py` checks `NodeTarget`/`capture_nodes`; `test_reconciliation_store.py` checks integer-only node blocker round trips.
 
 ```bash
 uv run --locked pytest tests/pywhales/test_convergence.py -q

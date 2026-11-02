@@ -20,7 +20,7 @@ client = DockerClient(telemetry_observer=observe)
 ```
 
 Set `telemetry_observer` on `DockerClient` or `ClientConfig` to receive
-immutable `LaunchRecord` and `CompletionRecord` objects from the shared captured,
+immutable `LaunchRecord`, `CompletionRecord`, and `RefusalRecord` objects from the shared captured,
 streaming, and direct archive execution paths. This isn't a guarantee that every
 possible subprocess path is audited. The observer is snapshotted by reference at each
 launch, alongside the rest of the execution policy; later config mutations
@@ -28,8 +28,8 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=5` for launch,
-completion, and admission decision records. On execution records, `family` is
+The vocabulary is closed and currently at `schema_version=6` for launch,
+completion, refusal, and admission decision records. On execution records, `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
 [Registry transfers and archives](registry-and-archives.md) for exactly
@@ -37,16 +37,33 @@ which image operations use the archive families. `outcome` on
 `CompletionRecord` is `"success"`, `"failure"`, `"timeout"`, `"closed"`,
 `"cancelled"` (an `ObservationCancelled`), or `"limit"` (an
 `ObservationLimitError` after launch, including a `max_total_stream_bytes`
-overflow, a `max_total_stdin_bytes` refusal, or a `native_argv` refusal).
+overflow, a `max_total_stdin_bytes` limit, or a post-start `native_argv` failure).
 `ObservationTimeout` and `DockerTimeout`
-stay `"timeout"` and `KeyboardInterrupt` stays `"failure"`; a rejection before
-launch emits no record. A stream reports the outcome of the error it delivers
+stay `"timeout"` and `KeyboardInterrupt` stays `"failure"`. A stream reports the outcome of the error it delivers
 (deadline, then scope stop, then reader error), and `close()` keeps a stop
 recorded before it, such as a set cancel token; with none it reports
 `"closed"`. Each launch attempt has one opaque random `attempt_id`, shared with
 at most one completion. `LaunchRecord.admission_id` is the innermost observed
 admission's opaque ID, or `None` outside one; join completion to launch by
 `attempt_id`. Completion records don't repeat the admission ID.
+
+An observation cancellation, deadline or limit exception escaping launch
+preflight emits exactly one `RefusalRecord` (`phase="refusal"`), then re-raises
+the original exception before any spawn. Its fields are fixed `family`, opaque
+`attempt_id`, optional `admission_id`, schema version, phase, and a closed
+`outcome` of `"cancelled"`, `"timeout"`, or `"limit"`. There is no matching
+launch/completion, duration, byte count or return code. Earlier argument
+validation and environment-resolution failures stay outside this contract;
+an observation rejected at scope entry also hasn't reached launch preflight.
+A native argv failure after launch telemetry starts instead keeps its launch
+and `"limit"` completion.
+
+This covers captured execution, process streams, byte/iterator image load, and
+lazy archive save. A lazy save emits its archive refusal only at first iteration
+with that launch's snapshotted observer; eager image inspection can independently
+emit captured records. Filename-based transfers retain their regular families.
+With no execution observer, refusal handling adds no telemetry IDs, clocks or
+callbacks. Ordinary callback exceptions cannot replace the refused exception.
 
 Records never include commands, arguments, endpoint addresses, environment
 keys or values, endpoint aliases, pressure-class names, callables,
@@ -106,7 +123,7 @@ exhaust owned streams before shutdown if their completion records still
 matter.
 
 `queued` and `export_errors` expose buffer/sink status. Launch, completion,
-and admission decision records can be dropped independently: don't assume every
+refusal, and admission decision records can be dropped independently: don't assume every
 exported launch has an exported completion or decision. The application owns
 flushing, sink privacy, and shutdown.
 
@@ -208,7 +225,7 @@ ones.
 
 ## Measure Admission Waits And Correlate Launches
 
-Configure both observers to receive decisions and the launches they admit. They
+Configure both observers to receive decisions and the launches or preflight refusals they admit. They
 can use the same callable or `BoundedExporter`:
 
 ```python
@@ -220,7 +237,12 @@ from pywhales.admission import (
     PressureClass,
     SaturationPolicy,
 )
-from pywhales.telemetry import AdmissionDecisionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry import (
+    AdmissionDecisionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    TelemetryRecord,
+)
 
 records: list[TelemetryRecord] = []
 client = DockerClient(telemetry_observer=records.append)
@@ -238,7 +260,7 @@ decisions = {
 }
 for record in records:
     if (
-        isinstance(record, LaunchRecord)
+        isinstance(record, (LaunchRecord, RefusalRecord))
         and record.admission_id is not None
         and record.admission_id in decisions
     ):
@@ -262,7 +284,7 @@ and stream locks, on the deciding thread (which may be the cancelling/closing
 thread). Ordinary observer exceptions don't change admission results or interfere
 with permit release. Keep callbacks quick and thread-safe as for execution telemetry.
 
-Launches during the admitted call, stream factory, source entry, every `next()`,
+Launches and preflight refusals during the admitted call, stream factory, source entry, every `next()`,
 and source exit carry its ID. Nested different owners use the innermost ID and
 restore the outer ID on exit; an inner owner without an observer uses `None`.
 Outside admission the ID resets to `None`. Returning an unconsumed stream from

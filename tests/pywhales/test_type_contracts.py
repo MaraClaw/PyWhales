@@ -87,6 +87,9 @@ def _check_process_contracts(client: DockerClient, raw: bool) -> None:
 
 def _check_owned_stream_contracts(client: DockerClient, flag: bool) -> None:
     assert_type(client.container.prune(stream_logs=flag), ProcessStream | None)
+    assert_type(
+        client.container.prune(stream_logs=flag, timeout=1), ProcessStream | None
+    )
     assert_type(client.run("image", stream=flag), Container | str | ProcessStream)
     with client.run("image", stream=True) as stream:
         assert_type(stream, ProcessStream)
@@ -232,6 +235,7 @@ def _check_mapping_or_pair_filter_contracts(
         None,
     )
     assert_type(client.system.prune(filters=prune_pairs), None)
+    assert_type(client.system.prune(filters=prune_pairs, timeout=1), None)
     assert_type(client.system.prune(True, True, (("until", "1h"),)), None)
 
     assert_type(client.buildx.prune(filters={"until": "24h"}), None)

@@ -61,6 +61,11 @@
   Direct archive load/save subprocesses snapshot `raw_diagnostics` before launch for failure rendering;
   preserve archive payloads, exception classes, and raw attributes. Don't promise archive memory bounds.
 - Automatic missing-image reference diagnostics require `raw_diagnostics=True`; fallback behavior is unchanged.
+- Observation exceptions from `_prepare_archive_launch` preflight emit one schema-6 refusal in family `archive_load` or `archive_save`, before a child or upload read. Lazy save checks at first iteration with its policy-snapshotted observer; path-based load/save keep their existing shared-runtime families without duplicate records. Earlier validation stays outside refusal telemetry; see [the runtime guide](../../AGENTS.md#telemetry).
+
+## Prune Deadline
+
+- `prune()` retains its `str` result and positional `filters`/`all`; keyword-only `timeout` validates before filters or executable lookup. `None` inherits the launch-snapshotted client default; explicit values override without config mutation. Preserve pair-filter order and mapping rejection, and never add a Docker timeout flag or retry after an ambiguous local timeout. Shared deadline tests cover partial output, reaping, defaults, invalid inputs and natural failures.
 
 ## Test Navigation
 

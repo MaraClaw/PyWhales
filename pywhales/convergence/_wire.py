@@ -1,6 +1,7 @@
 """Preserve complete wire templates while validating required observation fields."""
 
 import hashlib
+from typing import Literal
 
 from pydantic import (
     BaseModel,
@@ -14,6 +15,7 @@ from pydantic import (
 from pywhales._json import dumps_compat, loads_compat
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.convergence._types import Failure, ServiceTarget
+from pywhales.exceptions import DockerException
 from pywhales.utils import run
 
 
@@ -67,6 +69,44 @@ class TaskWire(BaseModel):
     status: TaskStatus = Field(alias="Status")
     spec: dict[str, JsonValue] | None = Field(default=None, alias="Spec")
     job_iteration: JobIteration | None = Field(default=None, alias="JobIteration")
+
+
+class NodeSpec(BaseModel):
+    model_config = ConfigDict(strict=True)
+    role: Literal["worker", "manager"] = Field(alias="Role")
+    availability: Literal["active", "pause", "drain"] = Field(alias="Availability")
+
+
+class NodeStatus(BaseModel):
+    model_config = ConfigDict(strict=True)
+    state: Literal["unknown", "down", "ready", "disconnected"] = Field(alias="State")
+
+
+class NodeManagerStatus(BaseModel):
+    model_config = ConfigDict(strict=True)
+    reachability: Literal["unknown", "unreachable", "reachable"] = Field(
+        alias="Reachability"
+    )
+
+
+class NodeWire(BaseModel):
+    """Only the fields needed to evaluate an immutable node identity."""
+
+    model_config = ConfigDict(strict=True)
+    id: str = Field(alias="ID", min_length=1)
+    spec: NodeSpec = Field(alias="Spec")
+    status: NodeStatus = Field(alias="Status")
+    manager_status: NodeManagerStatus | None = Field(
+        default=None, alias="ManagerStatus"
+    )
+
+
+class NodeMissing(Exception):
+    """An exact missing-node response retaining its original CLI exception."""
+
+    def __init__(self, cause: DockerException) -> None:
+        self.cause = cause
+        super().__init__("The selected node is missing.")
 
 
 class ContainerHealth(BaseModel):
@@ -180,6 +220,24 @@ def inspect_service(config: ClientConfig, service_id: str) -> ServiceWire:
     results = TypeAdapter(list[ServiceWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != service_id:
         raise ParsingError("Service inspect identity mismatch")
+    return results[0]
+
+
+def inspect_node(config: ClientConfig, node_id: str) -> NodeWire:
+    """Inspect an exact ID, distinguishing only its exact missing-node response."""
+    try:
+        payload = run([*config.docker_cmd, "node", "inspect", node_id])
+    except DockerException as error:
+        if (
+            type(error) is DockerException
+            and error.stderr
+            == f"Error response from daemon: node {node_id} not found\n"
+        ):
+            raise NodeMissing(error) from error
+        raise
+    results = TypeAdapter(list[NodeWire]).validate_json(payload)
+    if len(results) != 1 or results[0].id != node_id:
+        raise ParsingError("Node inspect identity mismatch")
     return results[0]
 
 

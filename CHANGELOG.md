@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.1.4
+
+### New Features
+
+- `capture_nodes()` and the frozen `NodeTarget` track exact, fixed Swarm node
+  IDs and an explicit manager subset. Selected nodes must be ready and active,
+  and designated managers must retain their role and be reachable. Success
+  requires two complete all-clear passes; nodes missing after capture return
+  `superseded`. Node readiness has no version fence.
+- Telemetry schema 6 adds payload-free `RefusalRecord` events for preflight
+  cancellation, timeout, or limit refusal. Each refusal is recorded exactly once
+  without a launch or completion; earlier validation is outside this boundary,
+  and lazy save preflight occurs on first iteration.
+
+### Behavior Changes And Fixes
+
+- Container, image, network, volume, and system prune accept keyword-only
+  `timeout`, including container prune's streaming branch. `None` inherits the
+  client default; an explicit timeout overrides it.
+  Expiry affects only the local CLI child and does not roll back daemon work.
+- Completed and rejected fleet reports bind the full normalized manifest and
+  retained sanitized environment with SHA-256 digests. Imports reject tampering;
+  legacy unbound reports remain readable but cannot be exported or matched.
+  Baseline comparisons include the environment digest. The harness remains
+  offline and its `no_go` decision is unchanged.
+
+### Documentation
+
+- Updated documentation, agent guides, and the consumer skill for the new
+  convergence, prune deadline, telemetry, and fleet report contracts.
+
 ## 1.1.3
 
 ### New Features

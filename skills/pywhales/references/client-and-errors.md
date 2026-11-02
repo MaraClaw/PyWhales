@@ -140,7 +140,9 @@ consumer isn't reconstructed there. Expiry does not guarantee
 daemon-side cancellation or rollback. See
 [Containers, output, and lifecycle](containers-and-output.md) and
 [Registry transfers and archives](registry-and-archives.md) for which methods
-accept a per-call `timeout`.
+accept a per-call `timeout`. Container, image, network, volume and system prune
+also accept it; see [Bound prune CLI launches](containers-and-output.md#bound-prune-cli-launches)
+for result shapes, filters and destructive-timeout handling.
 
 ## Handle the Right Failure
 
@@ -250,7 +252,7 @@ to the plugin without a compatibility probe or automatic fallback.
 For opt-in sanitized execution telemetry or application-owned concurrency
 limits around specific calls, see
 [Telemetry and admission](telemetry-and-admission.md). For bounding batch
-inspection or waiting for Swarm service/job/stack, Compose project, or standalone container convergence,
+inspection or waiting for Swarm node readiness, service/job/stack, Compose project, or standalone container convergence,
 see [Observation budgets and convergence](observation-and-convergence.md).
 
 Application policy APIs also require explicit imports from `pywhales.profiles`,

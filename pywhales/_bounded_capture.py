@@ -87,7 +87,8 @@ def bounded_capture(
         ObservationTimeout: The scope deadline expired.
         ObservationCancelled: A cancellation token was set.
     """
-    check_scoped_launch(args, env, observation)
+    with telemetry.preflight():
+        check_scoped_launch(args, env, observation)
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
     process = _launch(args, env, pass_fds, piped_stdin=input is not None)

@@ -281,6 +281,8 @@ class VolumeCLI(DockerCLICaller):
         self,
         filters: Iterable[VolumeListFilter] = (),
         all: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Remove unused Docker volumes without a confirmation prompt.
 
@@ -289,7 +291,10 @@ class VolumeCLI(DockerCLICaller):
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
             all: Remove all unused volumes, not just anonymous ones.
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
         """
+        validate_timeout(timeout)
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "volume", "prune", "--force"])
@@ -298,7 +303,7 @@ class VolumeCLI(DockerCLICaller):
             "--filter", (f"{key}={value}" for key, value in filters)
         )
 
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def remove(self, x: ValidVolume | Iterable[ValidVolume]) -> None:
         """Remove one or more volumes.

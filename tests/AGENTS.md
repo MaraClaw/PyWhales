@@ -50,11 +50,14 @@ Filenames in this section are relative to `pywhales/`.
 - Standalone `capture_containers()` cases in `test_convergence.py` resolve names/prefixes to full IDs and reject duplicate resolved IDs.
   Disappearance/recreation is `superseded`; recheck readiness/completion on the final pass, retain the latest complete deadline cycle, and reap hung inspections on cancellation.
   Keep `ContainerTarget` and capture/wait return contracts in `test_convergence_types.py` aligned.
+- Node readiness uses the same fake-CLI module: fixed IDs, explicit manager subset, recovery despite version changes, demotion/missing manager status, malformed data, disappearance, confirming-pass regression, partial-cycle retention and hung-inspect cancellation. Keep node blocker counts bounded and integer-only through `test_reconciliation_store.py`; static node contracts live in `test_convergence_types.py`.
 - Observation tests keep nested minimum limits, shared response accounts across threads, and deadline and cancellation precedence.
   Telemetry tests keep records payload-free under raw diagnostics, one completion per launch, and results intact when the observer raises.
+- `test_telemetry_refusals.py` covers schema-6 preflight refusals across captured, stream, archive load and lazy save: exactly one refusal, no launch/completion/spawn/input read, original exception, admission correlation, observer snapshots and disabled ID/clock fast paths. Earlier validation stays silent; post-start native argv errors keep launch plus limit completion. Archive lifecycle and admission telemetry tests cover adjacent paths.
 - Admission telemetry tests cover decision outcomes, callbacks outside locks, cross-thread cancellation, and no new IDs or clock reads without an observer. Correlation tests cover nested calls and stream lifecycle launches.
 - Offline `test_fleet_harness.py` keeps FIFO head blocking under per-action caps, global/per-action peaks, and queue expiry without counting unlaunched actions in peaks.
   Leased retry cases in `test_fleet_harness.py`, `test_fleet_harness_cli.py`, and `test_fleet_report.py` cover attempt lineage, FIFO, the original deadline, one logical outcome and queue sample, and legacy digest compatibility. Preserve old sequential report imports and reject contradictory schedules; CLI tests check safe export/decide import rejection without candidate launches.
+- `test_fleet_binding.py` covers canonical manifest/sanitized-environment fingerprints, same-revision policy rebinding refusal, tampered environments, legacy unbound reports and baseline environment mismatches. Keep run/export/decide offline, permanently unqualified and `no_go`, with CLI routing and zero candidate connections.
 
 ## Runtime fixtures and shared state
 

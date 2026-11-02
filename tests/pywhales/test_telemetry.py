@@ -17,7 +17,12 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry import (
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    TelemetryRecord,
+)
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import run
 
@@ -49,12 +54,12 @@ def test_metadata_is_sanitized_when_captured_results_contain_secrets(
     assert result == (secret + "\ufffd", secret)
     launch = records[0]
     assert isinstance(launch, LaunchRecord)
-    assert launch.family == "captured" and launch.schema_version == 5
+    assert launch.family == "captured" and launch.schema_version == 6
     assert launch.admission_id is None
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.attempt_id == launch.attempt_id
-    assert completed.schema_version == 5 and completed.return_code == 0
+    assert completed.schema_version == 6 and completed.return_code == 0
     assert completed.stdin_bytes is None
     assert completed.outcome == "success"
     assert (completed.stdout_bytes, completed.stderr_bytes) == (
@@ -195,7 +200,7 @@ def test_supplied_config_wins_over_constructor_observer() -> None:
     assert ignored == []
 
 
-def test_observation_preflight_has_no_launch_metadata() -> None:
+def test_observation_preflight_emits_only_refusal() -> None:
     records: list[TelemetryRecord] = []
     config = ClientConfig(
         client_call=[sys.executable], telemetry_observer=records.append
@@ -205,7 +210,9 @@ def test_observation_preflight_has_no_launch_metadata() -> None:
     with observation(policy), pytest.raises(ObservationLimitError):
         run([*config.docker_cmd, "-c", "pass"])
 
-    assert records == []
+    (refusal,) = records
+    assert isinstance(refusal, RefusalRecord)
+    assert (refusal.family, refusal.outcome) == ("captured", "limit")
 
 
 def test_bounded_capture_counts_bytes_when_response_limit_fails() -> None:
@@ -289,5 +296,5 @@ def test_completion_outcome_follows_the_exception_that_ended_the_launch(
     launch, completed = records
     assert isinstance(launch, LaunchRecord)
     assert isinstance(completed, CompletionRecord)
-    assert launch.schema_version == completed.schema_version == 5
+    assert launch.schema_version == completed.schema_version == 6
     assert completed.outcome == outcome

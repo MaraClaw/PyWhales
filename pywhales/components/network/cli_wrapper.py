@@ -33,7 +33,7 @@ from pywhales.components.network.models import (
 )
 from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchNetwork
-from pywhales.utils import format_mapping_for_cli, run, to_list
+from pywhales.utils import format_mapping_for_cli, run, to_list, validate_timeout
 
 type NetworkListFilter = (
     tuple[Literal["driver"], str]
@@ -360,21 +360,26 @@ class NetworkCLI(DockerCLICaller):
         ids = run(full_cmd).splitlines()
         return [Network(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
-    def prune(self, filters: Iterable[NetworkListFilter] = ()) -> None:
+    def prune(
+        self, filters: Iterable[NetworkListFilter] = (), *, timeout: float | None = None
+    ) -> None:
         """Remove Docker networks which are not used by any containers.
 
         Docker's confirmation prompt is bypassed.
 
         Args:
             filters: Docker filter pairs restricting removal; the default adds no filters.
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
         """
+        validate_timeout(timeout)
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "network", "prune", "--force"])
         full_cmd.add_args_iterable(
             "--filter", (f"{key}={value}" for key, value in filters)
         )
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def remove(self, networks: ValidNetwork | Iterable[ValidNetwork]) -> None:
         """Remove one or more Docker networks.

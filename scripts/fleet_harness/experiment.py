@@ -100,6 +100,15 @@ def decide(experiment: Experiment) -> Decision:
     status: Literal["not_requested", "matched_simulation", "rejected"] = "not_requested"
     comparison = experiment.comparison
     if comparison is not None:
+        cli_binding = comparison.cli.binding
+        candidate_binding = comparison.candidate.binding
+        if cli_binding is None or candidate_binding is None:
+            mismatches.append("scope.binding_missing")
+        else:
+            if cli_binding.manifest_digest != candidate_binding.manifest_digest:
+                mismatches.append("scope.manifest_digest")
+            if cli_binding.environment_digest != candidate_binding.environment_digest:
+                mismatches.append("scope.environment_digest")
         for name in Semantics.model_fields:
             if getattr(comparison.cli_contract, name) != getattr(
                 comparison.candidate_contract, name
@@ -154,6 +163,11 @@ def decide(experiment: Experiment) -> Decision:
             and baseline.workload_digest != comparison.cli.workload_digest
         ):
             mismatches.append("baseline.workload_digest")
+        if baseline is not None and (
+            cli_binding is None
+            or baseline.environment_digest != cli_binding.environment_digest
+        ):
+            mismatches.append("baseline.environment_digest")
         status = "rejected" if mismatches else "matched_simulation"
         reasons.append(
             "comparison_semantic_mismatch"

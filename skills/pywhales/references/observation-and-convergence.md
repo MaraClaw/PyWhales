@@ -10,7 +10,7 @@ calls automatically.
 - [Bounding batch inspection](#bounding-batch-inspection)
 - [Manifest lists](#manifest-lists)
 - [Bounding streams and uploads](#bounding-streams-and-uploads)
-- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [standalone containers](#standalone-containers), [outcomes](#outcomes-and-budgets)
+- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm nodes](#swarm-node-readiness), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [standalone containers](#standalone-containers), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
 ## Bounding Batch Inspection
@@ -191,9 +191,10 @@ inventory call. Snapshots aren't daemon transactions or total memory caps.
 `pywhales.convergence` is an opt-in, read-only observer of one fixed target:
 a captured Swarm service generation, including replicated and global jobs
 (`capture_service` returns a `ServiceTarget`), an explicit Swarm stack
-(`StackTarget`), selected Compose services (`capture_compose` returns a
+(`StackTarget`), selected Swarm nodes (`capture_nodes` returns a `NodeTarget`),
+selected Compose services (`capture_compose` returns a
 `ComposeTarget`), or standalone containers (`capture_containers` returns a
-`ContainerTarget`). `wait()` takes any of the four. Existing mutating calls
+`ContainerTarget`). `wait()` takes any of these five target types. Existing mutating calls
 never invoke it automatically; capture and wait yourself after submitting the
 change you want to confirm. Choose the
 Swarm path for `docker service`/`docker stack` deployments and the Compose path
@@ -243,7 +244,7 @@ non-container runtime is `Failure(reason="unsupported")`, and malformed
 service/task data fails closed.
 
 `wait(target, *, policy, timeout, poll_interval, cancel=None)` accepts a
-`ServiceTarget`, a `StackTarget(services=(...))`, a `ComposeTarget`, or a
+`ServiceTarget`, a `StackTarget(services=(...))`, a `NodeTarget`, a `ComposeTarget`, or a
 `ContainerTarget` and returns `Success`, `Failure`, `Deadline`, or `Cancelled`. For ordinary
 (Replicated and Global) Swarm targets, only current desired-running tasks count;
 a changed service `Version` or template fingerprint returns `superseded`;
@@ -252,6 +253,53 @@ failures. Jobs follow their own rules, described next. Snapshot collection isn't
 an atomic Swarm transaction, so a final generation recheck reduces, but can't
 remove, races from concurrent changes. A successful result proves the captured
 task-generation conditions, not application health or readiness.
+
+### Swarm Node Readiness
+
+Use `capture_nodes()` before resuming deployment after node maintenance; it
+observes existing nodes without changing availability, roles, or cluster state.
+Check that the installed `pywhales.convergence` exports both `capture_nodes`
+and `NodeTarget`, and that `wait` accepts that target.
+
+```python
+from pywhales.convergence import NodeTarget, capture_nodes, wait
+
+# Reuse client, policy and cancel from the service example. Supply actual exact
+# node IDs from the application's selected membership, never names or prefixes.
+target = capture_nodes(
+    client,
+    ("exact-manager-node-id", "exact-worker-node-id"),
+    manager_ids=("exact-manager-node-id",),
+    policy=policy,
+    timeout=10,
+    cancel=cancel,
+)
+if isinstance(target, NodeTarget):
+    outcome = wait(target, policy=policy, timeout=120, poll_interval=1, cancel=cancel)
+```
+
+`capture_nodes(client, node_ids, *, manager_ids=(), policy, timeout, cancel=None)`
+returns `NodeTarget` or a typed `Failure`/`Deadline`/`Cancelled`. `node_ids` must
+be a nonempty tuple of distinct nonempty exact IDs. `manager_ids` must be a tuple
+of distinct selected IDs; its default `()` requests no manager-specific checks,
+not automatic discovery. Invalid selections, timeouts, or dry-run clients raise
+`ValueError` before lookup. Keep the originating config stable and target IDs
+out of untrusted output.
+
+Each selected node must have state `ready` and availability `active`. Designated
+managers must also remain managers and report reachability `reachable`;
+leadership is irrelevant. Demotion or missing manager status blocks success,
+while workers need no manager status. Node version-index changes during recovery
+are allowed. `wait` inspects the fixed IDs and requires a second complete
+all-clear pass; it never re-lists or replaces membership.
+
+An exact missing-node response during capture is `Failure(reason="observation")`
+with its cause; disappearance during wait is cause-free `superseded`. Unrelated
+CLI errors remain observation failures, not disappearance. Malformed projections,
+unknown readiness values, or a returned identity mismatch fail closed. Capture
+checks identity and wire shape, not readiness, so a recovering node can still be
+captured. `Success` proves the selected node conditions at observation time, not
+application health or permission to deploy.
 
 ### Swarm Jobs
 
@@ -523,6 +571,14 @@ each, bounded by `captured_services`, from the latest complete cycle. For a
 standalone target, each captured container is one `captured_services` unit and
 each applicable container counter counts those units; all Swarm-only counters
 stay zero.
+
+For a `NodeTarget`, each selected node is one `captured_services` unit.
+`non_ready_nodes`, `unavailable_nodes`, `non_manager_nodes`, and
+`unreachable_managers` count affected nodes once per reason, with overlapping
+reasons allowed and each count bounded by that total. Other target counters stay
+zero. Interrupted node cycles, including confirming passes, retain only the last
+published complete cycle. Node failures have `service_id=None`; deadline detail
+contains only integer counts, never node IDs.
 
 A `Failure.cause` or a target's `template` may hold confidential wire data; they
 stay out of `repr()`, but don't log them without a confidentiality policy.

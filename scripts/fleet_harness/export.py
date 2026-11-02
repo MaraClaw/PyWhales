@@ -11,7 +11,7 @@ from scripts.fleet_contract.results import (
 from scripts.fleet_contract.workload import Boundary, Resource
 
 from .models import RunnableManifest
-from .records import RunReport
+from .records import RunReport, fingerprint
 
 
 class ExportRefused(Exception):
@@ -23,6 +23,8 @@ def export_result(report: RunReport, manifest: RunnableManifest) -> RunResult:
     if (
         manifest.provenance != "synthetic"
         or report.status == "rejected"
+        or report.binding is None
+        or report.binding.manifest_digest != fingerprint(manifest)
         or report.manifest_revision != manifest.identity.revision
         or report.workload_digest != manifest.identity.workload_digest
         or report.workload != manifest.workload

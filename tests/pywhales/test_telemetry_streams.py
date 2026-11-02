@@ -18,7 +18,12 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry import (
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    TelemetryRecord,
+)
 from pywhales.utils import MappedProcessStream, stream_stdout_and_stderr
 
 
@@ -35,7 +40,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
-    assert records[0].schema_version == completed.schema_version == 5
+    assert records[0].schema_version == completed.schema_version == 6
     assert completed.attempt_id == records[0].attempt_id
     assert completed.stdin_bytes is None
     return completed
@@ -351,7 +356,7 @@ def scope_policy(argv: int = 65536) -> InspectionPolicy:
     )
 
 
-def test_scoped_launch_rejection_never_reaches_the_observer() -> None:
+def test_scoped_launch_rejection_emits_refusals() -> None:
     records: list[TelemetryRecord] = []
     cancel = Event()
     with (
@@ -366,7 +371,14 @@ def test_scoped_launch_rejection_never_reaches_the_observer() -> None:
     ):
         stream_stdout_and_stderr(command(records, "pass"))
 
-    assert records == []
+    assert len(records) == 2
+    assert all(isinstance(record, RefusalRecord) for record in records)
+    assert [
+        record.outcome for record in records if isinstance(record, RefusalRecord)
+    ] == [
+        "cancelled",
+        "limit",
+    ]
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancel"])

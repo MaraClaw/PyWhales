@@ -9,6 +9,8 @@ from ._records import (
     LaunchRecord,
     OperationFamily,
     Outcome,
+    RefusalOutcome,
+    RefusalRecord,
     TelemetryObserver,
     TelemetryRecord,
 )
@@ -22,6 +24,8 @@ __all__ = [
     "LaunchRecord",
     "OperationFamily",
     "Outcome",
+    "RefusalOutcome",
+    "RefusalRecord",
     "TelemetryObserver",
     "TelemetryRecord",
 ]

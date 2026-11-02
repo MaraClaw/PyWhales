@@ -16,6 +16,8 @@ from pywhales.convergence._compose import (
     wait_compose,
 )
 from pywhales.convergence._container import capture_selected, wait_containers
+from pywhales.convergence._node import capture_selected as capture_selected_nodes
+from pywhales.convergence._node import wait_nodes
 from pywhales.convergence._service import ServiceObservation, check_service, summarize
 from pywhales.convergence._types import (
     Cancelled,
@@ -24,6 +26,7 @@ from pywhales.convergence._types import (
     Deadline,
     DeadlineDetail,
     Failure,
+    NodeTarget,
     Outcome,
     ServiceTarget,
     StackTarget,
@@ -209,19 +212,56 @@ def capture_containers(
     return capture_selected(client.client_config, selection, scope)
 
 
+def capture_nodes(
+    client: DockerClient,
+    node_ids: tuple[str, ...],
+    *,
+    manager_ids: tuple[str, ...] = (),
+    policy: InspectionPolicy,
+    timeout: float,
+    cancel: Event | None = None,
+) -> NodeTarget | Failure | Deadline | Cancelled:
+    """Capture exact Swarm node IDs and a fixed designated-manager subset.
+
+    Args:
+        client: Client selecting the daemon; dry-run configurations are rejected.
+        node_ids: Nonempty tuple of distinct exact node IDs.
+        manager_ids: Distinct selected IDs required to remain reachable managers.
+        policy: Required observation limits.
+        timeout: Positive finite total seconds for capture.
+        cancel: Optional cancellation event.
+
+    Returns:
+        A fixed target, or a typed failure, deadline, or cancellation outcome.
+
+    Raises:
+        ValueError: If membership, timeout, or client configuration is invalid.
+    """
+    _positive(timeout)
+    target = NodeTarget(
+        client_config=client.client_config, node_ids=node_ids, manager_ids=manager_ids
+    )
+    if client.client_config.compose_dry_run:
+        raise ValueError("A dry-run client cannot be captured")
+    scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
+    return capture_selected_nodes(target, scope)
+
+
 def wait(
-    target: ServiceTarget | StackTarget | ComposeTarget | ContainerTarget,
+    target: ServiceTarget | StackTarget | ComposeTarget | ContainerTarget | NodeTarget,
     *,
     policy: InspectionPolicy,
     timeout: float,
     poll_interval: float,
     cancel: Event | None = None,
 ) -> Outcome:
-    """Wait for captured service, stack, Compose or container membership without mutation.
+    """Wait for captured service, stack, Compose, container or node membership.
 
     Args:
         target: Captured service generation, explicitly fixed stack membership, or
-            Compose services, or standalone containers. Compose re-lists the project
+            Compose services, standalone containers, or Swarm nodes. Nodes must be
+            ready and active; designated managers must remain reachable managers.
+            Compose re-lists the project
             each cycle; standalone targets inspect their fixed IDs: containers
             must be ``running``, not restarting or paused, and ``healthy`` if they
             have a healthcheck; membership or config-hash changes are ``superseded``.
@@ -242,7 +282,7 @@ def wait(
         the deadline and stops only local CLI processes, not daemon-side work.
         Deadline detail retains only the latest complete cycle after all applicable
         generation rechecks, never a partial cycle or a fresh inspection at expiry.
-        Unusable Compose output is ``malformed`` with no cause.
+        Unusable Compose, container or node output is ``malformed`` with no cause.
     """
     _positive(timeout)
     _positive(poll_interval)
@@ -253,6 +293,10 @@ def wait(
         )
     if isinstance(target, ContainerTarget):
         return wait_containers(
+            target, observation(policy, deadline=deadline, cancel=cancel), poll_interval
+        )
+    if isinstance(target, NodeTarget):
+        return wait_nodes(
             target, observation(policy, deadline=deadline, cancel=cancel), poll_interval
         )
     targets = (target,) if isinstance(target, ServiceTarget) else target.services

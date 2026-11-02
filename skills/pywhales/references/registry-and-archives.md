@@ -184,6 +184,12 @@ pull/push progress streams report under the regular `captured`/`stream`
 families instead. See
 [Telemetry and admission](telemetry-and-admission.md) for the full schema.
 
+Schema-6 observation preflight refusals use those same families, emit no
+launch/completion pair, and preserve the original exception without starting a
+child or reading upload input. A lazy save checks and can emit its refusal at
+first iteration, not construction; eager inspection is a separate captured
+operation. Earlier argument validation is not a refusal event.
+
 ## Other Operations
 
 `docker.tag(...)` and `docker.images()` (`image.list()`) cover local tagging
@@ -196,6 +202,12 @@ filesystem and an image; both forward `pull`, defaulting to `"missing"`, to
 container creation. `docker.import_(source, tag=...)` imports a tarball's
 contents as a new filesystem image; it is unrelated to `load`, which restores
 images previously produced by `save`/`docker save`.
+
+`image.prune(..., timeout=10)` returns CLI text and accepts a keyword-only local
+deadline, validated before filters or lookup. `None` inherits the client default;
+expiry doesn't undo daemon-side deletion and must not trigger an automatic retry.
+For all five prune result/filter contracts, see
+[Bound prune CLI launches](containers-and-output.md#bound-prune-cli-launches).
 
 Image `copy_from` and `copy_to` also accept keyword-only `timeout=None`: an
 explicit value gives each helper launch its own deadline, including inspection,

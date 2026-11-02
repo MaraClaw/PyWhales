@@ -60,6 +60,7 @@ from pywhales.components.image.streams import (
     map_in_contexts,
 )
 from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.telemetry import OperationFamily
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
     MappedProcessStream,
@@ -111,7 +112,7 @@ def _select_archive_timeout(
 
 
 def _prepare_archive_launch(
-    full_cmd: Sequence[object], timeout: float | None
+    full_cmd: Sequence[object], timeout: float | None, family: OperationFamily
 ) -> tuple[
     ExecutionPolicy,
     float | None,
@@ -129,6 +130,7 @@ def _prepare_archive_launch(
     Args:
         full_cmd: Complete archive command; the first item may carry the policy.
         timeout: Per-call seconds, or `None` to select the policy default.
+        family: Fixed family of the direct archive operation.
 
     Returns:
         The execution policy, selected timeout, stringified command, finalized
@@ -156,7 +158,8 @@ def _prepare_archive_launch(
     command = [str(argument) for argument in full_cmd]
     environment = finalize_environment(environment, command)
     if observation is not None:
-        check_scoped_launch(command, environment, observation)
+        with ExecutionTelemetry(policy.telemetry_observer, family).preflight():
+            check_scoped_launch(command, environment, observation)
     return policy, selected_timeout, command, environment, observation
 
 
@@ -672,7 +675,7 @@ class ImageCLI(DockerCLICaller):
         timeout: float | None,
     ) -> builtins.list[str]:
         policy, selected_timeout, command, environment, observation = (
-            _prepare_archive_launch(full_cmd, timeout)
+            _prepare_archive_launch(full_cmd, timeout, "archive_load")
         )
         with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
             telemetry.start()
@@ -769,16 +772,21 @@ class ImageCLI(DockerCLICaller):
         self,
         all: bool = False,
         filters: Iterable[ImageListFilter] = (),
+        *,
+        timeout: float | None = None,
     ) -> str:
         """Remove unused images without prompting.
 
         Args:
             all: Remove all unused images, not just dangling ones
             filters: Provide filter values (e.g. `[("until", "<timestamp>")]`)
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
 
         Returns:
             The output of the CLI (the layers removed).
         """
+        validate_timeout(timeout)
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "image", "prune", "--force"])
@@ -786,7 +794,7 @@ class ImageCLI(DockerCLICaller):
         full_cmd.add_args_iterable(
             "--filter", (f"{key}={value}" for key, value in filters)
         )
-        return run(full_cmd)
+        return run(full_cmd, timeout=timeout)
 
     @overload
     def pull(
@@ -1465,7 +1473,7 @@ class ImageCLI(DockerCLICaller):
             ObservationLimitError: That observation rejects the argv or environment.
         """
         policy, selected_timeout, command, environment, observation = (
-            _prepare_archive_launch(full_cmd, timeout)
+            _prepare_archive_launch(full_cmd, timeout, "archive_save")
         )
         with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
             telemetry.start()

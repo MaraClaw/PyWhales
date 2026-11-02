@@ -12,10 +12,12 @@ from pywhales.convergence import (
     Deadline,
     DeadlineDetail,
     Failure,
+    NodeTarget,
     Outcome,
     ServiceTarget,
     capture_compose,
     capture_containers,
+    capture_nodes,
     capture_service,
     wait,
 )
@@ -106,3 +108,20 @@ def _check_container_contract(client: DockerClient, policy: InspectionPolicy) ->
         assert_type(
             wait(captured, policy=policy, timeout=1.0, poll_interval=0.1), Outcome
         )
+
+
+def _check_node_contract(client: DockerClient, policy: InspectionPolicy) -> None:
+    captured = capture_nodes(
+        client, ("node-a", "node-b"), manager_ids=("node-a",), policy=policy, timeout=1
+    )
+    assert_type(captured, NodeTarget | Failure | Deadline | Cancelled)
+    if isinstance(captured, NodeTarget):
+        assert_type(captured.node_ids, tuple[str, ...])
+        assert_type(captured.manager_ids, tuple[str, ...])
+        assert_type(
+            wait(captured, policy=policy, timeout=1, poll_interval=0.1), Outcome
+        )
+    assert_type(DeadlineDetail(1).non_ready_nodes, int)
+    assert_type(DeadlineDetail(1).unavailable_nodes, int)
+    assert_type(DeadlineDetail(1).non_manager_nodes, int)
+    assert_type(DeadlineDetail(1).unreachable_managers, int)

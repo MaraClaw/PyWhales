@@ -1679,6 +1679,7 @@ class ContainerCLI(DockerCLICaller):
         filters: Iterable[ContainerListFilter] = (),
         *,
         stream_logs: Literal[True],
+        timeout: float | None = None,
     ) -> ProcessStream: ...
 
     @overload
@@ -1686,6 +1687,8 @@ class ContainerCLI(DockerCLICaller):
         self,
         filters: Iterable[ContainerListFilter] = (),
         stream_logs: Literal[False] = ...,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -1693,12 +1696,16 @@ class ContainerCLI(DockerCLICaller):
         self,
         filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
     def prune(
         self,
         filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> ProcessStream | None:
         """Remove containers that are not running.
 
@@ -1709,11 +1716,14 @@ class ContainerCLI(DockerCLICaller):
             filters: Filters to apply when pruning.
             stream_logs: Return an owned stdout/stderr byte stream instead of
                 waiting for command completion.
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo daemon-side removal.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`;
             otherwise `None` after the local prune CLI completes.
         """
+        validate_timeout(timeout)
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "container", "prune", "--force"])
@@ -1721,8 +1731,8 @@ class ContainerCLI(DockerCLICaller):
             "--filter", (f"{key}={value}" for key, value in filters)
         )
         if stream_logs:
-            return stream_stdout_and_stderr(full_cmd)
-        run(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
+        run(full_cmd, timeout=timeout)
 
     def rename(self, container: ValidContainer, new_name: str) -> None:
         """Change the name of a container.
