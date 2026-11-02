@@ -53,6 +53,10 @@ def _check_admission_generic_inference(
     assert_type(owner.snapshot(), AdmissionSnapshot)
     assert_type(owner.snapshot().closed, bool)
     assert_type(owner.snapshot().classes[0].outcomes.rejected_closed, int)
+    assert_type(owner.snapshot().classes[0].outcomes.rejected_pending_demand_full, int)
+    assert_type(
+        ClassLimit(1, 1, pending_demand_capacity=0).pending_demand_capacity, int | None
+    )
     assert_type(owner.close(), None)
     assert_type(owner.wait_drained(timeout=1), bool)
     assert_type(owner.request(pressure, demand=2).try_resize(3), bool)
@@ -77,15 +81,35 @@ def _check_decision_telemetry(
             assert_type(record.outcome, AdmissionOutcome)
             assert_type(record.duration_seconds, float)
             assert_type(record.phase, Literal["admission"])
-            assert_type(record.schema_version, Literal[6])
+            assert_type(record.schema_version, Literal[7])
         case LaunchRecord():
             assert_type(record.admission_id, AdmissionId | None)
-            assert_type(record.schema_version, Literal[6])
+            assert_type(record.schema_version, Literal[7])
         case CompletionRecord():
-            assert_type(record.schema_version, Literal[6])
+            assert_type(record.schema_version, Literal[7])
         case RefusalRecord():
             assert_type(record.admission_id, AdmissionId | None)
             assert_type(record.outcome, RefusalOutcome)
-            assert_type(record.schema_version, Literal[6])
+            assert_type(record.schema_version, Literal[7])
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _check_pending_demand_outcome(record: AdmissionDecisionRecord) -> None:
+    outcome: AdmissionOutcome = "pending_demand_full"
+    assert_type(outcome, Literal["pending_demand_full"])
+    match record.outcome:
+        case (
+            "granted"
+            | "busy"
+            | "queue_full"
+            | "closed"
+            | "queue_timeout"
+            | "cancelled"
+            | "failed"
+        ):
+            pass
+        case "pending_demand_full":
+            assert_type(record.outcome, Literal["pending_demand_full"])
         case unreachable:
             assert_never(unreachable)

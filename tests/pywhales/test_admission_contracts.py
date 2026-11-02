@@ -11,11 +11,12 @@ from pywhales.admission import (
     ClassLimit,
     DemandSnapshot,
     EndpointIdentity,
+    OutcomeCounts,
     PressureClass,
     RejectionReason,
     SaturationPolicy,
 )
-from pywhales.admission._state import UINT64_MAX, Outcome
+from pywhales.admission._state import UINT64_MAX, Bucket, Outcome
 
 
 @pytest.mark.parametrize("token", ["", "_bad", "a/b", "a:b", "a b", "é", "a" * 65])
@@ -175,3 +176,44 @@ def test_demand_snapshots_are_immutable_and_independent_of_request_counts() -> N
         with pytest.raises(FrozenInstanceError):
             setattr(after.demand, attribute, 0)
     assert owner.snapshot().classes[0].demand == DemandSnapshot(0, 0, 7, 0)
+
+
+@pytest.mark.parametrize("capacity", [-1, True, False, 1.5, "2"])
+def test_limit_rejects_invalid_pending_demand_capacity(capacity: int) -> None:
+    with pytest.raises(ValueError):
+        ClassLimit(1, 1, pending_demand_capacity=capacity)
+
+
+def test_outcome_snapshots_preserve_legacy_positional_meanings() -> None:
+    legacy = OutcomeCounts(1, 2, 3, 4, 5, 6, 7, 8, True)
+    assert legacy.rejected_closed == 8
+    assert legacy.saturated is True
+    assert legacy.rejected_pending_demand_full == 0
+    bucket = Bucket(ClassLimit(1, 1))
+    bucket.counts[:] = range(1, 10)
+    assert bucket.snapshot(PressureClass("read")).outcomes == OutcomeCounts(
+        1, 2, 3, 4, 5, 6, 7, 8, False, 9
+    )
+
+
+def test_pending_demand_rejections_saturate_without_counting_twice() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 1, pending_demand_capacity=0)},
+    )
+    owner._buckets[pressure].counts[Outcome.REJECTED_PENDING_DEMAND_FULL] = (
+        UINT64_MAX - 1
+    )
+    with owner.request(pressure).stream(lambda: nullcontext(iter(()))):
+        for _ in range(2):
+            request = owner.request(pressure)
+            with pytest.raises(AdmissionRejected) as raised:
+                request.call(lambda: pytest.fail("rejected work ran"))
+            assert raised.value.reason is RejectionReason.PENDING_DEMAND_FULL
+            assert not request.cancel()
+            with pytest.raises(RuntimeError):
+                request.call(lambda: pytest.fail("reused work ran"))
+    snapshot = owner.snapshot().classes[0]
+    assert snapshot.outcomes == OutcomeCounts(0, 0, 1, 0, 0, 0, 0, 0, True, UINT64_MAX)
+    assert snapshot.demand == DemandSnapshot(0, 0, 1, 0)

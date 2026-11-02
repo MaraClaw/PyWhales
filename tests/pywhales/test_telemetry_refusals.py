@@ -97,7 +97,7 @@ def test_preflight_refusal_preserves_exception_and_snapshot(
     assert (record.family, record.outcome, record.schema_version, record.phase) == (
         family,
         outcome,
-        6,
+        7,
         "refusal",
     )
     assert record.admission_id is None and len(record.attempt_id) == 32

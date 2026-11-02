@@ -25,7 +25,7 @@ def test_decisions_are_frozen_payload_free_and_reentry_fails_once() -> None:
     pressure = PressureClass("private-pressure")
     owner = AdmissionOwner(
         EndpointIdentity("private-endpoint"),
-        {pressure: ClassLimit(1, 0)},
+        {pressure: ClassLimit(1, 0, pending_demand_capacity=0)},
         telemetry_observer=records.append,
     )
     nested = owner.request(pressure)
@@ -47,7 +47,7 @@ def test_decisions_are_frozen_payload_free_and_reentry_fails_once() -> None:
     assert (first.duration_seconds, second.duration_seconds) == (2, 0)
     assert first.admission_id != second.admission_id
     assert len(first.admission_id) == len(second.admission_id) == 32
-    assert first.schema_version == second.schema_version == 6
+    assert first.schema_version == second.schema_version == 7
     assert first.phase == second.phase == "admission"
     with pytest.raises(FrozenInstanceError):
         first.__setattr__("outcome", "failed")
@@ -140,7 +140,10 @@ def test_dormant_cancellation_never_gets_an_id_or_decision() -> None:
 
 def test_disabled_observation_adds_no_identifiers_clocks_or_callbacks() -> None:
     pressure = PressureClass("read")
-    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 1)})
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 1, pending_demand_capacity=0)},
+    )
     with (
         patch("pywhales.admission._telemetry.uuid4", side_effect=AssertionError),
         patch("pywhales.admission._telemetry.monotonic", side_effect=AssertionError),
@@ -150,6 +153,8 @@ def test_disabled_observation_adds_no_identifiers_clocks_or_callbacks() -> None:
     ):
         assert owner.request(pressure).call(lambda: 7) == 7
         with owner.request(pressure).stream(lambda: nullcontext(iter([3]))) as stream:
+            with pytest.raises(AdmissionRejected):
+                owner.request(pressure).call(lambda: pytest.fail("refused work ran"))
             assert list(stream) == [3]
         request = owner.request(pressure)
         assert request.cancel()

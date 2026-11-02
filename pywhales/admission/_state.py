@@ -32,6 +32,7 @@ class Outcome(IntEnum):
     CANCELLED = 5
     QUEUE_TIMED_OUT = 6
     REJECTED_CLOSED = 7
+    REJECTED_PENDING_DEMAND_FULL = 8
 
 
 @dataclass(eq=False, slots=True)
@@ -125,6 +126,7 @@ class Bucket:
                 self.counts[Outcome.QUEUE_TIMED_OUT],
                 self.counts[Outcome.REJECTED_CLOSED],
                 self.saturated,
+                self.counts[Outcome.REJECTED_PENDING_DEMAND_FULL],
             ),
             DemandSnapshot(
                 self.active_demand,

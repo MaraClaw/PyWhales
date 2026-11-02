@@ -66,14 +66,30 @@ demand units up front instead of the default 1. Demand validation rejects a
 `demand_capacity`. Reservations only account for participating application
 work; they aren't a cap on daemon memory or CPU.
 
+`ClassLimit(..., pending_demand_capacity=20)` independently caps the sum of
+declared demand retained in the pending queue. Its default `None` is unbounded;
+nonnegative integers, including zero, are accepted, but booleans are rejected.
+The limit applies only when queueing: even demand greater than this limit can
+receive an immediate grant when active capacity is available and the queue is
+empty. Zero therefore permits immediate work but retains no waiting demand.
+
 ## Waiting, rejection, and cancellation
 
 When active capacity is unavailable, `SaturationPolicy.WAIT` waits in a bounded
 FIFO pending queue. `SaturationPolicy.REJECT` rejects immediately instead of
-waiting. A full pending queue rejects new requests under either policy; there is
-no overflow queue. An optional `queue_timeout` sets a separate deadline for
+waiting. There is no overflow queue. An optional `queue_timeout` sets a separate
+deadline for
 waiting for admission and has a distinct timeout outcome. It doesn't change or
 consume the existing local launch timeout, which still starts at launch.
+
+After closure and same-owner reentry checks, admission tries an immediate grant.
+Otherwise `REJECT` reports `RejectionReason.BUSY`; `WAIT` checks pending request
+count first (`QUEUE_FULL`), then pending demand (`PENDING_DEMAND_FULL`, value
+`"pending_demand_full"`). Exact demand fits are accepted atomically; a refused
+request is never retained and never invokes its operation or stream factory.
+FIFO remains head-only: a large head blocks smaller followers, even if they fit
+the active demand budget. Cancellation, queue timeout and closure remove queued
+demand; active resizing does not change the queued total.
 
 `owner.request(...)` creates an inert, single-use handle. Calling `call()` or
 `stream()` on it attempts admission and runs the supplied callable only after a
@@ -155,6 +171,12 @@ carries `demand`, a `DemandSnapshot` of exact active and pending demand totals
 plus their own high-water marks, kept separate from the class's active/pending
 request counts and their high-water marks. Values printed or logged by your
 application remain your responsibility.
+
+`ClassSnapshot.outcomes.rejected_pending_demand_full` counts only queue-demand
+refusals, separately from `rejected_full` (pending request count) and
+`rejected_busy` (the reject policy). Like the other outcome counters it saturates
+at the uint64 ceiling and marks `saturated`. This counter is appended with a
+zero default so existing positional `OutcomeCounts` arguments keep their meaning.
 
 Reentering the same owner from an admitted operation fails in the calling
 context. Avoid nested admission to that owner; treat the outer composite as one

@@ -13,6 +13,7 @@ class RejectionReason(Enum):
     BUSY = "busy"
     QUEUE_FULL = "queue_full"
     CLOSED = "closed"
+    PENDING_DEMAND_FULL = "pending_demand_full"
 
 
 class AdmissionRejected(AdmissionError):

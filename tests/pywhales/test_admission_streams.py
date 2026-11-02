@@ -56,7 +56,8 @@ class Source(AbstractContextManager[Iterator[int]], Iterator[int]):
 def _owner() -> tuple[AdmissionOwner, PressureClass]:
     pressure = PressureClass("stream")
     return AdmissionOwner(
-        EndpointIdentity("local"), {pressure: ClassLimit(1, 0, demand_capacity=5)}
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 0, demand_capacity=5, pending_demand_capacity=0)},
     ), pressure
 
 
@@ -100,7 +101,7 @@ def test_setup_failure_releases_without_exiting_partial_source(stage: str) -> No
     records: list[TelemetryRecord] = []
     owner = AdmissionOwner(
         EndpointIdentity("local"),
-        {pressure: ClassLimit(1, 0, demand_capacity=5)},
+        {pressure: ClassLimit(1, 0, demand_capacity=5, pending_demand_capacity=0)},
         telemetry_observer=records.append,
     )
     source = Source()
