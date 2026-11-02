@@ -65,6 +65,80 @@ def test_mapped_process_stream_owns_unstarted_mapping() -> None:
     _assert_process_released(child)
 
 
+@pytest.mark.parametrize("strict,marked", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("raw", [False, True])
+def test_captured_workload_failure_classification(
+    strict: bool, marked: bool, raw: bool
+) -> None:
+    config = ClientConfig(
+        client_call=[sys.executable], strict_workload_errors=strict, raw_diagnostics=raw
+    )
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "import sys; print('out'); print('Error: No such container: secret', file=sys.stderr); sys.exit(125)",
+    ]
+    with pytest.raises(DockerException) as raised:
+        pywhales.utils.run(command, workload_status=marked)
+    error = raised.value
+    assert type(error) is (DockerException if strict and marked else NoSuchContainer)
+    assert error.docker_command == command
+    assert error.return_code == 125
+    assert error.stdout == "out\n"
+    assert error.stderr == "Error: No such container: secret\n"
+    assert ("secret" in str(error)) is raw
+
+
+@pytest.mark.parametrize("strict,marked", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("callback", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+def test_stream_workload_failure_classification(
+    strict: bool, marked: bool, callback: bool, raw: bool
+) -> None:
+    config = ClientConfig(
+        client_call=[sys.executable], strict_workload_errors=strict, raw_diagnostics=raw
+    )
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "import sys; print('Error: No such container: secret', file=sys.stderr, flush=True); input(); sys.exit(125)",
+    ]
+    stream = stream_stdout_and_stderr(command, pipe_stdin=True, workload_status=marked)
+    errors: list[OSError | BufferError | DockerException] = []
+    notified = Event()
+    try:
+        assert next(stream) == ("stderr", b"Error: No such container: secret\n")
+        if callback:
+
+            def notify(error: OSError | BufferError | DockerException) -> None:
+                errors.append(error)
+                notified.set()
+
+            stream._on_failure(notify)
+        config.strict_workload_errors = not strict
+        config.raw_diagnostics = not raw
+        assert stream.stdin is not None
+        stream.stdin.write(b"go\n")
+        stream.stdin.flush()
+        if callback:
+            assert notified.wait(3)
+        with pytest.raises(DockerException) as raised:
+            list(stream)
+        error = raised.value
+        assert type(error) is (
+            DockerException if strict and marked else NoSuchContainer
+        )
+        assert error.docker_command == command
+        assert error.return_code == 125
+        assert error.stdout is None
+        assert error.stderr == "Error: No such container: secret\n"
+        assert ("secret" in str(error)) is raw
+        if callback:
+            assert errors == [error]
+    finally:
+        stream.close()
+
+
 def test_format_cpuset_none() -> None:
     assert format_cpuset(None) is None
 

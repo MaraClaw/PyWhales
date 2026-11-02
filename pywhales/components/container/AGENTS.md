@@ -28,6 +28,7 @@
   Both TTY plus streaming and detach plus streaming are invalid combinations.
 - `start()` streaming requires `attach=True` and a single container; attaching multiple
   containers is invalid. Unattached calls return `None`; attached, nonstreamed calls return `str`.
+- Attached `run()`, non-detached `execute()`, and `start(attach=True)` explicitly pass `workload_status=True` in captured and streamed modes, including handle/root aliases. With `strict_workload_errors=True` on the originating client, nonzero exits raise exact `DockerException`; detached/unattached launches and the image/inspect preflights keep stderr-based specialization. Never mark the preflight or infer workload status from argv; shared exception paths live in [the runtime guide](../../AGENTS.md#configuration-and-policy).
 - Logs use the originating client's general `stream_buffer_bytes` at the shared stream boundary,
   including when collecting text. Keep the owned transport closed on collection/decoding failure.
   `follow=True` without `stream=True` can block until the container stops.
@@ -71,6 +72,7 @@ Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
   eager-log decoding cleanup, and streaming-log ownership; also contains live component tests.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.
+- `tests/pywhales/test_exceptions.py`, `tests/pywhales/test_utils.py`, and `tests/pywhales/test_client_config.py`: local-child strict-workload classification, both stream failure paths, explicit wrapper marks, alias/handle forwarding, and default/detached/preflight controls.
 - `tests/pywhales/components/test_command_deadlines.py`: launch, log, copy/export, and start validation,
   partial output, reaping, and output shapes.
 - `tests/pywhales/components/test_deadline_forwarding.py`: run/execute/log budgets, `start` in every mode and entry,

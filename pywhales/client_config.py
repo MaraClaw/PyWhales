@@ -168,6 +168,7 @@ class ClientConfig:
             argv fallback. Defaults to false for compatibility.
         inherit_environment: Inherit the parent environment for child launches;
             false retains only the platform base and explicit overlay.
+        strict_workload_errors: Keep marked workload failures as DockerException.
     """
 
     config: ValidPath | None = None
@@ -201,6 +202,7 @@ class ClientConfig:
     default_timeout: float | None = None
     strict_env_transport: bool = False
     inherit_environment: bool = True
+    strict_workload_errors: bool = False
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.

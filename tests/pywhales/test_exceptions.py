@@ -1,6 +1,11 @@
+import sys
+from collections.abc import Mapping, Sequence
+from unittest.mock import patch
+
 import pytest
 
-from pywhales import DockerClient
+import pywhales.utils
+from pywhales import Container, DockerClient
 from pywhales.exceptions import (
     DockerException,
     NoSuchConfig,
@@ -15,6 +20,7 @@ from pywhales.exceptions import (
     NotASwarmManager,
     get_docker_exception_type,
 )
+from pywhales.utils import ProcessStream
 
 
 @pytest.mark.parametrize("raw", [False, True])
@@ -514,3 +520,118 @@ def test_context_file_path_cannot_forge_a_kind(path: str) -> None:
         f'context "work": context not found: open {path}: no such file or directory'
     )
     assert get_docker_exception_type(stderr.encode()) is NoSuchContext
+
+
+@pytest.mark.parametrize(
+    ("operation", "specialized"),
+    [
+        ("container-run", False),
+        ("container-run-stream", False),
+        ("container-run-detached", True),
+        ("container-exec", False),
+        ("container-exec-stream", False),
+        ("container-exec-detached", True),
+        ("container-start", False),
+        ("container-start-stream", False),
+        ("container-start-unattached", True),
+        ("handle-exec", False),
+        ("handle-start", False),
+        ("compose-run", False),
+        ("compose-run-stream", False),
+        ("compose-run-detached", True),
+        ("compose-exec", False),
+        ("compose-exec-detached", True),
+        ("preflight", True),
+        ("preflight-pull", True),
+        ("image-inspect", True),
+    ],
+)
+def test_workload_classification_at_wrapper_launch_boundary(
+    operation: str, specialized: bool
+) -> None:
+    program = "import sys; print('Error: No such container: db', file=sys.stderr); sys.exit(125)"
+    client = DockerClient(
+        client_call=[sys.executable, "-c", program], strict_workload_errors=True
+    )
+    handle = Container(client.client_config, "db", is_immutable_id=True)
+
+    # Container.run normally forwards stderr; capture it here to distinguish the
+    # classification decision while still executing the actual local child.
+    def capture_run(
+        args: Sequence[object],
+        *,
+        env: Mapping[str, str] = {},
+        pass_fds: Sequence[int] = (),
+        timeout: float | None = None,
+        tty: bool = False,
+        capture_stderr: bool = True,
+        capture_stdout: bool = True,
+        workload_status: bool = False,
+    ) -> str:
+        return pywhales.utils.run(
+            args,
+            env=env,
+            tty=tty,
+            capture_stdout=capture_stdout,
+            capture_stderr=True,
+            pass_fds=pass_fds,
+            timeout=timeout,
+            workload_status=workload_status,
+        )
+
+    with (
+        patch("pywhales.components.container.cli_wrapper.run", side_effect=capture_run),
+        patch("pywhales.components.image.cli_wrapper.run", side_effect=capture_run),
+        pytest.raises(DockerException) as raised,
+    ):
+        if operation == "container-run":
+            result = client.run("image", pull="never")
+        elif operation == "container-run-stream":
+            result = client.run("image", pull="never", stream=True)
+        elif operation == "container-run-detached":
+            result = client.run("image", pull="never", detach=True)
+        elif operation == "container-exec":
+            result = client.execute("db", ["command"])
+        elif operation == "container-exec-stream":
+            result = client.execute("db", ["command"], stream=True)
+        elif operation == "container-exec-detached":
+            result = client.execute("db", ["command"], detach=True)
+        elif operation == "container-start":
+            result = client.start("db", attach=True)
+        elif operation == "container-start-stream":
+            result = client.start("db", attach=True, stream=True)
+        elif operation == "container-start-unattached":
+            result = client.start("db")
+        elif operation == "handle-exec":
+            result = handle.execute(["command"])
+        elif operation == "handle-start":
+            result = handle.start(attach=True)
+        elif operation == "compose-run":
+            result = client.compose.run("service", tty=False)
+        elif operation == "compose-run-stream":
+            result = client.compose.run("service", tty=False, stream=True)
+        elif operation == "compose-run-detached":
+            result = client.compose.run("service", tty=False, detach=True)
+        elif operation == "compose-exec":
+            result = client.compose.execute("service", ["command"], tty=False)
+        elif operation == "compose-exec-detached":
+            result = client.compose.execute(
+                "service", ["command"], tty=False, detach=True
+            )
+        elif operation == "preflight":
+            result = client.run("image", pull="missing")
+        elif operation == "preflight-pull":
+            result = client.run("image", pull="always")
+        else:
+            result = client.image.inspect("image")
+        if isinstance(result, ProcessStream):
+            with result:
+                list(result)
+
+    assert type(raised.value) is (NoSuchContainer if specialized else DockerException)
+    assert raised.value.return_code == 125
+    assert raised.value.stderr == "Error: No such container: db\n"
+    if operation in {"preflight", "preflight-pull"}:
+        assert raised.value.docker_command[-3:-1] == ["image", "pull"]
+    elif operation == "image-inspect":
+        assert raised.value.docker_command[-3:-1] == ["image", "inspect"]

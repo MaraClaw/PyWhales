@@ -44,6 +44,11 @@ class ExecutionPolicySource(Protocol):
         ...
 
     @property
+    def strict_workload_errors(self) -> bool:
+        """Return whether workload failures avoid stderr classification."""
+        ...
+
+    @property
     def strict_env_transport(self) -> bool:
         """Return whether assignment values must avoid literal argv fallback."""
         ...
@@ -73,6 +78,7 @@ class ExecutionPolicy:
         environment: Immutable client overlay captured at policy selection.
         frozen_environment: Optional preselected full environment for this launch.
         default_timeout: Default local CLI deadline in seconds, or None.
+        strict_workload_errors: Whether marked workload failures remain generic.
     """
 
     stream_buffer_bytes: int | None = None
@@ -83,6 +89,7 @@ class ExecutionPolicy:
     )
     frozen_environment: Mapping[str, str] | None = field(default=None, repr=False)
     default_timeout: float | None = None
+    strict_workload_errors: bool = False
 
 
 class BufferDefault(Enum):
@@ -198,5 +205,6 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
             else MappingProxyType({}),
             frozen,
             _scoped_timeout(source),
+            source.strict_workload_errors,
         )
     return ExecutionPolicy()

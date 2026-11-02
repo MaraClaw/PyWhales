@@ -159,6 +159,7 @@ class DockerClient(DockerCLICaller):
         default_timeout: float | None = None,
         strict_env_transport: bool = False,
         inherit_environment: bool = True,
+        strict_workload_errors: bool = False,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -223,6 +224,8 @@ class DockerClient(DockerCLICaller):
             inherit_environment: Inherit the parent environment by default. When
                 false, retain only PATH and HOME, plus USERPROFILE and SYSTEMROOT
                 on Windows, before applying the explicit overlay.
+            strict_workload_errors: Raise plain DockerException for attached
+                workload failures instead of classifying their stderr. Defaults off.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -261,6 +264,7 @@ class DockerClient(DockerCLICaller):
                 default_timeout=default_timeout,
                 strict_env_transport=strict_env_transport,
                 inherit_environment=inherit_environment,
+                strict_workload_errors=strict_workload_errors,
             )
         super().__init__(client_config)
 

@@ -571,9 +571,10 @@ class ComposeCLI(DockerCLICaller):
                 capture_stdout=False,
                 capture_stderr=False,
                 timeout=timeout,
+                workload_status=True,
             )
         else:
-            return run(full_cmd, env=child_env, timeout=timeout)
+            return run(full_cmd, env=child_env, timeout=timeout, workload_status=True)
 
     def kill(
         self,
@@ -1227,9 +1228,17 @@ class ComposeCLI(DockerCLICaller):
         full_cmd += command
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd, env=child_env, timeout=timeout)
+            return stream_stdout_and_stderr(
+                full_cmd, env=child_env, timeout=timeout, workload_status=True
+            )
         else:
-            result = run(full_cmd, env=child_env, tty=tty, timeout=timeout)
+            result = run(
+                full_cmd,
+                env=child_env,
+                tty=tty,
+                timeout=timeout,
+                workload_status=not detach,
+            )
             if detach:
                 Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)

@@ -480,3 +480,19 @@ def test_strict_env_transport_configuration() -> None:
     )
     config = ClientConfig(strict_env_transport=True)
     assert DockerClient(client_config=config).client_config is config
+
+
+def test_strict_workload_policy_is_opt_in_and_snapshotted() -> None:
+    assert DockerClient().client_config.strict_workload_errors is False
+    client = DockerClient(client_call=[sys.executable], strict_workload_errors=True)
+    command = client.client_config.docker_cmd
+    snapshot = get_execution_policy(command)
+    client.client_config.strict_workload_errors = False
+    assert snapshot.strict_workload_errors is True
+    assert get_execution_policy(command).strict_workload_errors is False
+    assert (
+        DockerClient(
+            client_config=client.client_config, strict_workload_errors=True
+        ).client_config.strict_workload_errors
+        is False
+    )

@@ -31,6 +31,7 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   and detach plus TTY; callers must set `tty=False` for detached or streamed runs.
 - `ps()` returns container resources. Reject `ps()` and detached `run()` in dry-run mode
   before execution; attached `run(tty=False)` can return preview text instead.
+- Non-detached `run()` (captured, TTY, or streamed) and `execute()` (non-streamed; captured or TTY) explicitly pass `workload_status=True`. With originating-client `strict_workload_errors=True`, nonzero exits raise exact `DockerException`; detached and other Compose launches retain specialization. `execute()` has no stream mode; don't add one for this policy. See [shared classification rules](../../AGENTS.md#configuration-and-policy).
 
 ## Local Deadlines
 
@@ -70,6 +71,7 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 Paths below are relative to `tests/pywhales/`; collection/runtime cautions are in [the test guide](../../../tests/AGENTS.md).
 - `test_compose_modernization.py`: argv, per-build progress, empty selection, dry-run resources, watch ownership.
 - `test_compose_build_enum_json.py`: nested JSON, enum/string outputs, independent defaults, raw config.
+- `test_exceptions.py`: strict-workload marks on non-detached `run`/`execute`, with detached classification controls; shared captured and stream exception paths are covered in `test_utils.py` too.
 - `components/test_compose.py`: top layouts/raw/no-op/error cases, logs/events ownership, legacy integration.
 - `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event/pull/push/watch
   deadline execution, forwarding, and empty-selection validation.
