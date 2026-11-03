@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.1.5
+
+### New Features
+
+- Admission `ClassLimit.pending_demand_capacity` optionally bounds queued declared
+  demand separately from pending request count and active demand. Exact fits are
+  accepted; zero still permits immediate grants. Queue-demand rejection never
+  invokes the operation or stream factory and has a distinct `pending_demand_full`
+  reason and saturating snapshot counter. The default remains unbounded.
+- `InspectionPolicy.max_total_launch_attempts` bounds accepted CLI launch
+  reservations across enclosing observation scopes and copied contexts. Captured
+  calls, streams, archive loads and lazy saves share atomic accounting; accepted
+  reservations are not refunded after spawn or CLI failures. Inventory checks its
+  complete inspection plan against remaining allowances before its first inspect,
+  without reserving the whole plan. Exhaustion raises `ObservationLimitError` with
+  reason `total_launch_attempts`; the default remains unbounded.
+- `capture_nodes(require_leader=True)` freezes an optional leadership requirement
+  into `NodeTarget`. A nonempty designated-manager subset must observe exactly one
+  leader on both complete clear passes, allowing the leader identity to change.
+  Omitted leader fields mean false; applicable explicit nonboolean values produce
+  cause-free `malformed` outcomes. Bounded deadline detail includes
+  `leader_mismatch_managers`, with reconciliation round-trip support. Checks remain
+  read-only, sequential and limited to selected managers, not global leadership.
+- Scheduled offline fleet steps accept fixed positive finite
+  `queue_retry_backoff_seconds` with a queue lease and multiple allowed attempts.
+  Backoff occupies neither queued nor active capacity, retains the original
+  deadline, and is cancelled immediately on early stop while active work drains.
+  Launched work is never retried. Explicit intervals preserve retry history;
+  backoff schedules use local version 2 while binding version stays 1. Unset
+  options preserve legacy report bytes and operation digests.
+
+### Behavior Changes And Fixes
+
+- All telemetry record kinds now emit schema version 7. The closed admission
+  outcome vocabulary adds `pending_demand_full`; decisions remain payload-free,
+  delivered outside owner locks, with no added observer overhead when disabled.
+- Imported fleet histories reject unexplained retry gaps, invalid backoff or
+  deadline arithmetic, false peaks, and pending work that survives an established
+  early stop. Supplied backoff values bind operation digests and comparison scope.
+  Reports remain offline, unqualified, and non-authorizing with zero connections
+  and unchanged `no_go` decisions.
+
+### Documentation
+
+- Updated API documentation, agent guides, and the consumer skill for queued
+  demand, shared launch reservations, schema 7, selected-manager leadership, and
+  offline fleet retry contracts.
+
 ## 1.1.4
 
 ### New Features

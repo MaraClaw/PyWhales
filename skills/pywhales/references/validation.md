@@ -23,7 +23,7 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs with project version 1.1.4.
+The guidance describes current source APIs with project version 1.1.5.
 An installed version string alone isn't proof of support. Check environment
 inheritance, node and standalone targets, completion/restart/exit keywords, strict workload
 errors, refusal/admission correlation records, queued-demand and launch-attempt limits,

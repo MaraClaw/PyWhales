@@ -25,7 +25,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes current source APIs with project version 1.1.4.
+This guidance describes current source APIs with project version 1.1.5.
 An installed version string alone isn't proof of support; check actual
 capabilities before use.
 
