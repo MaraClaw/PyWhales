@@ -78,7 +78,9 @@ print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
 print({f.name: f.default for f in fields(ComposeTarget)}["fail_on_exit"])  # False
 print({f.name: f.default for f in fields(ContainerTarget)}["fail_on_exit"])  # False
 for target_type in (ComposeTarget, ContainerTarget):
-    print({f.name: f.default for f in fields(target_type)}["fail_on_unhealthy"])  # False
+    print(
+        {f.name: f.default for f in fields(target_type)}["fail_on_unhealthy"]
+    )  # False
 print(get_annotations(Failure, format=Format.STRING)["reason"])  # unhealthy
 print(get_args(ConvergenceSummary.__value__))  # includes unhealthy
 print(signature(CreateRequest))  # health_start_interval: int | None = None
