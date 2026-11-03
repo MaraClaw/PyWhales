@@ -17,6 +17,7 @@ For wrapper edits, read the production [component](../../../pywhales/components/
 | Environment forwarding across output branches | `test_env_forwarding.py`, `test_env_branch_transport.py` | Fake Python CLIs record argv/environment forwarding versus literal fallback across captured, streamed, detached and TTY branches. |
 | Safe/raw JSON failures and network creation | `test_cli_json_parse_errors.py`, `test_network_create.py` | Patched captures and real Python children, not Docker. |
 | Launch/transfer/subscription/prune deadlines | `test_command_deadlines.py`, `test_deadline_forwarding.py` | Temporary Python CLI execution versus mocked forwarding; inspect the selected fixture. |
+| Container startup health intervals | `test_container_health_interval.py` | Fake Python CLI covers whole-second create/run forwarding, root aliases and validation before preflight; static arguments/returns live in `../test_command_deadline_types.py`. |
 | Modern option and return contracts | `../test_buildx_modernization.py`, `../test_compose_modernization.py` | Simulated commands and local children, distinct from installed-plugin integration. |
 | Installed modern Docker capabilities | `test_docker_modern_integration.py` | Explicit `docker` mark; real executable, daemon and pinned Compose/Buildx plugins, even for dry-run/report cases. |
 | Output enums, JSON values and static types | `../test_*enum_json*.py`, `../test_*types.py`, `../test_*type_contracts.py` | See the parent's static-contract rules; pytest doesn't execute `_check_*` functions. |

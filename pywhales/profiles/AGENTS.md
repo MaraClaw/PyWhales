@@ -33,15 +33,20 @@
   CLI fragment fits. `LogPolicy` allows `json-file` or `local`; non-blocking needs `loss_approved` and
   `buffer_bytes`, blocking forbids `buffer_bytes`.
 - `RuntimePolicy.supported_controls` is operator-declared and must contain every name in `CONTROLS`.
-  Adding a control means re-qualifying each runtime declaration.
+  Adding a control means re-qualifying each runtime declaration. `health_start_interval` is conditional,
+  not in `CONTROLS`: the selected runtime must declare it only when the request sets it.
 
 ## Planning
 
 - `plan_create` is pure: no `shutil.which`, subprocess, or image call. Order matters: binding first, then
   image (registry, digest, reference syntax), user, capabilities, privilege, read-only, security options, mounts,
-  networks, resources, logging, runtime. Rejection tests assert fixed field names such as `image.digest`.
+  networks, resources, logging, startup health interval, runtime. Rejection tests assert fixed field names such as `image.digest`.
 - Profile values are exact allowlists: security options and logging must equal the profile's, mounts must be a
   subset with unique targets, resources stay at or under ceilings. No profile registry or isolation default exists.
+- `CreateRequest.health_start_interval` and `SecurityProfile.max_health_start_interval` are `None` or positive
+  exact integer seconds. A set request needs an explicit ceiling (`NOT_APPROVED` if absent) and must not exceed
+  it (`LIMIT`); missing runtime control is `UNSUPPORTED`. Omission leaves the image setting untouched. Planning
+  and creation revalidate the values, including tampered plans, before executable preparation or image preflight.
 - `CreatePlan` hides its profile and request in `repr`; `summary` returns only profile, version, and endpoint alias.
 
 ## Creation
@@ -50,11 +55,14 @@
   therefore comes before the pull or inspect preflight. Queue the whole function through admission, not a started
   operation. It doesn't start the container, retry, inspect effective isolation, or hold secrets.
 - Fixed mappings: `cap_drop=("ALL",)`, `memory_swap` equals `memory`, log options `max-size`, `max-file`, `mode`
-  (plus `max-buffer-size` when non-blocking), and mounts rebuilt from typed `Mount` fields.
+  (plus `max-buffer-size` when non-blocking), mounts rebuilt from typed `Mount` fields, and approved
+  `health_start_interval` forwarded to container create. Operators qualify Docker API 1.44+; there is no probe.
 
 ## Related Tests
 
-- `tests/pywhales/test_profiles.py`: exact create argv, per-field rejection before any preflight, binding, summary.
-- `tests/pywhales/test_profiles_validation.py`: cached endpoint override, malformed components, one-time resolution.
+- `tests/pywhales/test_profiles.py`: exact create argv, per-field rejection before any preflight, binding, summary,
+  startup health-interval approval/ceiling, conditional runtime control and omission.
+- `tests/pywhales/test_profiles_validation.py`: cached endpoint override, malformed components, one-time resolution,
+  exact-positive-integer intervals and tampered-plan rejection before preparation.
 - `tests/pywhales/test_profiles_fixtures.py`: shared offline `client`, `create_request`, and `profile` fixtures.
 - `tests/pywhales/test_environment.py`: `test_overlay_change_invalidates_endpoint_binding`.
