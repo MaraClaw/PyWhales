@@ -145,7 +145,16 @@ digest-required profiles reject mutable references without substituting an image
 
 `RuntimePolicy` is the operator's qualified capability declaration, not a probe.
 Every control named by `CONTROLS` must be supported for the selected runtime and
-rootless setting. Rootless is not enabled by a Docker create flag: the approved
+rootless setting. An optional `CreateRequest.health_start_interval` is a positive
+exact integer in seconds. To approve it, set the independent positive integer
+`SecurityProfile.max_health_start_interval` ceiling and add
+`"health_start_interval"` to the selected runtime's `supported_controls`.
+An equal value is permitted; no ceiling means the override is unapproved. Omitting
+the request does not require this additional control. It leaves the image's health
+command and start period unchanged. Operators must qualify Docker CLI and daemon
+support for API 1.44+; PyWhales does not probe or fall back.
+
+Rootless is not enabled by a Docker create flag: the approved
 endpoint must already select that runtime mode. Qualify workloads, network,
 cgroups, swap and log behavior on an authorized disposable platform before
 asserting effectiveness. No rootless parity or isolation certification is made.

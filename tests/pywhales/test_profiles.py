@@ -11,6 +11,7 @@ from pywhales.profiles import (
     LogMode,
     Mount,
     PolicyError,
+    PolicyReason,
     ResourceLimits,
     RuntimePolicy,
     SecurityProfile,
@@ -229,3 +230,68 @@ def test_nonblocking_logging_needs_explicit_loss_approval(
 def test_raw_mount_fragment_is_rejected(source: str) -> None:
     with pytest.raises(PolicyError):
         Mount(kind="bind", source=source, target="/data", read_only=True)
+
+
+def test_health_interval_exact_ceiling_reaches_create(
+    client: DockerClient, profile: SecurityProfile, create_request: CreateRequest
+) -> None:
+    runtime = replace(
+        profile.runtimes[0], supported_controls=CONTROLS | {"health_start_interval"}
+    )
+    approved = replace(profile, runtimes=(runtime,), max_health_start_interval=5)
+    request = replace(create_request, health_start_interval=5)
+    with (
+        patch("shutil.which") as lookup,
+        patch(
+            "pywhales.components.container.cli_wrapper.run", return_value="created-id"
+        ) as launch,
+    ):
+        plan = plan_create(approved, request, client)
+        lookup.assert_not_called()
+        create_from_plan(client, plan)
+    argv = launch.call_args.args[0]
+    index = argv.index("--health-start-interval")
+    assert argv[index + 1] == "5s"
+    assert "--health-cmd" not in argv
+    assert "--health-start-period" not in argv
+
+
+@pytest.mark.parametrize(
+    ("ceiling", "controls", "interval", "field", "reason"),
+    [
+        (None, CONTROLS, 5, "health_start_interval", PolicyReason.NOT_APPROVED),
+        (4, CONTROLS, 5, "health_start_interval", PolicyReason.LIMIT),
+        (5, CONTROLS, 5, "runtime", PolicyReason.UNSUPPORTED),
+    ],
+)
+def test_health_interval_rejections_are_preflight_free(
+    client: DockerClient,
+    profile: SecurityProfile,
+    create_request: CreateRequest,
+    ceiling: int | None,
+    controls: frozenset[str],
+    interval: int,
+    field: str,
+    reason: PolicyReason,
+) -> None:
+    runtime = replace(profile.runtimes[0], supported_controls=controls)
+    approved = replace(profile, runtimes=(runtime,), max_health_start_interval=ceiling)
+    request = replace(create_request, health_start_interval=interval, pull="always")
+    with (
+        patch("shutil.which") as lookup,
+        patch("pywhales.components.image.cli_wrapper.ImageCLI") as image,
+        pytest.raises(PolicyError) as failure,
+    ):
+        plan_create(approved, request, client)
+    assert (failure.value.field, failure.value.reason) == (field, reason)
+    lookup.assert_not_called()
+    image.assert_not_called()
+
+
+def test_omitted_health_interval_keeps_baseline_runtime(
+    client: DockerClient, profile: SecurityProfile, create_request: CreateRequest
+) -> None:
+    assert (
+        plan_create(profile, create_request, client).request.health_start_interval
+        is None
+    )
