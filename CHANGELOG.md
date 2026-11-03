@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.1.6
+
+### New Features
+
+- `AdmissionOwner(owner_pending_demand_capacity=...)` optionally bounds queued
+  declared demand across all of its pressure classes. Exact fits are accepted;
+  zero still permits immediate grants. Rejection uses
+  `owner_pending_demand_full` and an appended saturating outcome counter, without
+  invoking the operation or stream factory. The default remains unbounded.
+- `capture_compose()` and `capture_containers()` accept default-off
+  `fail_on_unhealthy=True`. An explicitly unhealthy long-running member fails
+  only while running, unpaused, not restarting, and within its enabled restart
+  budget. Completion members ignore health. Both observation passes can return
+  cause-free `Failure(reason="unhealthy")`; reconciliation records `FAILED` with
+  that closed reason and clears deadline detail without retaining health data.
+- Container `create()` and all `run()` modes and root aliases accept
+  `health_start_interval`: positive whole-second integers or integral-second
+  `timedelta` values, validated before image preflight. Create profiles accept
+  positive exact integer seconds, require an explicit
+  `SecurityProfile.max_health_start_interval` ceiling, and require the selected
+  runtime to declare the control only when requested. This option requires an
+  operator-qualified Docker runtime supporting API 1.44+; no version probes or
+  fallback are added.
+- `InspectionPolicy.max_concurrent_children` optionally bounds simultaneously
+  owned local CLI children across captured calls, streams, and image archive
+  transfers. Nested scopes and copied contexts share atomic allowances.
+  Saturation raises `ObservationLimitError` with reason `concurrent_children`
+  without spawning, reading upload input, or consuming a launch attempt. Slots
+  release when children are reaped, even with buffered output still undrained;
+  accepted spawn failures retain their cumulative attempt charge. The default
+  remains unbounded, and the limit does not count daemon workloads.
+
+### Behavior Changes And Fixes
+
+- All telemetry record kinds now emit schema version 8. Admission decisions add
+  the closed `owner_pending_demand_full` outcome; existing field meanings,
+  correlation, payload-free records, and unlocked observer delivery remain intact.
+
+### Documentation
+
+- Updated API documentation, relevant agent guides, and the consumer skill for
+  shared queued demand, unhealthy convergence, approved startup health intervals,
+  concurrent local children, and schema 8 telemetry.
+
 ## 1.1.5
 
 ### New Features
