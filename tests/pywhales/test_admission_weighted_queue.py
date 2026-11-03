@@ -25,6 +25,7 @@ def test_shrink_wakes_fifo_head_without_allowing_growth_to_bypass_waiters() -> N
     owner = AdmissionOwner(
         EndpointIdentity("local"),
         {pressure: ClassLimit(3, 2, demand_capacity=10, pending_demand_capacity=5)},
+        owner_pending_demand_capacity=5,
     )
     request = owner.request(pressure, demand=8)
     stream = request.stream(lambda: nullcontext(iter(())))
@@ -123,6 +124,7 @@ def test_queue_terminal_paths_drop_demand_without_releasing_active_work(
     owner = AdmissionOwner(
         EndpointIdentity("local"),
         {pressure: ClassLimit(2, 1, demand_capacity=5, pending_demand_capacity=3)},
+        owner_pending_demand_capacity=3,
     )
     active = owner.request(pressure, demand=4)
     stream = active.stream(lambda: nullcontext(iter(())))

@@ -197,6 +197,16 @@ must remain valid, and over-budget members remain blockers. This option does
 not change `compose.up(wait=True)`; see the convergence reference for the
 capture/wait workflow and validation.
 
+`capture_compose(..., fail_on_unhealthy=True, policy=..., timeout=...)` separately
+opts into cause-free `Failure(reason="unhealthy")` for long-running members that
+are running, unpaused, not restarting, within any restart budget, and report
+exactly `unhealthy`. The flag must be an exact bool, defaults to `False`, and
+is frozen on the target. Completion ignores health. Missing health blocks only
+configured healthchecks; any reported non-healthy status blocks readiness even
+without a configured check. Failed completion, restart-count validation, and
+eligible `exited` failures take precedence. See the convergence reference for
+confirming-pass behavior; this doesn't change `compose.up(wait=True)`.
+
 `capture_compose(..., max_restarts=None, policy=..., timeout=...)` leaves restart
 counts unchecked by default. Set a nonnegative integer (never a boolean) to fix
 a budget for each long-running container's current Docker `RestartCount`, not

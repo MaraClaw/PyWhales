@@ -42,8 +42,14 @@ class SecurityProfile:
     ceilings: ResourceLimits
     logging: LogPolicy
     runtimes: tuple[RuntimePolicy, ...]
+    max_health_start_interval: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_health_start_interval is not None and (
+            type(self.max_health_start_interval) is not int
+            or self.max_health_start_interval <= 0
+        ):
+            raise PolicyError("profile.max_health_start_interval", PolicyReason.INVALID)
         token(self.name, "profile.name")
         token(self.version, "profile.version")
         for name in ("bindings", "security_options", "runtimes"):
@@ -155,11 +161,27 @@ def plan_create(
         raise PolicyError("resources", PolicyReason.LIMIT)
     if request.logging != profile.logging:
         raise PolicyError("logging", PolicyReason.NOT_APPROVED)
+    interval = request.health_start_interval
+    ceiling = profile.max_health_start_interval
+    if ceiling is not None and (type(ceiling) is not int or ceiling <= 0):
+        raise PolicyError("profile.max_health_start_interval", PolicyReason.INVALID)
+    if interval is not None:
+        if type(interval) is not int or interval <= 0:
+            raise PolicyError("health_start_interval", PolicyReason.INVALID)
+        if ceiling is None:
+            raise PolicyError("health_start_interval", PolicyReason.NOT_APPROVED)
+        if interval > ceiling:
+            raise PolicyError("health_start_interval", PolicyReason.LIMIT)
     runtimes = [
         runtime
         for runtime in profile.runtimes
         if (runtime.name, runtime.rootless) == (request.runtime, request.rootless)
     ]
     if not runtimes or not runtimes[0].supported_controls >= CONTROLS:
+        raise PolicyError("runtime", PolicyReason.UNSUPPORTED)
+    if (
+        interval is not None
+        and "health_start_interval" not in runtimes[0].supported_controls
+    ):
         raise PolicyError("runtime", PolicyReason.UNSUPPORTED)
     return CreatePlan(profile, request)

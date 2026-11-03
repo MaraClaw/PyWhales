@@ -43,7 +43,7 @@
   operation match the spec. `OBSERVING` commits before `observe`. `Success` and `Failure` finish the attempt.
   `Deadline` and `Cancelled` stay `OBSERVING`; `deadline_detail` is the exact integer-only `DeadlineDetail`, valid
   only for convergence `"deadline"`, and a later outcome clears it.
-- `ConvergenceSummary` includes `completion_failed` and opt-in long-running `exited`: project either to `FAILED` with the closed reason and no deadline detail. Keep its failure literals aligned with convergence `Failure.reason`. Never journal container state, exit codes, output or a failure cause; [convergence semantics](../convergence/AGENTS.md) stay there.
+- `ConvergenceSummary` includes `completion_failed` and opt-in long-running `exited`/`unhealthy`: project each to `FAILED` with the closed reason and no deadline detail. Keep its failure literals aligned with convergence `Failure.reason`. Never journal container state, health payloads, exit codes, output or a failure cause; [convergence semantics](../convergence/AGENTS.md) stay there.
 - `_context` verifies the lease before each adapter call, and adapters call `check_current` before every launch.
   Docker can't enforce this, so a pause after a check still races a lease transfer.
 - Observation errors become `AdapterUnavailable` `from None`. Store conflicts and outages halt the pass with no
@@ -66,3 +66,4 @@
 - `tests/pywhales/test_reconciliation_ownership.py`: 64-character bounds round-trip through storage labels.
 - `test_reconciliation.py::test_real_cli_completion_failure_is_journaled_as_a_closed_reason` guards completion failure projection without raw payloads.
 - `test_reconciliation.py` also drives fake-CLI `fail_on_exit` observation through the controller, verifying `FAILED`/`exited`, cleared deadline detail, and no exit-code/output payload.
+- `test_real_cli_unhealthy_failure_clears_deadline_without_replay` in that module covers `fail_on_unhealthy`, closed `FAILED`/`unhealthy`, cleared deadline detail, payload exclusion and no repeated mutation.

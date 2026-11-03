@@ -9,6 +9,7 @@ from pywhales.profiles import (
     EndpointBinding,
     Mount,
     PolicyError,
+    PolicyReason,
     SecurityProfile,
     create_from_plan,
     plan_create,
@@ -94,3 +95,50 @@ def test_approved_observer_is_retained_by_reference(
     result = plan_create(replace(profile, bindings=(binding,)), create_request, client)
     assert result.request == create_request
     assert records == []
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "private-value"])
+@pytest.mark.parametrize("target", ["request", "profile"])
+def test_health_interval_inputs_are_exact_positive_integers(
+    value: object, target: str, profile: SecurityProfile, create_request: CreateRequest
+) -> None:
+    field = (
+        "health_start_interval" if target == "request" else "max_health_start_interval"
+    )
+    with pytest.raises(PolicyError) as caught:
+        replace(create_request if target == "request" else profile, **{field: value})
+    assert caught.value.field == (field if target == "request" else f"profile.{field}")
+    assert caught.value.reason == PolicyReason.INVALID
+    assert "private-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize("tamper", ["request", "ceiling"])
+def test_tampered_health_plan_is_rejected_before_preparation(
+    tamper: str,
+    client: DockerClient,
+    profile: SecurityProfile,
+    create_request: CreateRequest,
+) -> None:
+    runtime = replace(
+        profile.runtimes[0],
+        supported_controls=profile.runtimes[0].supported_controls
+        | {"health_start_interval"},
+    )
+    approved = replace(profile, runtimes=(runtime,), max_health_start_interval=5)
+    request = replace(create_request, health_start_interval=5, pull="always")
+    plan = plan_create(approved, request, client)
+    if tamper == "request":
+        object.__setattr__(request, "health_start_interval", 6)
+    else:
+        object.__setattr__(approved, "max_health_start_interval", True)
+    with (
+        patch("shutil.which") as lookup,
+        patch("pywhales.components.image.cli_wrapper.ImageCLI") as image,
+        pytest.raises(PolicyError) as caught,
+    ):
+        create_from_plan(client, plan)
+    assert caught.value.reason == (
+        PolicyReason.LIMIT if tamper == "request" else PolicyReason.INVALID
+    )
+    lookup.assert_not_called()
+    image.assert_not_called()

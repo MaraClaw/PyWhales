@@ -35,6 +35,7 @@ policy = InspectionPolicy(
     max_total_references=200,
     max_total_response_bytes=4_194_304,
     max_total_launch_attempts=8,
+    max_concurrent_children=2,
 )
 cancel = Event()
 request = InventoryRequest(
@@ -50,11 +51,12 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
 `max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`,
-`max_total_stdin_bytes`, and `max_total_launch_attempts` default to `None`. An unset output total leaves that
+`max_total_stdin_bytes`, `max_total_launch_attempts`, and `max_concurrent_children`
+default to `None`. An unset output total leaves that
 aggregate unbounded; unset stdin still refuses captured input inside an
 observation unless an enclosing scope supplies a stdin budget. Booleans, zero,
-and negative values are invalid for every policy limit. The illustrative limits
-above aren't a universal sizing recommendation. `observation()`
+negative values, and non-exact integers are invalid for every policy limit.
+The illustrative limits above aren't a universal sizing recommendation. `observation()`
 is a context manager applying those limits, plus an optional absolute
 monotonic `deadline` and a `cancel` `Event`, to synchronous list/inspect
 calls executed through it. Nested scopes can only tighten the active limits,
@@ -72,6 +74,21 @@ reset an outer allowance; explicitly copied contexts share its consumption.
 A separate scope created independently in each thread does not share a budget.
 Lazy saves reserve at first iteration, and their separate eager inspection costs
 its own captured reservation.
+
+`max_concurrent_children` separately caps owned local CLI children until reap,
+not daemon workloads, output buffers, or open stream/admission handles. It is
+`None` (unbounded) or a positive exact integer. Nested scopes enforce every
+enclosing synchronized account; explicitly copied contexts share those accounts.
+Saturation raises `ObservationLimitError(reason="concurrent_children")` without
+waiting, spawning, reading upload input, or consuming any attempt or slot.
+Accepted launches debit attempt and child accounts atomically. A failed spawn
+consumes its accepted attempt but returns its slot. A successful spawn keeps the
+slot until the local child is reaped, not merely until pipe EOF or scope exit.
+After reap, output may still be buffered and the stream or admission permit may
+remain open; close or exhaust owned streams anyway. Lazy `save` reserves under
+the scope active at first iteration, while eager inspect is charged separately
+under its own launch scope. Inventory's sequential chunk plan doesn't reserve
+child slots for the whole plan; each launch must fit at its actual preflight.
 
 The scope's restrictions belong to the shared synchronous captured path (the
 path list/inspect-style calls use). Inside a scope, that path rejects `tty`,
@@ -400,6 +417,7 @@ match capture_compose(
     services,
     completion_services=("migrate",),
     fail_on_exit=True,  # opt in to failing when a long-running member exits
+    fail_on_unhealthy=True,  # opt in to eligible running unhealthy failures
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -416,7 +434,7 @@ match capture_compose(
 ```
 
 `capture_compose(client, services, *, completion_services=(), max_restarts=None,
-fail_on_exit=False, policy, timeout, cancel=None)` returns a
+fail_on_exit=False, fail_on_unhealthy=False, policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
@@ -439,6 +457,9 @@ waiting.
 - `fail_on_exit` must be a bool; other values raise `ValueError` before launch.
   The target freezes this choice, which defaults to `False` for compatibility.
   Capture does not itself treat an exit as a failure; `wait()` evaluates it.
+- `fail_on_unhealthy` likewise requires an exact bool, defaults to `False`, and
+  is frozen on the target before launch. Capture records the policy; only
+  `wait()` evaluates terminal unhealthy failures.
 - Capture lists the selected services' containers with stopped ones included,
   inspects each, and skips one-off `compose run` containers. For every selected
   service the target records the full container IDs and the single
@@ -455,10 +476,10 @@ waiting.
   service label or config hash is `superseded`, so a scale-up or recreate after
   capture ends the wait instead of moving the target.
 - An unmarked service's container counts as ready only when it is `running`, not restarting, not
-  paused, and `healthy` whenever a healthcheck is configured; a configured
-  healthcheck with no health status yet blocks, and a `NONE` healthcheck test
-  counts as none. By default, an exited container isn't running and remains a
-  blocker; mark one-shot services for completion instead.
+  paused, and any reported health status is `healthy`, even without a configured
+  healthcheck. Missing `Health` blocks only when a healthcheck is configured;
+  a `NONE` healthcheck test counts as none. By default, an exited container isn't
+  running and remains a blocker; mark one-shot services for completion instead.
 - A marked service completes only when every captured container is `exited`
   with `ExitCode` 0 and not restarting. Created, running, or restarting
   containers remain unfinished. A non-restarting container exited nonzero ends
@@ -474,6 +495,17 @@ waiting.
   exits, so a malformed count yields `malformed`. Restarting members and exited
   members over budget remain blockers rather than producing `exited`. Completion
   rules and Swarm service or stack targets are unchanged.
+- With `fail_on_unhealthy=True`, a long-running member reporting exactly
+  `unhealthy` produces cause-free `Failure(reason="unhealthy")` only when running,
+  unpaused, not restarting, and within any enabled restart budget. A reported
+  status counts even without a configured healthcheck. `starting`, missing
+  `Health`, and other non-healthy statuses stay blockers under the readiness rules
+  above, not terminal unhealthy failures. Completion members ignore health.
+  Wire validation comes first, then failed completion, enabled restart-count
+  validation, eligible `exited`, and eligible `unhealthy`, across the complete
+  selection. The policy applies on first and confirming evaluations; paused,
+  restarting, or over-budget members remain blockers. Default-off leaves
+  unhealthy members pending and doesn't change Swarm targets.
 - When a cycle finds all long-running services ready and completion services
   finished, `wait()` lists and checks the project again. `Success` requires
   that mandatory second pass to satisfy the same conditions and be unchanged.
@@ -491,7 +523,7 @@ for the exit-code API.
 
 Check that the installed package exports `ContainerTarget` and
 `capture_containers`, that capture accepts `completion`, `max_restarts`, and
-`fail_on_exit`, and
+both `fail_on_exit` and `fail_on_unhealthy`, and
 that convergence `wait` accepts `ContainerTarget`; see
 [Usage validation](validation.md). A version string alone doesn't establish
 these capabilities.
@@ -522,6 +554,7 @@ target = capture_containers(
     ("database", "migration"),
     completion=("migration",),
     fail_on_exit=True,  # opt in to failing when a long-running member exits
+    fail_on_unhealthy=True,  # opt in to eligible running unhealthy failures
     policy=policy,
     timeout=10,
     cancel=cancel,
@@ -536,20 +569,20 @@ elif isinstance(target, (Deadline, Cancelled)):
 ```
 
 `capture_containers(client, references, *, completion=(), max_restarts=None,
-fail_on_exit=False, policy, timeout, cancel=None)` returns a `ContainerTarget` or typed
+fail_on_exit=False, fail_on_unhealthy=False, policy, timeout, cancel=None)` returns a `ContainerTarget` or typed
 `Failure`/`Deadline`/`Cancelled`. Capture and wait never launch, restart, stop,
 or remove containers.
 
 `references` must be a nonempty tuple of distinct, nonempty names or ID prefixes.
 `completion` must be a tuple of distinct references drawn from that selection;
 its default `()` leaves all members long-running. `max_restarts` is `None`
-(disabled) or a nonnegative integer, never a boolean. `fail_on_exit` must be a
-bool and defaults to `False`. Invalid selections, completion tuples, restart
-budgets, exit flags, or timeouts, and clients configured with
-`compose_dry_run=True`, raise `ValueError` before any CLI launch.
+(disabled) or a nonnegative integer, never a boolean. `fail_on_exit` and
+`fail_on_unhealthy` must each be an exact bool and default to `False`. Invalid
+selections, completion tuples, restart budgets, failure flags, or timeouts, and
+clients configured with `compose_dry_run=True`, raise `ValueError` before any CLI launch.
 
 Capture resolves each reference once to a full lowercase 64-hex container ID.
-The target freezes those IDs, completion IDs, restart budget, and exit flag; keep its
+The target freezes those IDs, completion IDs, restart budget, and failure flags; keep its
 originating client configuration stable and its IDs out of untrusted output.
 Different references resolving to the same ID produce cause-free
 `Failure(reason="malformed")`, as does unusable inspect output. A missing
@@ -561,11 +594,13 @@ still enforces its service labels, config hashes, and fixed project membership.
 
 The [Compose readiness and completion rules](#compose-project) apply per
 standalone container: unmarked members must be running, not restarting or
-paused, and healthy when a healthcheck is configured. Marked members must exit
+paused, and any reported health must be healthy; missing `Health` blocks only a
+configured healthcheck. Marked members must exit
 0 without restarting; a nonzero exit without restarting is cause-free
 `completion_failed`, and a missing or malformed exit code is cause-free
-`malformed`. The Compose `fail_on_exit` rules above also apply: capture does not
-evaluate exits as failures, and by default an exited long-running member remains
+`malformed`. Both Compose failure-policy rules and their precedence above apply:
+capture does not evaluate exits or unhealthy state as terminal failures, and by
+default an exited or unhealthy long-running member remains
 a blocker. An enabled restart budget checks each long-running member's current
 `RestartCount`, not restarts since capture. Missing, negative, or non-integer
 counts are cause-free `malformed`; over-budget readings block success but a
@@ -590,9 +625,12 @@ reasons allowed to overlap. Swarm counters are `missing_ready_slots`,
 `missing_ready_nodes` (a GlobalJob with an approved node not yet complete), each
 counting affected services rather than tasks or nodes. For Compose and standalone
 targets the long-running readiness counters are `non_running_containers`,
-`restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
-configured healthcheck that isn't `healthy`, including still `starting` or not
-yet reported). A restarting or paused container also counts as non-running.
+`restarting_containers`, `paused_containers`, and `unhealthy_containers` (any
+reported health that isn't `healthy`, or missing health with a configured
+healthcheck). These are pending blockers, including `starting`; the opt-in
+terminal `unhealthy` reason follows the eligibility rules above. Restarting and
+paused containers have their own counters; `non_running_containers` tests status
+alone.
 `unfinished_completion_containers` counts affected completion services, not
 individual containers or replicas; the other readiness counters exclude
 completion services.
@@ -633,6 +671,9 @@ Leases don't fence Docker itself; there is no exactly-once guarantee or built-in
 reset/retry/delete workflow. Check installed signatures and the application's
 ownership/recovery design before opting in; don't replace failed mutating calls
 with blind retries.
-The journal's convergence failure vocabulary also accepts `completion_failed`
-and `exited`. An `exited` failure projects to `FAILED` with no deadline detail,
+The journal's convergence failure vocabulary also accepts `completion_failed`,
+`exited`, and `unhealthy`. An adapter observing a target captured with
+`fail_on_unhealthy=True` can return that failure; reconciliation projects it to
+`FAILED` with convergence `"unhealthy"`, clears any prior deadline detail, and
+doesn't replay the mutation. As with `exited`, it retains no container state,
 exit code, output, or failure cause.

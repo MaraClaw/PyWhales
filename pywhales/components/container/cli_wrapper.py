@@ -654,6 +654,19 @@ ContainerPath = tuple[Container | str, ValidPath]
 ValidContainer = Container | str
 
 
+def _health_start_interval_seconds(value: int | timedelta | None) -> int | None:
+    """Validate a positive whole-second startup health interval before preflight."""
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        seconds, remainder = divmod(value, timedelta(seconds=1))
+        if seconds > 0 and not remainder:
+            return seconds
+    elif type(value) is int and value > 0:
+        return value
+    raise ValueError("health_start_interval must be positive whole seconds")
+
+
 class RunArgs(TypedDict, total=False, closed=True):
     add_hosts: Iterable[tuple[str, str]]
     blkio_weight: int | None
@@ -692,6 +705,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     health_cmd: str | None
     health_interval: int | timedelta | None
     health_retries: int | None
+    health_start_interval: int | timedelta | None
     health_start_period: int | timedelta | None
     health_timeout: int | timedelta | None
     hostname: str | None
@@ -908,6 +922,7 @@ class ContainerCLI(DockerCLICaller):
         health_cmd: str | None = None,
         health_interval: int | timedelta | None = None,
         health_retries: int | None = None,
+        health_start_interval: int | timedelta | None = None,
         health_start_period: int | timedelta | None = None,
         health_timeout: int | timedelta | None = None,
         hostname: str | None = None,
@@ -974,14 +989,20 @@ class ContainerCLI(DockerCLICaller):
         signature, `detach=True` is forwarded to the create CLI rather than
         providing a separate return mode.
 
+        `health_start_interval` accepts positive whole seconds as an integer or
+        integral-second timedelta. The operator must qualify Docker API 1.44+
+        support. Omission leaves the image's health settings unchanged.
+
         Returns:
             The created container using the originating client configuration.
             Using it as a context manager opts into stopping and removal on exit.
 
         Raises:
             TypeError: `command` is a shell string rather than an argv sequence.
+            ValueError: `health_start_interval` is not positive whole seconds.
             DockerException: Image acquisition or container creation fails.
         """
+        start_interval_seconds = _health_start_interval_seconds(health_start_interval)
         if isinstance(command, str):
             error_message = textwrap.dedent(
                 f"""\
@@ -1058,6 +1079,9 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--health-cmd", health_cmd)
         full_cmd.add_simple_arg("--health-interval", to_seconds(health_interval))
         full_cmd.add_simple_arg("--health-retries", health_retries)
+        full_cmd.add_simple_arg(
+            "--health-start-interval", to_seconds(start_interval_seconds)
+        )
         full_cmd.add_simple_arg(
             "--health-start-period", to_seconds(health_start_period)
         )
@@ -1908,6 +1932,7 @@ class ContainerCLI(DockerCLICaller):
         health_cmd: str | None = None,
         health_interval: int | timedelta | None = None,
         health_retries: int | None = None,
+        health_start_interval: int | timedelta | None = None,
         health_start_period: int | timedelta | None = None,
         health_timeout: int | timedelta | None = None,
         hostname: str | None = None,
@@ -2023,6 +2048,9 @@ class ContainerCLI(DockerCLICaller):
             health_cmd: Healthcheck command.
             health_interval: Healthcheck interval in seconds.
             health_retries: Failures needed to mark the container unhealthy.
+            health_start_interval: Positive whole-second startup probe interval,
+                as an integer or integral-second timedelta. Omission preserves the
+                image setting. Requires operator-qualified Docker API 1.44+.
             health_start_period: Initial healthcheck grace period in seconds.
             health_timeout: Healthcheck execution timeout in seconds.
             hostname: Container host name
@@ -2101,11 +2129,13 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             TypeError: If command is a shell command string.
-            ValueError: If timeout is invalid or detach and stream are both true.
+            ValueError: If timeout or health_start_interval is invalid, or detach
+                and stream are both true.
             DockerTimeout: If the selected local run subprocess exceeds timeout.
             DockerException: If image preflight or the Docker command fails.
         """
         validate_timeout(timeout)
+        start_interval_seconds = _health_start_interval_seconds(health_start_interval)
         if isinstance(command, str):
             error_message = textwrap.dedent(
                 f"""\
@@ -2182,6 +2212,9 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--health-cmd", health_cmd)
         full_cmd.add_simple_arg("--health-interval", to_seconds(health_interval))
         full_cmd.add_simple_arg("--health-retries", health_retries)
+        full_cmd.add_simple_arg(
+            "--health-start-interval", to_seconds(start_interval_seconds)
+        )
         full_cmd.add_simple_arg(
             "--health-start-period", to_seconds(health_start_period)
         )

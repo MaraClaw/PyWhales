@@ -58,4 +58,5 @@ def create_from_plan(client: DockerClient, plan: CreatePlan) -> Container:
         log_options=log_options,
         runtime=request.runtime,
         pull=request.pull,
+        health_start_interval=request.health_start_interval,
     )

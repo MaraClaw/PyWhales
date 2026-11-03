@@ -1,6 +1,6 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-01. **Branch:** `develop`. **Base commit:** `2fce3f8`; this guide includes working-tree changes.
+**Verified:** 2026-11-03 for the feature contracts through `7fb32cd`; other guidance last checked 2026-11-01.
 
 ## Overview
 
@@ -13,11 +13,11 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 
 Bounded observation sits on top of the command groups:
 
-- `observation()` nests explicit limits, deadlines, and cancellation over launches, including shared optional `max_total_launch_attempts` reservations. Inventory checks its complete launch plan against remaining allowances without reserving it. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
-- `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Swarm nodes, selected Compose services, or standalone containers. Node readiness uses fixed IDs and an explicit manager subset, not version fencing; `capture_nodes(require_leader=True)` additionally requires exactly one observed designated leader on both clear passes. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit`; see the convergence guide.
+- `observation()` nests explicit limits, deadlines, and cancellation over launches, including shared optional `max_total_launch_attempts` and `max_concurrent_children` reservations. Child slots last until local CLI reap, not output drain or daemon-workload completion. Inventory checks its complete launch plan against remaining attempt allowances without reserving it. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
+- `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Swarm nodes, selected Compose services, or standalone containers. Node readiness uses fixed IDs and an explicit manager subset, not version fencing; `capture_nodes(require_leader=True)` additionally requires exactly one observed designated leader on both clear passes. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit` and `fail_on_unhealthy`; see the convergence guide.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
-- Admission `ClassLimit.pending_demand_capacity` bounds queued declared demand separately from pending count and active demand; immediate grants bypass this queue-only bound.
-- `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 7, including admission's `pending_demand_full` outcome. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
+- Admission `ClassLimit.pending_demand_capacity` bounds queued declared demand per class; `AdmissionOwner.owner_pending_demand_capacity` bounds its sum across classes, separately from pending count and active demand. Immediate grants bypass both queue-only bounds.
+- `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 8, including admission's `pending_demand_full` and `owner_pending_demand_full` outcomes. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
 - `strict_workload_errors` is an opt-in client setting for marked attached workload failures; see the shared runtime and container/Compose guides.
 
 ## Structure And Navigation
@@ -39,7 +39,7 @@ Bounded observation sits on top of the command groups:
 | `pywhales/telemetry/` | Admission decision, launch, completion and refusal records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |
 | `pywhales/convergence/` | Swarm service/node, Compose, and standalone container convergence: `_wait.py` entry points, `_service.py`, `_node.py`, `_compose.py`, `_container.py`, `_wire.py`, `_types.py` |
 | `pywhales/admission/` | Application-owned synchronous admission: class limits, saturation policy, queueing, admitted streams |
-| `pywhales/profiles/` | Application create policy: `plan_create` builds a plan, `create_from_plan` applies it |
+| `pywhales/profiles/` | Application create policy, including startup health-interval approval: `plan_create` builds a plan, `create_from_plan` applies it |
 | `pywhales/reconciliation/` | Desired-state controller, operation journal, adapters; only an in-memory store ships |
 | `pywhales/storage/` | Non-destructive retention planning, immutable approvals, pressure assessment and gate |
 | `pywhales/components/` | Docker command groups; start with each group's `cli_wrapper.py` and `models.py` where present |

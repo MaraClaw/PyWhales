@@ -47,16 +47,27 @@ Filenames in this section are relative to `pywhales/`.
 - Completion tests keep exited-zero success, safe nonzero failure, unfinished counters, and final-pass revalidation. Preserve closed
   `completion_failed` journal reasons, generation-fenced deadline-detail round-trips in the store, and static completion types.
 - `test_convergence.py` covers opt-in `fail_on_exit` for Compose and standalone containers on the first and confirming passes, exit zero and nonzero, unchanged default behavior, and completion/restart budgets. `test_reconciliation.py` covers cause-free `exited` projection to the journal without exit-code/output payloads.
+- The same modules cover opt-in `fail_on_unhealthy` on first/confirming passes, eligibility and failure precedence,
+  and the closed `unhealthy` journal reason with cleared deadline detail and no mutation replay. Static flags and
+  failure reasons live in `test_convergence_types.py`.
 - Standalone `capture_containers()` cases in `test_convergence.py` resolve names/prefixes to full IDs and reject duplicate resolved IDs.
   Disappearance/recreation is `superseded`; recheck readiness/completion on the final pass, retain the latest complete deadline cycle, and reap hung inspections on cancellation.
   Keep `ContainerTarget` and capture/wait return contracts in `test_convergence_types.py` aligned.
 - Node readiness uses the same fake-CLI module: fixed IDs, explicit manager subset, recovery despite version changes, demotion/missing manager status, malformed data, disappearance, confirming-pass regression, partial-cycle retention and hung-inspect cancellation. Keep node blocker counts bounded and integer-only through `test_reconciliation_store.py`; static node contracts live in `test_convergence_types.py`.
 - Observation tests keep nested minimum limits, shared response accounts across threads, and deadline and cancellation precedence.
+- Concurrent-child validation and atomic nested attempt/child reservations live in `test_observation.py`;
+  `test_bounded_capture.py` proves shared-slot contention, reuse at reap independently of drain completion, failed setup and terminal
+  cleanup across four execution families, plus sequential inventory with one child slot.
 - Launch-reservation tests cover exact-cap copied contexts, atomic all-account debit, non-consuming inventory plan checks, staged-cache preservation on races, failed-spawn charging, four execution families and lazy-save inspect accounting. Keep local-child cleanup evidence in the focused observation/inventory/bounded-capture selections.
   Telemetry tests keep records payload-free under raw diagnostics, one completion per launch, and results intact when the observer raises.
-- `test_telemetry_refusals.py` covers schema-7 preflight refusals across captured, stream, archive load and lazy save: exactly one refusal, no launch/completion/spawn/input read, original exception, admission correlation, observer snapshots and disabled ID/clock fast paths. Earlier validation stays silent; post-start native argv errors keep launch plus limit completion. Archive lifecycle and admission telemetry tests cover adjacent paths.
+- `test_telemetry_refusals.py` covers schema-8 preflight refusals across captured, stream, archive load and lazy save, including child saturation without attempt consumption: exactly one refusal, no launch/completion/spawn/input read, original exception, admission correlation, observer snapshots and disabled ID/clock fast paths. Earlier validation stays silent; post-start native argv errors keep launch plus limit completion. Archive lifecycle and admission telemetry tests cover adjacent paths.
 - Admission telemetry tests cover decision outcomes, callbacks outside locks, cross-thread cancellation, and no new IDs or clock reads without an observer. Correlation tests cover nested calls and stream lifecycle launches.
-- `test_admission_pending_demand.py` covers queue-only capacity, exact fits, zero-capacity immediate grants, precedence, contention and cleanup. Keep `pending_demand_full`, its saturating snapshot counter and schema-7 outcome aligned without changing prior positional snapshot fields.
+- `test_admission_pending_demand.py` covers class queue-demand bounds; `test_admission_owner_pending_demand.py`
+  covers owner-wide bounds across classes, immediate-grant bypass, precedence, contention, reuse and cleanup.
+  Keep `pending_demand_full`/`owner_pending_demand_full`, saturating counters and schema-8 outcomes aligned without
+  changing prior positional snapshot fields; static contracts live in `test_admission_types.py`.
+- `test_profiles.py` and `test_profiles_validation.py` cover startup health-interval approval, exact ceilings,
+  conditional runtime control, omission and tampered-plan rejection before preflight.
 - Leadership cases in `test_convergence.py` cover omitted-false versus explicit malformed values, enabled designated managers only, zero/one/multiple leaders, changing leaders across clear passes and partial-cycle detail. Keep `leader_mismatch_managers` bounded in type and store contracts.
 - Offline `test_fleet_harness.py` keeps FIFO head blocking under per-action caps, global/per-action peaks, and queue expiry without counting unlaunched actions in peaks.
   Leased retry cases in `test_fleet_harness.py`, `test_fleet_harness_cli.py`, and `test_fleet_report.py` cover attempt lineage, FIFO, the original deadline, one logical outcome and queue sample, and legacy digest compatibility. Preserve old sequential report imports and reject contradictory schedules; CLI tests check safe export/decide import rejection without candidate launches.

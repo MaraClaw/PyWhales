@@ -76,6 +76,7 @@ class Selection:
     completion: tuple[str, ...]
     max_restarts: int | None
     fail_on_exit: bool = False
+    fail_on_unhealthy: bool = False
 
 
 def validate_selection(config: ClientConfig, selection: Selection) -> None:
@@ -100,6 +101,8 @@ def validate_selection(config: ClientConfig, selection: Selection) -> None:
         raise ValueError("Restart budget must be None or a nonnegative integer")
     if type(selection.fail_on_exit) is not bool:
         raise ValueError("fail_on_exit must be a bool")
+    if type(selection.fail_on_unhealthy) is not bool:
+        raise ValueError("fail_on_unhealthy must be a bool")
     if config.compose_dry_run:
         raise ValueError("A dry-run client cannot be captured")
 
@@ -159,6 +162,7 @@ def snapshot_target(
         services=tuple(captured),
         max_restarts=selection.max_restarts,
         fail_on_exit=selection.fail_on_exit,
+        fail_on_unhealthy=selection.fail_on_unhealthy,
     )
 
 
@@ -222,13 +226,16 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
         (service.completion, [current[identity] for identity in service.container_ids])
         for service in target.services
     ]
-    return evaluate_groups(groups, target.max_restarts, target.fail_on_exit)
+    return evaluate_groups(
+        groups, target.max_restarts, target.fail_on_exit, target.fail_on_unhealthy
+    )
 
 
 def evaluate_groups(
     groups: list[tuple[bool, list[ContainerWire | StandaloneContainerWire]]],
     budget: int | None,
     fail_on_exit: bool,
+    fail_on_unhealthy: bool,
 ) -> DeadlineDetail | Failure:
     """Evaluate grouped containers using the shared Compose readiness rules."""
     completion = [group for done, group in groups if done]
@@ -247,6 +254,17 @@ def evaluate_groups(
         for container in group
     ):
         return Failure(reason="exited")
+    if fail_on_unhealthy and any(
+        container.state.status == "running"
+        and not container.state.paused
+        and not container.state.restarting
+        and (budget is None or _restarts(container) <= budget)
+        and container.state.health is not None
+        and container.state.health.status == "unhealthy"
+        for group in running
+        for container in group
+    ):
+        return Failure(reason="unhealthy")
     return DeadlineDetail(
         captured_services=len(groups),
         non_running_containers=_affected(

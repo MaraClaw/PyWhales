@@ -57,11 +57,14 @@
   timeout (explicit, else the client default) before any process starts or input is read. A save's eager
   inspection stays outside the save deadline: it runs in an `execution_timeout()` scope that ends before any
   yield. A lazy save's clock starts at first iteration, using the client default as configured then.
+- Direct archives carry the preflight child reservation into `ArchiveDeadline`: release once at local reap,
+  independently of payload-drain completion or generator exhaustion, or after failed setup leaves no owned child. Attempts stay
+  consumed. A child-only scope retains ownership without a timed wait; lazy save reserves on first iteration.
 - Path-based `load()` uses the general stream budget, not the pull/push override.
   Direct archive load/save subprocesses snapshot `raw_diagnostics` before launch for failure rendering;
   preserve archive payloads, exception classes, and raw attributes. Don't promise archive memory bounds.
 - Automatic missing-image reference diagnostics require `raw_diagnostics=True`; fallback behavior is unchanged.
-- Observation exceptions from `_prepare_archive_launch` preflight emit one schema-6 refusal in family `archive_load` or `archive_save`, before a child or upload read. Lazy save checks at first iteration with its policy-snapshotted observer; path-based load/save keep their existing shared-runtime families without duplicate records. Earlier validation stays outside refusal telemetry; see [the runtime guide](../../AGENTS.md#telemetry).
+- Observation exceptions from `_prepare_archive_launch` preflight emit one schema-8 refusal in family `archive_load` or `archive_save`, before a child or upload read. Lazy save checks at first iteration with its policy-snapshotted observer; path-based load/save keep their existing shared-runtime families without duplicate records. Earlier validation stays outside refusal telemetry; see [the runtime guide](../../AGENTS.md#telemetry).
 
 ## Prune Deadline
 
@@ -81,5 +84,7 @@
 - Daemon-free transfer deadlines: `tests/pywhales/components/test_deadline_forwarding.py` (mocked, e.g.
   `test_image_push_validates_before_consuming_or_inspecting`) and `test_command_deadlines.py` (local Python CLI,
   e.g. `test_push_inspect_preflight_is_outside_the_explicit_budget`). Static shapes: `tests/pywhales/test_command_deadline_types.py`.
+- `tests/pywhales/test_bounded_capture.py` and `test_telemetry_refusals.py` cover archive child-slot lifetimes,
+  reap/drain independence, failed setup and saturation refusals with real local Python children, not Docker.
 - Copy forwarding uses `test_copy_from_pull` and `test_copy_to_pull`; archive integration includes `test_save_load`
   and `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.

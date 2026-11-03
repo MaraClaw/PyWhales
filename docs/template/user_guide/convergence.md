@@ -156,6 +156,20 @@ or being replaced returns `superseded`; capture-time missing references return a
 each captured container as one unit in `captured_services`. Capture and wait only
 observe Docker state; cancellation stops and reaps the local CLI child.
 
+## Opt-in container failures
+
+Both `capture_compose` and `capture_containers` accept `fail_on_exit=True` to
+fail on an eligible non-restarting long-running exit, and
+`fail_on_unhealthy=True` to fail on explicitly reported `unhealthy` health.
+Both default to false and are fixed at capture; non-boolean values are rejected
+before launch. An unhealthy container must be running, unpaused, not restarting,
+and within any enabled restart budget. Other health states, including `starting`,
+remain pending. Missing health blocks only when a healthcheck is configured;
+reported health is considered even without one. Completion members ignore health.
+Membership changes, completion failures, malformed enabled restart counts, and
+eligible exit failures take precedence. The unhealthy failure is cause-free and
+contains no container identity or health payload. Either observation pass can fail.
+
 ## Compose restart budgets
 
 For Compose deployments, `capture_compose(client, services, policy=policy,

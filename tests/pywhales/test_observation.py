@@ -718,3 +718,57 @@ def test_ordinary_preflight_failure_never_consumes_launch_capacity(
         assert state.launch_accounts[0].consumed == 0
         check_scoped_launch(["cli"], {}, state)
         assert state.launch_accounts[0].consumed == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.0, "1"])
+def test_child_limit_requires_a_positive_exact_integer(value: int) -> None:
+    with pytest.raises(ValueError):
+        InspectionPolicy(
+            max_references=1,
+            max_argv_bytes=100,
+            max_response_bytes=100,
+            max_concurrent_children=value,
+        )
+
+
+def test_child_reservations_check_nested_attempts_and_capacity_atomically() -> None:
+    outer_policy = replace(launch_policy(3), max_concurrent_children=2)
+    with observation(outer_policy) as outer:
+        with observation(replace(outer_policy, max_concurrent_children=1)) as inner:
+            first = check_scoped_launch(["cli"], {}, inner)
+            with pytest.raises(ObservationLimitError) as refused:
+                check_scoped_launch(["cli"], {}, inner)
+            assert (
+                refused.value.reason,
+                refused.value.limit,
+                refused.value.measured,
+            ) == ("concurrent_children", 1, 2)
+            assert [account.consumed for account in inner.launch_accounts] == [1, 1]
+            assert [account.consumed for account in inner.child_accounts] == [1, 1]
+        with observation(replace(outer_policy, max_concurrent_children=4)) as wider:
+            assert wider.policy.max_concurrent_children == 2
+            second = check_scoped_launch(["cli"], {}, wider)
+            with pytest.raises(ObservationLimitError):
+                check_scoped_launch(["cli"], {}, wider)
+            assert [account.consumed for account in wider.launch_accounts] == [2, 1]
+        first.release()
+        first.release()
+        assert outer.child_accounts[0].consumed == 1
+        with observation(replace(launch_policy(1), max_concurrent_children=1)) as inner:
+            third = check_scoped_launch(["cli"], {}, inner)
+            second.release()
+            with pytest.raises(ObservationLimitError) as refused:
+                check_scoped_launch(["cli"], {}, inner)
+            assert refused.value.reason == "total_launch_attempts"
+            assert [account.consumed for account in inner.child_accounts] == [1, 1]
+            third.release()
+        assert outer.child_accounts[0].consumed == 0
+        assert outer.launch_accounts[0].consumed == 3
+
+
+def test_child_limit_rejects_integer_subclasses() -> None:
+    class IntegerSubclass(int):
+        pass
+
+    with pytest.raises(ValueError):
+        replace(policy(1, 100, 100), max_concurrent_children=IntegerSubclass(1))

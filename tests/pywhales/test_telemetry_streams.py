@@ -40,7 +40,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
-    assert records[0].schema_version == completed.schema_version == 7
+    assert records[0].schema_version == completed.schema_version == 8
     assert completed.attempt_id == records[0].attempt_id
     assert completed.stdin_bytes is None
     return completed

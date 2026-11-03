@@ -32,6 +32,75 @@ example, with `source = Path.cwd().resolve()`, mount that directory read-only
 and run `["ls", "/work"]`. Import `Path` from `pathlib`. A remote engine must
 have the source path on its own host.
 
+## Startup Health Interval And Approved Profiles
+
+Container `create` and every `run` mode, including `docker.create`/`docker.run`
+aliases, accept `health_start_interval=None`. A supplied value must be positive
+whole seconds: an exact `int` (not a bool or float), or an integral-second
+`datetime.timedelta`. Invalid values raise `ValueError` before image preflight
+or CLI lookup. It forwards `--health-start-interval <seconds>s`; omission leaves
+the image setting unchanged. This is the check interval during the startup
+period, not `health_start_period`, `health_interval`, or a convergence timeout.
+The operator must qualify the selected CLI and engine for Docker API 1.44+.
+PyWhales doesn't probe versions, retry without the flag, or silently downgrade.
+
+```python
+from pywhales import docker
+
+# Run only on an authorized, operator-qualified API 1.44+ target.
+with docker.run(
+    "alpine:3.22",
+    ["sleep", "30"],
+    detach=True,
+    health_cmd="true",
+    health_start_period=20,
+    health_start_interval=2,
+    stop_timeout=1,
+) as container:
+    print(container.id)
+```
+
+For application-approved creation, import `CreateRequest`, `SecurityProfile`,
+`RuntimePolicy`, `plan_create`, and `create_from_plan` from `pywhales.profiles`,
+not the package root. Direct calls don't apply profiles automatically.
+`CreateRequest.health_start_interval` accepts only `None` or a positive exact
+integer in seconds, not a timedelta. The profile's
+`max_health_start_interval=None` means no approval, not an unlimited interval;
+an explicit positive exact integer ceiling is required for a supplied request.
+Above-ceiling requests fail with `PolicyReason.LIMIT`; missing approval uses
+`NOT_APPROVED`. Invalid request or ceiling types use `INVALID`.
+
+The selected `RuntimePolicy.supported_controls` must include the baseline
+`CONTROLS` and, only when an interval is requested, `"health_start_interval"`.
+Declare that extra control only after qualifying this runtime; don't mutate
+`CONTROLS` or add it to every runtime by assumption. Missing runtime support is
+`UNSUPPORTED`. Omitted intervals need no new runtime control or profile ceiling.
+
+Given the application's existing `client`, `profile`, and `request`, and explicit
+operator approval of the selected runtime and a 5-second ceiling:
+
+```python
+from dataclasses import replace
+
+from pywhales.profiles import CONTROLS, RuntimePolicy, plan_create
+
+qualified_runtime = RuntimePolicy(
+    name=request.runtime,
+    rootless=request.rootless,
+    supported_controls=CONTROLS | {"health_start_interval"},
+)
+approved_profile = replace(
+    profile, max_health_start_interval=5, runtimes=(qualified_runtime,)
+)
+requested = replace(request, health_start_interval=2)
+plan = plan_create(approved_profile, requested, client)  # no Docker I/O
+```
+
+`plan_create` performs pure validation. `create_from_plan(client, plan)` rechecks
+the plan and endpoint binding before preparation, pull, inspect, or creation,
+then forwards the approved interval to `client.container.create`. It creates
+but doesn't start the container; the application owns its later lifecycle.
+
 ## Container Environment Values
 
 `envs={...}` sets values inside the container. In container `create`, `run`, and
@@ -142,7 +211,8 @@ For running/healthy readiness plus designated successful one-shot completion,
 use `capture_containers()` and `wait()` from `pywhales.convergence`, not
 `docker.wait()`. They return typed observation outcomes instead of exit codes;
 set `fail_on_exit=True` at capture to fail when a long-running member exits
-without restarting, even with exit code 0. The default keeps it pending. See
+without restarting, even with exit code 0, or `fail_on_unhealthy=True` to fail on
+an eligible running member reporting `unhealthy`. Both default to `False`. See
 [Standalone containers](observation-and-convergence.md#standalone-containers)
 for restart-budget precedence and designated completion rules.
 

@@ -105,6 +105,9 @@ then call public `convergence.wait()` with explicit inspection, deadline and
 polling bounds. Do not recapture a newer generation as the desired one or
 reimplement readiness inside inventory. The journal stores only the outcome
 category or bounded `Failure.reason`, not raw state, target templates or causes.
+For container captures, the opt-in `fail_on_exit` and `fail_on_unhealthy` policies
+produce closed `exited` and `unhealthy` reasons. Either projects to `FAILED`, clears
+deadline detail and stores no exit or health payload; it never authorizes a retry.
 
 ## Aggregate Observation Budgets
 

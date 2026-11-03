@@ -458,3 +458,61 @@ def test_real_cli_exited_failure_is_journaled_as_a_closed_reason(
     rendered = json.dumps(asdict(stored.progress))
     assert "137" not in rendered and "credential-payload" not in rendered
     assert A not in rendered and "cause" not in rendered
+
+
+def test_real_cli_unhealthy_failure_clears_deadline_without_replay(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales._observation import ObservationState
+    from pywhales.exceptions import ObservationTimeout
+
+    store_compose(tmp_path, snapshot(container(A, health="starting")))
+    target = capture_compose(
+        fake_cli, ("web",), fail_on_unhealthy=True, policy=policy, timeout=5
+    )
+    assert isinstance(target, ComposeTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+
+    class CLIEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            return wait(target, policy=policy, timeout=5, poll_interval=1)
+
+    store, endpoint = MemoryJournalStore(), CLIEndpoint()
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert pending.progress.deadline_detail == DeadlineDetail(1, unhealthy_containers=1)
+    store_compose(tmp_path, snapshot(container(A, health="unhealthy")))
+    result = owner.reconcile(owner.claim(pending, LeaseRequest("worker-b", 30)))
+    assert result.progress.state is AttemptState.FAILED
+    assert result.progress.convergence == "unhealthy"
+    assert result.progress.deadline_detail is None and result.progress.attempts == 1
+    assert endpoint.trace == [
+        "inventory",
+        "mutate",
+        "inventory",
+        "observe",
+        "inventory",
+        "observe",
+    ]
+    stored = store.read(spec().key)
+    assert stored is not None and stored.progress == result.progress
+    rendered = json.dumps(asdict(stored.progress))
+    assert (
+        A not in rendered
+        and "credential-payload" not in rendered
+        and "cause" not in rendered
+    )

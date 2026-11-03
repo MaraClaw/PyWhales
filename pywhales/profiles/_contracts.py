@@ -197,8 +197,14 @@ class CreateRequest:
     runtime: str
     rootless: bool
     pull: str
+    health_start_interval: int | None = None
 
     def __post_init__(self) -> None:
+        if self.health_start_interval is not None and (
+            type(self.health_start_interval) is not int
+            or self.health_start_interval <= 0
+        ):
+            raise PolicyError("health_start_interval", PolicyReason.INVALID)
         _require_type(self.endpoint, EndpointIdentity, "endpoint")
         _require_type(self.resources, ResourceLimits, "resources")
         _require_type(self.logging, LogPolicy, "logging")

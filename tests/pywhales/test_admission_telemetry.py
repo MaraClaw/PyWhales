@@ -47,7 +47,7 @@ def test_decisions_are_frozen_payload_free_and_reentry_fails_once() -> None:
     assert (first.duration_seconds, second.duration_seconds) == (2, 0)
     assert first.admission_id != second.admission_id
     assert len(first.admission_id) == len(second.admission_id) == 32
-    assert first.schema_version == second.schema_version == 7
+    assert first.schema_version == second.schema_version == 8
     assert first.phase == second.phase == "admission"
     with pytest.raises(FrozenInstanceError):
         first.__setattr__("outcome", "failed")
@@ -142,7 +142,8 @@ def test_disabled_observation_adds_no_identifiers_clocks_or_callbacks() -> None:
     pressure = PressureClass("read")
     owner = AdmissionOwner(
         EndpointIdentity("local"),
-        {pressure: ClassLimit(1, 1, pending_demand_capacity=0)},
+        {pressure: ClassLimit(1, 1)},
+        owner_pending_demand_capacity=0,
     )
     with (
         patch("pywhales.admission._telemetry.uuid4", side_effect=AssertionError),

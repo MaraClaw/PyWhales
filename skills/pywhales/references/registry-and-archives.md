@@ -184,7 +184,7 @@ pull/push progress streams report under the regular `captured`/`stream`
 families instead. See
 [Telemetry and admission](telemetry-and-admission.md) for the full schema.
 
-Schema-7 observation preflight refusals use those same families, emit no
+Schema-8 observation preflight refusals use those same families, emit no
 launch/completion pair, and preserve the original exception without starting a
 child or reading upload input. A lazy save checks and can emit its refusal at
 first iteration, not construction; eager inspection is a separate captured
@@ -195,6 +195,11 @@ at first iteration, separately from its eager inspect preflight. Exhaustion
 raises `ObservationLimitError` with reason `total_launch_attempts` before child
 creation or upload input reads; accepted reservations are not refunded after
 later failure. See [Observation budgets](observation-and-convergence.md#bounding-batch-inspection).
+`max_concurrent_children` separately limits owned local children until reap.
+Saturation consumes no launch attempt; failed spawn returns its child slot but
+not its accepted attempt. Lazy save charges its eager inspection separately and
+reserves the save slot only on first iteration. Reaped output may remain buffered
+after that slot is released; exhaust or close the generator to finish cleanup.
 
 ## Other Operations
 

@@ -52,6 +52,7 @@ type ConvergenceSummary = Literal[
     "update_failed",
     "completion_failed",
     "exited",
+    "unhealthy",
     "observation",
 ]
 

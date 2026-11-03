@@ -14,6 +14,11 @@
 - Both `run()` and `create()` use `ImageCLI(self.client_config)` before launching:
   `pull="missing"` calls `_pull_if_necessary()`; `pull="always"` calls `pull(str(image))`.
   Keep shared option forwarding aligned between their separate argument builders.
+- `health_start_interval` on `create()` and every `run()` mode/alias is `None`, a positive exact integer, or a
+  positive integral-second `timedelta`; reject bool, floats and fractional seconds before image/CLI preflight.
+  Both builders emit `--health-start-interval <seconds>s`; omission preserves image health settings. This is a
+  startup probe interval, not `health_start_period` or a local deadline. Operators qualify Docker API 1.44+;
+  don't add version probes or silent fallback. Profile approval lives in [the profiles guide](../../profiles/AGENTS.md).
 - `run()`, `create()`, and `execute()` require an argv sequence for `command`.
   A shell command string raises `TypeError`; don't split it implicitly.
 - Their `envs` share the [runtime environment transport](../../AGENTS.md#container-environment-transport); keep that policy out of separate builders.
@@ -72,6 +77,8 @@
 Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
   eager-log decoding cleanup, and streaming-log ownership; also contains live component tests.
+- `tests/pywhales/components/test_container_health_interval.py`: fake-CLI whole-second forwarding and
+  invalid-value rejection before preflight across create/run modes and root aliases, without Docker.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.
 - `tests/pywhales/test_exceptions.py`, `tests/pywhales/test_utils.py`, and `tests/pywhales/test_client_config.py`: local-child strict-workload classification, both stream failure paths, explicit wrapper marks, alias/handle forwarding, and default/detached/preflight controls.
 - `tests/pywhales/components/test_command_deadlines.py`: launch, log, copy/export, and start validation,
@@ -79,5 +86,5 @@ Paths below are relative to the repository root.
 - `tests/pywhales/components/test_deadline_forwarding.py`: run/execute/log budgets, `start` in every mode and entry,
   empty and invalid start requests, handle/root aliases, and unbudgeted preflights.
 - `tests/pywhales/test_command_deadline_types.py`: static run/execute/log/start/copy/export overloads,
-  handle forwarding, and aliases.
+  handle forwarding, aliases, and create/run startup health-interval arguments and return types.
 - `tests/pywhales/test_type_contracts.py`: inspect/top and owned prune/run stream contracts; environment branches: `tests/pywhales/components/test_env_forwarding.py` and `test_env_branch_transport.py`.

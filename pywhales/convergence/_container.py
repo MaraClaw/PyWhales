@@ -55,6 +55,7 @@ def capture_selected(
                 completion=tuple(completed),
                 max_restarts=selection.max_restarts,
                 fail_on_exit=selection.fail_on_exit,
+                fail_on_unhealthy=selection.fail_on_unhealthy,
             )
     except _INTERRUPTIONS as error:
         return _outcome(error, None)
@@ -74,7 +75,9 @@ def check_containers(target: ContainerTarget) -> DeadlineDetail | Failure:
         if member.id != identity:
             return Failure(reason="superseded")
         groups.append((identity in target.completion, [member]))
-    return evaluate_groups(groups, target.max_restarts, target.fail_on_exit)
+    return evaluate_groups(
+        groups, target.max_restarts, target.fail_on_exit, target.fail_on_unhealthy
+    )
 
 
 def wait_containers(

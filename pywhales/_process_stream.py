@@ -38,7 +38,7 @@ from pywhales.telemetry import Outcome
 from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of
 
 if TYPE_CHECKING:
-    from pywhales._observation import ObservationState
+    from pywhales._observation import ObservationState, _ChildReservation
 
 
 class ProcessStream(Iterator[tuple[str, bytes]]):
@@ -80,6 +80,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         strict_workload_errors: bool = False,
         telemetry: ExecutionTelemetry | None = None,
         observation: ObservationState | None = None,
+        reservation: _ChildReservation | None = None,
     ) -> None:
         """Take ownership of a launched process and start readers and a watchdog.
 
@@ -99,8 +100,10 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             observation: Scope snapshotted at launch, or ``None`` outside one. Its
                 deadline, cancel tokens, and stream accounts are enforced for the
                 stream's whole life, whether or not the scope is still active.
+            reservation: Child capacity released at reap, before output drains.
         """
         self._process = process
+        self._reservation = reservation
         self._full_cmd = full_cmd
         self.stdin = process.stdin
         self._deadline = deadline
@@ -157,10 +160,14 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         except BaseException:
             self._queue.close()
             unwind_launch(process, stop, started)
+            if reservation is not None:
+                reservation.release()
             raise
 
     def _publish_exit(self) -> None:
         """Record child exit and wake the watchdog and any waiting consumer."""
+        if self._reservation is not None:
+            self._reservation.release()
         with self._queue.condition:
             self._exited = True
             self._queue.condition.notify_all()

@@ -197,6 +197,7 @@ policy = InspectionPolicy(
     max_argv_bytes=32768,
     max_response_bytes=1048576,
     max_total_launch_attempts=10,
+    max_concurrent_children=2,
 )
 event = Event()
 remaining = 30.0  # seconds chosen by the operator
@@ -283,6 +284,24 @@ its eager image inspection in the calling scope and its archive launch in the
 scope active at first iteration; constructing the iterator reserves no archive
 capacity. A launch-only budget adds no post-launch timer or stream binding.
 
+`max_concurrent_children` is an optional positive exact `int`, with the same
+validation and nested, copied-context sharing rules. It bounds owned local CLI
+children across captured commands, streams, archive loads, and lazy saves. It
+doesn't bound daemon workloads or children outside those shared observation
+accounts. Each launch checks all attempt and child allowances atomically after
+ordinary preflight. Saturation raises `ObservationLimitError` with reason
+`concurrent_children` before launch telemetry, process creation, or upload input
+reads; neither attempts nor child slots are consumed by a refused launch.
+
+An accepted launch consumes an attempt permanently, even if process creation
+fails. Its child slot is returned on failed spawn or when the child is reaped,
+not when buffered output is drained, an iterator is exhausted, or an archive
+consumer resumes. Timeout, cancellation, early close, and setup failures kill
+and reap any owned child before returning its slot. A concurrency-only scope
+stays attached to streams and archives without introducing a post-launch timer.
+Lazy save still reserves its archive slot at first iteration; eager inspection
+is a separate launch with its own attempt and child-slot charge.
+
 Before any inventory or bounded bulk-reload inspection starts, its complete
 group-and-chunk plan must fit every enclosing account's remaining allowance.
 Ordinary groups count their chunks, builders count one listing per exact config
@@ -291,6 +310,8 @@ duplicates. This check reserves nothing: each actual launch still reserves its
 own unit. Concurrent work can consume capacity after the check and make a later
 chunk fail; staged records are then discarded and original caches and timestamps
 remain unchanged. Empty input consumes no capacity, even after exhaustion.
+This plan check concerns cumulative attempts only: sequential chunks don't
+reserve concurrent-child capacity for the complete plan.
 
 These limits don't bound the complete result, staged models, decoded JSON, deep
 copies, Python object overhead, or aggregate process memory. A capture isn't a

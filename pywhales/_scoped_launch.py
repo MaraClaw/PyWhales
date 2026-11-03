@@ -5,24 +5,32 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 
 from pywhales._launch_limits import argv_size, check_launch
-from pywhales._observation import ObservationState, check_observation
+from pywhales._observation import (
+    ObservationState,
+    _ChildReservation,
+    check_observation,
+)
 from pywhales.exceptions import ObservationLimitError
 
 
 def check_scoped_launch(
     args: Sequence[str], env: Mapping[str, str], observation: ObservationState
-) -> None:
+) -> _ChildReservation:
     """Preflight and reserve one launch before any process starts.
 
     Cancellation and expiry are checked on both sides of the size limits, so a
     scope that ended while the limits were measured never launches.
-    Only then reserve against every enclosing launch account atomically. Later
-    interruption, spawn failure, or CLI failure never refunds that reservation.
+    Only then reserve against every enclosing launch and child account atomically.
+    Later failure never refunds attempts. The returned child reservation must be
+    released at reap, or when failed setup establishes no owned child remains.
 
     Args:
         args: Complete stringified command.
         env: Effective child environment, including runner-added entries.
         observation: Scope whose bounds and tokens apply to this launch.
+
+    Returns:
+        Once-only child capacity token to hand to the process's reaper.
 
     Raises:
         ObservationCancelled: If any active token is set.
@@ -32,7 +40,7 @@ def check_scoped_launch(
     check_observation(observation)
     check_launch(args, env, observation.policy)
     check_observation(observation)
-    observation.check_launch_attempts(1, reserve=True)
+    return observation.reserve_child()
 
 
 @contextmanager
