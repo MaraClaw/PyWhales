@@ -8,19 +8,22 @@ import threading
 import time
 import traceback
 from collections.abc import Buffer, Generator, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Barrier, Event, Thread
-from typing import TypedDict, override
+from typing import Literal, TypedDict, assert_never, override
 from unittest.mock import patch
 
 import pytest
 
 import pywhales._readiness
 from pywhales import DockerClient
+from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._capture_pipes import CapturePipes
-from pywhales._observation import ObservationState, observation
+from pywhales._observation import ObservationState, _ChildReservation, observation
+from pywhales._process_stream import ProcessStream
 from pywhales.client_config import ClientConfig
 from pywhales.exceptions import (
     DockerException,
@@ -30,7 +33,7 @@ from pywhales.exceptions import (
     ObservationLimitError,
     ObservationTimeout,
 )
-from pywhales.inventory import InspectionPolicy
+from pywhales.inventory import InspectionPolicy, InventoryRequest, capture_inventory
 from pywhales.utils import run, stream_stdout_and_stderr
 
 
@@ -843,13 +846,16 @@ def test_launch_reservation_is_not_refunded_after_failure(
         "exit": DockerException,
         "response": ObservationLimitError,
     }[failure]
-    with observation(replace(policy(8), max_total_launch_attempts=1)) as state:
+    with observation(
+        replace(policy(8), max_total_launch_attempts=1, max_concurrent_children=1)
+    ) as state:
         with pytest.raises(expected):
             run(command)
         with pytest.raises(ObservationLimitError) as refused:
             run([sys.executable, "-c", "pass"])
         assert refused.value.reason == "total_launch_attempts"
         assert state.launch_accounts[0].consumed == 1
+        assert state.child_accounts[0].consumed == 0
 
     assert len(children) == (0 if failure == "spawn" else 1)
     for child in children:
@@ -912,7 +918,12 @@ def test_real_captured_stream_and_archive_children_share_one_launch_budget(
     children: list[subprocess.Popen[bytes]],
 ) -> None:
     client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
-    bounds = replace(policy(), max_total_launch_attempts=5, max_total_stdin_bytes=1024)
+    bounds = replace(
+        policy(),
+        max_total_launch_attempts=5,
+        max_total_stdin_bytes=1024,
+        max_concurrent_children=1,
+    )
     with observation(bounds) as state:
         assert run(client.docker_cmd) == "stream"
         with stream_stdout_and_stderr(client.docker_cmd) as stream:
@@ -925,6 +936,7 @@ def test_real_captured_stream_and_archive_children_share_one_launch_budget(
             run(client.docker_cmd)
         assert refused.value.reason == "total_launch_attempts"
         assert state.launch_accounts[0].consumed == 5
+        assert state.child_accounts[0].consumed == 0
     assert len(children) == 5
     for child in children:
         assert_released(child)
@@ -936,9 +948,10 @@ def test_lazy_save_charges_eager_inspect_then_first_iteration_scope(
     children: list[subprocess.Popen[bytes]], same_scope: bool
 ) -> None:
     client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
-    bounds = replace(policy(), max_total_launch_attempts=1)
+    bounds = replace(policy(), max_total_launch_attempts=1, max_concurrent_children=1)
     with observation(bounds) as creator:
         saved = client.image.save("sha256:" + "a" * 64)
+        assert isinstance(saved, Generator)
         assert creator.launch_accounts[0].consumed == 1
         if same_scope:
             with pytest.raises(ObservationLimitError) as refused:
@@ -950,5 +963,479 @@ def test_lazy_save_charges_eager_inspect_then_first_iteration_scope(
             assert iterator.launch_accounts[0].consumed == 1
         assert creator.launch_accounts[0].consumed == 1
     assert len(children) == (1 if same_scope else 2)
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_copied_contexts_compete_for_shared_child_slots_and_reuse_after_close(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    start = Barrier(6)
+    outcomes: list[ProcessStream | BaseException] = []
+    bounds = replace(policy(), max_concurrent_children=2, max_total_launch_attempts=3)
+
+    def launch() -> None:
+        try:
+            with observation(replace(bounds, max_concurrent_children=1)):
+                start.wait(timeout=5)
+                outcomes.append(
+                    stream_stdout_and_stderr(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import threading; threading.Event().wait()",
+                        ]
+                    )
+                )
+        except BaseException as error:
+            outcomes.append(error)
+
+    with observation(bounds) as state:
+        workers = [Thread(target=copy_context().run, args=(launch,)) for _ in range(6)]
+        streams: list[ProcessStream] = []
+        try:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+            streams = [value for value in outcomes if isinstance(value, ProcessStream)]
+            failures = [value for value in outcomes if isinstance(value, BaseException)]
+            assert len(streams) == 2
+            assert len(failures) == 4
+            assert all(
+                isinstance(error, ObservationLimitError)
+                and error.reason == "concurrent_children"
+                for error in failures
+            )
+            assert state.child_accounts[0].consumed == 2
+            assert state.launch_accounts[0].consumed == 2
+            streams[0].close()
+            streams[0].close()
+            assert state.child_accounts[0].consumed == 1
+            assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+            assert state.launch_accounts[0].consumed == 3
+            assert state.child_accounts[0].consumed == 1
+        finally:
+            for stream in streams:
+                stream.close()
+        assert state.child_accounts[0].consumed == 0
+    assert len(children) == 3
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_capture_returns_child_slot_while_pipe_drain_is_paused(
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped, drain = Event(), Event()
+    released = _ChildReservation.release
+    ready = CapturePipes.ready
+    outcomes: list[str | BaseException] = []
+
+    def release(self: _ChildReservation) -> None:
+        released(self)
+        reaped.set()
+
+    def paused(self: CapturePipes, timeout: float | None) -> list[tuple[int, int]]:
+        if threading.current_thread() is worker:
+            assert drain.wait(timeout=5)
+        return ready(self, timeout)
+
+    def capture() -> None:
+        try:
+            outcomes.append(run([sys.executable, "-c", "print('buffered')"]))
+        except BaseException as error:
+            outcomes.append(error)
+
+    monkeypatch.setattr(_ChildReservation, "release", release)
+    monkeypatch.setattr(CapturePipes, "ready", paused)
+    with observation(replace(policy(), max_concurrent_children=1)) as state:
+        worker = Thread(target=copy_context().run, args=(capture,))
+        worker.start()
+        try:
+            assert reaped.wait(timeout=5)
+            assert worker.is_alive()
+            assert state.child_accounts[0].consumed == 0
+            assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+        finally:
+            drain.set()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert outcomes == ["buffered"]
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_stream_returns_child_slot_with_a_saturated_undrained_queue(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    with observation(replace(policy(), max_concurrent_children=1)) as state:
+        with stream_stdout_and_stderr(
+            [sys.executable, "-c", "import os; os.write(1, b'a\\nb\\nc\\n')"],
+            buffer_bytes=2,
+        ) as stream:
+            stream._reaper.join(timeout=5)
+            assert not stream._reaper.is_alive()
+            assert state.child_accounts[0].consumed == 0
+            assert not stream._released.is_set()
+            assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+            assert list(stream) == [
+                ("stdout", b"a\n"),
+                ("stdout", b"b\n"),
+                ("stdout", b"c\n"),
+            ]
+        assert state.child_accounts[0].consumed == 0
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_archive_load_releases_before_a_stalled_input_producer_finishes(
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, resume, reaped = Event(), Event(), Event()
+    released = _ChildReservation.release
+    outcomes: list[list[str] | BaseException] = []
+
+    def release(self: _ChildReservation) -> None:
+        released(self)
+        reaped.set()
+
+    def chunks() -> Iterator[bytes]:
+        entered.set()
+        assert resume.wait(timeout=5)
+        yield b""
+
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "print('Loaded image: sample')"]
+    )
+
+    def load() -> None:
+        try:
+            outcomes.append(client.image.load(chunks()))
+        except BaseException as error:
+            outcomes.append(error)
+
+    monkeypatch.setattr(_ChildReservation, "release", release)
+    with observation(replace(policy(), max_concurrent_children=1)) as state:
+        worker = Thread(target=copy_context().run, args=(load,))
+        worker.start()
+        try:
+            assert entered.wait(timeout=5)
+            assert reaped.wait(timeout=5)
+            assert worker.is_alive()
+            assert state.child_accounts[0].consumed == 0
+            assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+        finally:
+            resume.set()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert outcomes == [["sample"]]
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_lazy_save_releases_at_reap_before_resume_and_close_never_releases_twice(
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped = Event()
+    owners: list[ArchiveDeadline] = []
+    publish = ArchiveDeadline._publish_exit
+
+    def publish_exit(self: ArchiveDeadline) -> None:
+        publish(self)
+        owners.append(self)
+        reaped.set()
+
+    monkeypatch.setattr(ArchiveDeadline, "_publish_exit", publish_exit)
+    client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
+    bounds = replace(policy(), max_concurrent_children=1, max_total_launch_attempts=3)
+    with observation(bounds) as creator:
+        saved = client.image.save("sha256:" + "a" * 64)
+        assert isinstance(saved, Generator)
+        assert creator.launch_accounts[0].consumed == 1
+        assert creator.child_accounts[0].consumed == 0
+    with observation(bounds) as iterator:
+        try:
+            assert next(saved) == b"archive"
+            assert reaped.wait(timeout=5)
+            assert iterator.child_accounts[0].consumed == 0
+            assert iterator.launch_accounts[0].consumed == 1
+            assert creator.launch_accounts[0].consumed == 1
+            assert owners[0]._scope is iterator
+            assert owners[0]._reaper is None
+            with stream_stdout_and_stderr(
+                [sys.executable, "-c", "import threading; threading.Event().wait()"]
+            ):
+                saved.close()
+                saved.close()
+                assert iterator.child_accounts[0].consumed == 1
+        finally:
+            saved.close()
+        assert iterator.child_accounts[0].consumed == 0
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize(
+    "family", ["captured", "stream", "archive_load", "archive_save"]
+)
+@pytest.mark.parametrize("ending", ["spawn", "setup", "exit", "cancel", "timeout"])
+def test_terminal_child_paths_return_capacity_without_refunding_attempts(
+    family: Literal["captured", "stream", "archive_load", "archive_save"],
+    ending: str,
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancel = Event()
+    code = (
+        "raise SystemExit(7)"
+        if ending == "exit"
+        else "import os, threading; os.write(1,b'ready\\n'); threading.Event().wait()"
+    )
+    client = DockerClient(client_call=[sys.executable, "-c", code])
+    bounds = replace(
+        policy(),
+        max_concurrent_children=1,
+        max_total_launch_attempts=2,
+        max_total_stdin_bytes=1024,
+    )
+    timeout = 0.2 if ending == "timeout" else None
+    ready = CapturePipes.ready
+
+    def cancel_on_output(
+        self: CapturePipes,
+        remaining: float | None,
+    ) -> list[tuple[int, int]]:
+        result = ready(self, remaining)
+        if result:
+            cancel.set()
+        return result
+
+    def chunks() -> Iterator[bytes]:
+        if ending == "cancel":
+            cancel.set()
+        yield b"archive"
+
+    def execute() -> None:
+        match family:
+            case "captured":
+                run(client.docker_cmd, timeout=timeout)
+            case "stream":
+                with stream_stdout_and_stderr(
+                    client.docker_cmd, timeout=timeout
+                ) as stream:
+                    for _ in stream:
+                        if ending == "cancel":
+                            cancel.set()
+            case "archive_load":
+                client.image.load(chunks(), timeout=timeout)
+            case "archive_save":
+                saved = client.image.save("sample", timeout=timeout)
+                assert isinstance(saved, Generator)
+                try:
+                    for _ in saved:
+                        if ending == "cancel":
+                            cancel.set()
+                finally:
+                    saved.close()
+            case unreachable:
+                assert_never(unreachable)
+
+    expected = {
+        "spawn": FileNotFoundError,
+        "setup": RuntimeError,
+        "exit": DockerException,
+        "cancel": ObservationCancelled,
+        "timeout": DockerTimeout,
+    }[ending]
+    with observation(bounds, cancel=cancel) as state:
+        with ExitStack() as patches:
+            patches.enter_context(
+                patch.object(client.image, "inspect", return_value=[])
+            )
+            if ending == "spawn":
+                target = {
+                    "captured": "pywhales._bounded_capture.subprocess.Popen",
+                    "stream": "pywhales.utils.Popen",
+                    "archive_load": "pywhales.components.image.cli_wrapper.Popen",
+                    "archive_save": "pywhales.components.image.cli_wrapper.Popen",
+                }[family]
+                patches.enter_context(patch(target, side_effect=FileNotFoundError))
+            if ending == "setup":
+                target = {
+                    "captured": "pywhales._bounded_capture.watch_exit",
+                    "stream": "pywhales.utils.ProcessStream",
+                    "archive_load": "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+                    "archive_save": "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+                }[family]
+                patches.enter_context(patch(target, side_effect=RuntimeError("setup")))
+            if ending == "cancel" and family == "captured":
+                monkeypatch.setattr(CapturePipes, "ready", cancel_on_output)
+            try:
+                with pytest.raises(expected):
+                    execute()
+            finally:
+                cancel.clear()
+                monkeypatch.setattr(CapturePipes, "ready", ready)
+        assert state.child_accounts[0].consumed == 0
+        assert state.launch_accounts[0].consumed == 1
+        for child in children:
+            assert_released(child)
+        assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+        assert state.child_accounts[0].consumed == 0
+        assert state.launch_accounts[0].consumed == 2
+    assert len(children) == (1 if ending == "spawn" else 2)
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize(
+    ("family", "fail_at"),
+    [
+        ("captured", 1),
+        ("stream", 1),
+        ("stream", 2),
+        ("stream", 3),
+        ("stream", 4),
+        ("archive_load", 1),
+        ("archive_load", 2),
+        ("archive_save", 1),
+        ("archive_save", 2),
+        ("archive_load", 0),
+        ("archive_save", 0),
+    ],
+)
+def test_partial_worker_and_pipe_setup_failure_reaps_before_returning_capacity(
+    family: str,
+    fail_at: int,
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts = 0
+    start = Thread.start
+
+    def failing_start(self: Thread) -> None:
+        nonlocal starts
+        starts += 1
+        if starts == fail_at:
+            raise RuntimeError("thread setup")
+        start(self)
+
+    def failing_blocking(fd: int, blocking: bool) -> None:
+        raise RuntimeError("pipe setup")
+
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import threading; threading.Event().wait()"]
+    )
+    bounds = replace(policy(), max_concurrent_children=1, max_total_launch_attempts=2)
+    with observation(bounds) as state:
+        with monkeypatch.context() as setup:
+            setup.setattr(Thread, "start", failing_start)
+            if fail_at == 0:
+                setup.setattr(os, "set_blocking", failing_blocking)
+            with (
+                patch.object(client.image, "inspect", return_value=[]),
+                pytest.raises(RuntimeError),
+            ):
+                if family == "captured":
+                    run(client.docker_cmd)
+                elif family == "stream":
+                    stream_stdout_and_stderr(client.docker_cmd)
+                elif family == "archive_load":
+                    client.image.load(b"archive", timeout=30)
+                else:
+                    next(client.image.save("sample", timeout=30))
+        assert state.child_accounts[0].consumed == 0
+        assert state.launch_accounts[0].consumed == 1
+        assert len(children) == 1
+        assert_released(children[0])
+        assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+        assert state.child_accounts[0].consumed == 0
+        assert state.launch_accounts[0].consumed == 2
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptors")
+@pytest.mark.usefixtures("owned_threads_end")
+def test_output_eof_does_not_return_capacity_before_child_reap(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    gate_read, gate_write = os.pipe()
+    ready_read, ready_write = os.pipe()
+    try:
+        bounds = replace(
+            policy(), max_concurrent_children=1, max_total_launch_attempts=2
+        )
+        with (
+            observation(bounds) as state,
+            stream_stdout_and_stderr(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,sys; os.close(1); os.close(2); "
+                    "os.write(int(sys.argv[2]),b'R'); os.read(int(sys.argv[1]),1)",
+                    gate_read,
+                    ready_write,
+                ],
+                pass_fds=(gate_read, ready_write),
+            ) as stream,
+        ):
+            assert select.select([ready_read], [], [], 5)[0]
+            assert os.read(ready_read, 1) == b"R"
+            for reader in stream._threads:
+                reader.join(timeout=5)
+                assert not reader.is_alive()
+            assert state.child_accounts[0].consumed == 1
+            with pytest.raises(ObservationLimitError) as refused:
+                run([sys.executable, "-c", "pass"])
+            assert refused.value.reason == "concurrent_children"
+            assert state.launch_accounts[0].consumed == 1
+            os.write(gate_write, b"X")
+            stream._reaper.join(timeout=5)
+            assert not stream._reaper.is_alive()
+            assert state.child_accounts[0].consumed == 0
+            assert run([sys.executable, "-c", "print('reused')"]) == "reused"
+    finally:
+        for fd in (gate_read, gate_write, ready_read, ready_write):
+            os.close(fd)
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_inventory_plan_does_not_reserve_child_slots_for_sequential_chunks(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
+    bounds = replace(policy(), max_concurrent_children=1, max_total_launch_attempts=3)
+    references = tuple("sha256:" + value * 64 for value in "abc")
+    with observation(bounds) as state:
+        snapshot = capture_inventory(
+            [
+                InventoryRequest(
+                    kind="image",
+                    references=references,
+                    client_config=client.client_config,
+                )
+            ],
+            policy=bounds,
+        )
+        assert tuple(record.id for record in snapshot.records) == references
+        assert state.launch_accounts[0].consumed == 3
+        assert state.child_accounts[0].consumed == 0
+        assert capture_inventory((), policy=bounds).records == ()
+    assert len(children) == 3
     for child in children:
         assert_released(child)

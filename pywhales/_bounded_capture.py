@@ -88,10 +88,14 @@ def bounded_capture(
         ObservationCancelled: A cancellation token was set.
     """
     with telemetry.preflight():
-        check_scoped_launch(args, env, observation)
-    telemetry.start()
-    deadline = None if timeout is None else monotonic() + timeout
-    process = _launch(args, env, pass_fds, piped_stdin=input is not None)
+        reservation = check_scoped_launch(args, env, observation)
+    try:
+        telemetry.start()
+        deadline = None if timeout is None else monotonic() + timeout
+        process = _launch(args, env, pass_fds, piped_stdin=input is not None)
+    except BaseException:
+        reservation.release()
+        raise
 
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
@@ -100,7 +104,7 @@ def bounded_capture(
     try:
         buffers = {process.stdout.fileno(): stdout, process.stderr.fileno(): stderr}
         with (
-            watch_exit(process) as exited,
+            watch_exit(process, reservation.release) as exited,
             CapturePipes((process.stdout, process.stderr), exited) as pipes,
             StdinPump(process, input, telemetry, observation=observation),
         ):
@@ -175,5 +179,6 @@ def bounded_capture(
         process.stdout.close()
         process.stderr.close()
         process.wait()
+        reservation.release()
         telemetry.return_code = process.returncode
         telemetry.stdout_bytes, telemetry.stderr_bytes = read_bytes.values()

@@ -326,3 +326,58 @@ def test_launch_budget_refuses_each_family_without_spawn_or_input_read(
         8,
     )
     assert "private" not in json.dumps(asdict(record))
+
+
+@pytest.mark.parametrize(
+    "family", ["captured", "stream", "archive_load", "archive_save"]
+)
+def test_child_saturation_is_one_refusal_without_attempt_spawn_or_input(
+    family: str,
+) -> None:
+    records: list[TelemetryRecord] = []
+    pulled: list[bool] = []
+    client = DockerClient(
+        client_call=[sys.executable], telemetry_observer=records.append
+    )
+
+    def chunks() -> Iterator[bytes]:
+        pulled.append(True)
+        yield b"private-input"
+
+    bounds = replace(
+        policy(),
+        max_concurrent_children=1,
+        max_total_launch_attempts=2,
+        max_total_stdin_bytes=1024,
+    )
+    with (
+        observation(bounds) as state,
+        stream_stdout_and_stderr(
+            [*client.docker_cmd, "-c", "import threading; threading.Event().wait()"]
+        ),
+    ):
+        records.clear()
+        with (
+            patch.object(client.image, "inspect", return_value=[]),
+            patch("subprocess.Popen") as captured,
+            patch("pywhales.utils.Popen") as streamed,
+            patch("pywhales.components.image.cli_wrapper.Popen") as archived,
+            pytest.raises(ObservationLimitError) as refused,
+        ):
+            if family == "captured":
+                run(client.docker_cmd, input=chunks())
+            elif family == "stream":
+                stream_stdout_and_stderr(client.docker_cmd)
+            elif family == "archive_load":
+                client.image.load(chunks())
+            else:
+                next(client.image.save("private-image"))
+        for spawn in (captured, streamed, archived):
+            spawn.assert_not_called()
+        assert state.launch_accounts[0].consumed == 1
+        assert state.child_accounts[0].consumed == 1
+        assert refused.value.reason == "concurrent_children"
+        assert pulled == []
+        (record,) = records
+        assert isinstance(record, RefusalRecord)
+        assert (record.family, record.outcome) == (family, "limit")

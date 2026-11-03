@@ -7,6 +7,8 @@ from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Event, Lock
+from types import TracebackType
+from typing import Self
 
 from pywhales.exceptions import (
     ObservationCancelled,
@@ -56,6 +58,37 @@ class _LaunchAccount:
     lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
+@dataclass(slots=True)
+class _ChildReservation:
+    """Return shared child capacity once, only after reap or failed spawn."""
+
+    accounts: tuple[_LaunchAccount, ...]
+    _released: bool = False
+    _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
+
+    def release(self) -> None:
+        """Release all reserved child slots once without refunding attempts."""
+        with self._lock, ExitStack() as locked:
+            if self._released:
+                return
+            for account in self.accounts:
+                locked.enter_context(account.lock)
+            for account in self.accounts:
+                account.consumed -= 1
+            self._released = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.release()
+
+
 def _charge(accounts: tuple[_ResponseAccount, ...], size: int, reason: str) -> None:
     """Charge every account under its own lock before reporting any overflow."""
     exceeded: tuple[int, int] | None = None
@@ -80,6 +113,30 @@ class ObservationState:
     stream_accounts: tuple[_StreamAccount, ...] = ()
     stdin_accounts: tuple[_StdinAccount, ...] = ()
     launch_accounts: tuple[_LaunchAccount, ...] = ()
+    child_accounts: tuple[_LaunchAccount, ...] = ()
+
+    def reserve_child(self) -> _ChildReservation:
+        """Atomically debit attempts and child slots after ordinary preflight.
+
+        Lock each family outermost first, attempts before child capacity. Every
+        allowance is checked before any debit. Only child slots are refundable;
+        their token belongs to the reaper, with setup cleanup as a fallback.
+        """
+        reservation = _ChildReservation(self.child_accounts)
+        with ExitStack() as locked:
+            for account in (*self.launch_accounts, *self.child_accounts):
+                locked.enter_context(account.lock)
+            for accounts, reason in (
+                (self.launch_accounts, "total_launch_attempts"),
+                (self.child_accounts, "concurrent_children"),
+            ):
+                for account in accounts:
+                    measured = account.consumed + 1
+                    if measured > account.limit:
+                        raise ObservationLimitError(reason, account.limit, measured)
+            for account in (*self.launch_accounts, *self.child_accounts):
+                account.consumed += 1
+        return reservation
 
     def check_launch_attempts(self, count: int, *, reserve: bool = False) -> None:
         """Check every remaining launch allowance, optionally debiting all of them.
@@ -116,13 +173,15 @@ class ObservationState:
 
         A launch retains the snapshot only when it has something to enforce after
         the scope's ``with`` block exits: a deadline, a cancel token, or a stream
-        or stdin budget. Only a deadline or a token ever needs a timed wait.
+        or stdin budget, or owned-child capacity. Only a deadline or a token ever
+        needs a timed wait.
         """
         return (
             self.deadline is not None
             or bool(self.cancel_tokens)
             or bool(self.stream_accounts)
             or bool(self.stdin_accounts)
+            or bool(self.child_accounts)
         )
 
     def response_allowance(self, command_remaining: int) -> int:
@@ -274,6 +333,7 @@ def observation(
     stream_limit = policy.max_total_stream_bytes
     stdin_limit = policy.max_total_stdin_bytes
     launch_limit = policy.max_total_launch_attempts
+    child_limit = policy.max_concurrent_children
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
@@ -297,6 +357,9 @@ def observation(
                 parent.policy.max_total_launch_attempts,
                 policy.max_total_launch_attempts,
             ),
+            max_concurrent_children=_minimum_optional(
+                parent.policy.max_concurrent_children, policy.max_concurrent_children
+            ),
         )
     deadlines = tuple(
         value
@@ -308,6 +371,7 @@ def observation(
     stream_accounts = parent.stream_accounts if parent is not None else ()
     stdin_accounts = parent.stdin_accounts if parent is not None else ()
     launch_accounts = parent.launch_accounts if parent is not None else ()
+    child_accounts = parent.child_accounts if parent is not None else ()
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
@@ -331,6 +395,11 @@ def observation(
             (*launch_accounts, _LaunchAccount(launch_limit))
             if launch_limit is not None
             else launch_accounts
+        ),
+        child_accounts=(
+            (*child_accounts, _LaunchAccount(child_limit))
+            if child_limit is not None
+            else child_accounts
         ),
     )
     token = _current_observation.set(state)

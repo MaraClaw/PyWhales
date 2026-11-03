@@ -651,15 +651,17 @@ def _start_process(
 
     telemetry = ExecutionTelemetry(policy.telemetry_observer, "stream")
     args: list[str] | None = None
+    reservation = None
     if observation is not None:
         # Reject a stopped scope or an oversized argv/environment before launch.
         args = [str(x) for x in full_cmd]
         subprocess_env = finalize_environment(subprocess_env, args)
         with telemetry.preflight():
-            check_scoped_launch(args, subprocess_env, observation)
-    telemetry.start()
-    deadline = None if timeout is None else monotonic() + timeout
+            reservation = check_scoped_launch(args, subprocess_env, observation)
+    process: Popen[bytes] | None = None
     try:
+        telemetry.start()
+        deadline = None if timeout is None else monotonic() + timeout
         if args is None:
             args = [str(x) for x in full_cmd]
             subprocess_env = finalize_environment(subprocess_env, args)
@@ -686,8 +688,15 @@ def _start_process(
             strict_workload_errors=workload_status and policy.strict_workload_errors,
             telemetry=telemetry if policy.telemetry_observer is not None else None,
             observation=observation,
+            reservation=reservation,
         )
     except BaseException as error:
+        if process is not None:
+            from pywhales._readiness import unwind_launch
+
+            unwind_launch(process, None, [])
+        if reservation is not None:
+            reservation.release()
         telemetry.finish(outcome_of(type(error)))
         raise
 

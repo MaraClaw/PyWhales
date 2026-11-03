@@ -72,7 +72,7 @@ from pywhales.utils import (
 )
 
 if TYPE_CHECKING:
-    from pywhales._observation import ObservationState
+    from pywhales._observation import ObservationState, _ChildReservation
 
 type ImageListFilter = (
     tuple[Literal["id"], str]
@@ -119,6 +119,7 @@ def _prepare_archive_launch(
     list[str],
     dict[str, str],
     ObservationState | None,
+    _ChildReservation | None,
 ]:
     """Snapshot everything one direct archive launch needs, before any process.
 
@@ -134,7 +135,8 @@ def _prepare_archive_launch(
 
     Returns:
         The execution policy, selected timeout, stringified command, finalized
-        child environment, and the launch-time observation (or `None`).
+        child environment, launch-time observation, and child reservation (or
+        `None` outside an observation).
 
     Raises:
         ValueError: The selected timeout is boolean, nonfinite, zero, or negative.
@@ -157,10 +159,11 @@ def _prepare_archive_launch(
         )
     command = [str(argument) for argument in full_cmd]
     environment = finalize_environment(environment, command)
+    reservation = None
     if observation is not None:
         with ExecutionTelemetry(policy.telemetry_observer, family).preflight():
-            check_scoped_launch(command, environment, observation)
-    return policy, selected_timeout, command, environment, observation
+            reservation = check_scoped_launch(command, environment, observation)
+    return policy, selected_timeout, command, environment, observation, reservation
 
 
 def _launch_archive(
@@ -191,11 +194,29 @@ def _own_archive(
     *,
     raw: bool,
     observation: ObservationState | None,
+    reservation: _ChildReservation | None,
 ) -> ArchiveDeadline:
     """Start the archive watchdog, passing the scope along only when observed."""
-    if observation is None:
-        return ArchiveDeadline(process, command, deadline, raw=raw)
-    return ArchiveDeadline(process, command, deadline, raw=raw, observation=observation)
+    try:
+        if observation is None:
+            return ArchiveDeadline(process, command, deadline, raw=raw)
+        if not observation.child_accounts:
+            return ArchiveDeadline(
+                process, command, deadline, raw=raw, observation=observation
+            )
+        return ArchiveDeadline(
+            process,
+            command,
+            deadline,
+            raw=raw,
+            observation=observation,
+            reservation=reservation,
+        )
+    except BaseException:
+        from pywhales._readiness import unwind_launch
+
+        unwind_launch(process, None, [])
+        raise
 
 
 class Image(ReloadableObjectFromJson[ImageInspectResult]):
@@ -674,10 +695,13 @@ class ImageCLI(DockerCLICaller):
         input: Iterable[bytes],
         timeout: float | None,
     ) -> builtins.list[str]:
-        policy, selected_timeout, command, environment, observation = (
+        policy, selected_timeout, command, environment, observation, reservation = (
             _prepare_archive_launch(full_cmd, timeout, "archive_load")
         )
-        with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
+        with (
+            reservation if reservation is not None else nullcontext(),
+            ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry,
+        ):
             telemetry.start()
             deadline = (
                 None if selected_timeout is None else monotonic() + selected_timeout
@@ -693,6 +717,7 @@ class ImageCLI(DockerCLICaller):
                     deadline,
                     raw=policy.raw_diagnostics,
                     observation=observation,
+                    reservation=reservation,
                 )
                 try:
                     for buffer_bytes in input:
@@ -1472,10 +1497,13 @@ class ImageCLI(DockerCLICaller):
             ObservationCancelled: A token of that observation was set.
             ObservationLimitError: That observation rejects the argv or environment.
         """
-        policy, selected_timeout, command, environment, observation = (
+        policy, selected_timeout, command, environment, observation, reservation = (
             _prepare_archive_launch(full_cmd, timeout, "archive_save")
         )
-        with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
+        with (
+            reservation if reservation is not None else nullcontext(),
+            ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry,
+        ):
             telemetry.start()
             deadline = (
                 None if selected_timeout is None else monotonic() + selected_timeout
@@ -1491,6 +1519,7 @@ class ImageCLI(DockerCLICaller):
                     deadline,
                     raw=policy.raw_diagnostics,
                     observation=observation,
+                    reservation=reservation,
                 )
                 try:
                     if not owner.bounded:

@@ -9,7 +9,13 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import IO, TYPE_CHECKING, Literal, override
 
-from pywhales._readiness import CANCEL_CHECK, bounded_wait, reap, wait_ready
+from pywhales._readiness import (
+    CANCEL_CHECK,
+    bounded_wait,
+    reap,
+    unwind_launch,
+    wait_ready,
+)
 from pywhales.exceptions import (
     DockerTimeout,
     ObservationCancelled,
@@ -18,7 +24,7 @@ from pywhales.exceptions import (
 )
 
 if TYPE_CHECKING:
-    from pywhales._observation import ObservationState
+    from pywhales._observation import ObservationState, _ChildReservation
 
 type _Stop = Literal["command", "timeout", "cancelled", "limit"]
 
@@ -69,8 +75,10 @@ class ArchiveDeadline:
         *,
         raw: bool,
         observation: ObservationState | None = None,
+        reservation: _ChildReservation | None = None,
     ) -> None:
         self.process = process
+        self._reservation = reservation
         self.command = command
         self.deadline = deadline
         self.raw = raw
@@ -92,27 +100,44 @@ class ArchiveDeadline:
         self.released = Event()
         self.lock = Lock()
         self._exited = Event()
-        for pipe in (process.stdin, process.stdout, process.stderr):
-            if pipe is not None and (
-                self.bounded or (pipe is process.stdin and os.name != "nt")
-            ):
-                os.set_blocking(pipe.fileno(), False)
-        self._reaper = (
-            Thread(target=reap, args=(process, self._exited.set), daemon=True)
-            if self.bounded
-            else None
-        )
-        self.thread = Thread(target=self._watch, daemon=True)
+        started: list[Thread] = []
         try:
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None and (
+                    self.bounded or (pipe is process.stdin and os.name != "nt")
+                ):
+                    os.set_blocking(pipe.fileno(), False)
+            self._reaper = (
+                Thread(target=reap, args=(process, self._publish_exit), daemon=True)
+                if deadline is not None
+                or (
+                    self._scope is not None
+                    and (
+                        self._scope.deadline is not None
+                        or self._scope.cancel_tokens
+                        or self._scope.stream_accounts
+                        or self._scope.stdin_accounts
+                    )
+                )
+                else None
+            )
+            self.thread = Thread(target=self._watch, daemon=True)
             if self._reaper is not None:
                 self._reaper.start()
+                started.append(self._reaper)
             self.thread.start()
-        except RuntimeError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            if self._reaper is not None and self._reaper.ident is not None:
-                self._reaper.join()
+            started.append(self.thread)
+        except BaseException:
+            unwind_launch(process, None, started)
+            if reservation is not None:
+                reservation.release()
             raise
+
+    def _publish_exit(self) -> None:
+        """Release child capacity before publishing reap, without draining pipes."""
+        if self._reservation is not None:
+            self._reservation.release()
+        self._exited.set()
 
     def _stop_reason(self, *, running: bool) -> _Stop | None:
         """Return why the transfer must stop now, in the captured path's precedence.
@@ -168,8 +193,9 @@ class ArchiveDeadline:
 
     def _watch(self) -> None:
         try:
-            if not self.bounded:
+            if self._reaper is None:
                 self.process.wait()
+                self._publish_exit()
                 return
             while not self._exited.wait(self._remaining()):
                 reason = self._stop_reason(running=True)

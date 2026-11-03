@@ -153,15 +153,23 @@ def unwind_launch(
 
 
 @contextmanager
-def watch_exit(process: Popen[bytes]) -> Generator[WakeLatch]:
+def watch_exit(
+    process: Popen[bytes], on_exit: Callable[[], None] | None = None
+) -> Generator[WakeLatch]:
     """Reap a child on a helper thread and yield a latch set once it exits.
 
     Leaving the block kills a child that still runs, joins the helper, and only
     then closes the latch, so the block's waits can rely on the exit signal.
     """
     exited = WakeLatch()
+
+    def publish() -> None:
+        if on_exit is not None:
+            on_exit()
+        exited.set()
+
     try:
-        reaper = Thread(target=reap, args=(process, exited.set), daemon=True)
+        reaper = Thread(target=reap, args=(process, publish), daemon=True)
         reaper.start()
         try:
             yield exited
