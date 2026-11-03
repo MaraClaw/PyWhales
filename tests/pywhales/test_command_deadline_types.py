@@ -5,6 +5,7 @@ Pytest does not collect or execute the _check_* functions or their Docker calls.
 """
 
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import assert_type
 
@@ -31,6 +32,23 @@ def _check_container_deadlines(
     run_args: RunArgs = {"timeout": timeout}
     execute_args: ExecuteArgs = {"timeout": timeout}
     assert_type(client.run("app", **run_args), str)
+    assert_type(
+        client.create("app", health_start_interval=timedelta(seconds=1)), Container
+    )
+    assert_type(docker.create("app", health_start_interval=1), Container)
+    assert_type(client.container.create("app", health_start_interval=1), Container)
+    assert_type(client.run("app", health_start_interval=1), str)
+    assert_type(
+        client.container.run("app", detach=True, health_start_interval=1), Container
+    )
+    assert_type(
+        docker.run("app", stream=True, health_start_interval=timedelta(seconds=1)),
+        ProcessStream,
+    )
+    assert_type(
+        client.run("app", detach=flag, stream=flag, health_start_interval=1),
+        Container | str | ProcessStream,
+    )
     assert_type(client.container.run("app", detach=True, timeout=timeout), Container)
     assert_type(docker.run("app", stream=True, timeout=timeout), ProcessStream)
     assert_type(
