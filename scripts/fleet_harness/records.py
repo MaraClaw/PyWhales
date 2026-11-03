@@ -135,6 +135,13 @@ class QueueAttempt(Contract):
     ended_seconds: Amount
 
 
+class QueueBackoff(Contract):
+    """One half-open interval outside queue and active capacity after lease expiry."""
+
+    started_seconds: Amount
+    ended_seconds: Amount
+
+
 class Receipt(Contract):
     """Arrival, admission and terminal time of one submission.
 
@@ -151,6 +158,9 @@ class Receipt(Contract):
     attempts: tuple[QueueAttempt, ...] | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
+    backoffs: tuple[QueueBackoff, ...] | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
 
 
 class Peaks(Contract):
@@ -164,12 +174,15 @@ class Peaks(Contract):
 class Schedule(Contract):
     """Frozen overlap receipts in submission order with their observed peaks."""
 
+    version: Literal[1, 2] = Field(default=1, exclude_if=lambda v: v == 1)
     peaks: Peaks
     receipts: tuple[Receipt, ...]
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
         """Reject receipts that break FIFO order or peaks the receipts do not give."""
+        if self.version == 1 and any(r.backoffs is not None for r in self.receipts):
+            raise PydanticCustomError("schedule_binding", "schedule_binding")
         if not is_ordered(self.receipts):
             raise PydanticCustomError("schedule_order", "schedule_order")
         if (self.peaks.active, self.peaks.queued) != peak_counts(

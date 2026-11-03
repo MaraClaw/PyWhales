@@ -12,10 +12,12 @@ from pywhales.exceptions import ObservationLimitError
 def check_scoped_launch(
     args: Sequence[str], env: Mapping[str, str], observation: ObservationState
 ) -> None:
-    """Reject a stopped scope or an oversized launch before any process starts.
+    """Preflight and reserve one launch before any process starts.
 
     Cancellation and expiry are checked on both sides of the size limits, so a
     scope that ended while the limits were measured never launches.
+    Only then reserve against every enclosing launch account atomically. Later
+    interruption, spawn failure, or CLI failure never refunds that reservation.
 
     Args:
         args: Complete stringified command.
@@ -25,11 +27,12 @@ def check_scoped_launch(
     Raises:
         ObservationCancelled: If any active token is set.
         ObservationTimeout: If the scope deadline has passed.
-        ObservationLimitError: If argv or the environment exceeds a limit.
+        ObservationLimitError: If argv, environment, or launch attempts exceed a limit.
     """
     check_observation(observation)
     check_launch(args, env, observation.policy)
     check_observation(observation)
+    observation.check_launch_attempts(1, reserve=True)
 
 
 @contextmanager

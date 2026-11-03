@@ -217,6 +217,7 @@ def capture_nodes(
     node_ids: tuple[str, ...],
     *,
     manager_ids: tuple[str, ...] = (),
+    require_leader: bool = False,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -227,6 +228,8 @@ def capture_nodes(
         client: Client selecting the daemon; dry-run configurations are rejected.
         node_ids: Nonempty tuple of distinct exact node IDs.
         manager_ids: Distinct selected IDs required to remain reachable managers.
+        require_leader: Require exactly one observed leader among designated managers.
+            Requires a nonempty manager subset and does not discover other managers.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -235,11 +238,14 @@ def capture_nodes(
         A fixed target, or a typed failure, deadline, or cancellation outcome.
 
     Raises:
-        ValueError: If membership, timeout, or client configuration is invalid.
+        ValueError: If membership, leader flag, timeout, or client configuration is invalid.
     """
     _positive(timeout)
     target = NodeTarget(
-        client_config=client.client_config, node_ids=node_ids, manager_ids=manager_ids
+        client_config=client.client_config,
+        node_ids=node_ids,
+        manager_ids=manager_ids,
+        require_leader=require_leader,
     )
     if client.client_config.compose_dry_run:
         raise ValueError("A dry-run client cannot be captured")

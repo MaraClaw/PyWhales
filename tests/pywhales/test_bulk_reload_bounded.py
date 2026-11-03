@@ -1,5 +1,8 @@
 import sys
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from dataclasses import replace
 from threading import Event
 from unittest.mock import patch
 
@@ -17,6 +20,7 @@ from pywhales._observation import get_observation
 from pywhales.client_config import ClientConfig, bulk_reload
 from pywhales.components.manifest.cli_wrapper import ManifestList
 from pywhales.inventory import InventoryResource
+from pywhales.utils import run
 
 
 def test_manifest_bounded_response_limit_preserves_all_caches() -> None:
@@ -286,3 +290,61 @@ def test_builder_listings_count_against_total_response_budget() -> None:
     with pytest.raises(ObservationLimitError):
         bulk_reload(fresh, policy=total)
     assert all(builder._inspect_result is None for builder in fresh)
+
+
+def test_competing_launch_preserves_caches_after_plan_check() -> None:
+    code = 'import json,sys; print(json.dumps([{"Name": value} for value in sys.argv[3:]]))'
+    config = ClientConfig(_client_call_with_path=[sys.executable, "-c", code])
+    handles = [Context(config, name, is_immutable_id=True) for name in ("a", "b")]
+    for handle in handles:
+        handle._set_inspect_result(
+            handle._parse_inspect_result({"Name": handle._get_immutable_id()})
+        )
+    before = [
+        (handle._inspect_result, handle._last_refreshed_time) for handle in handles
+    ]
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=10000, max_response_bytes=10000
+    )
+    first_inspected, competitor_done = Event(), Event()
+    from pywhales._inventory_staging import inspect_group
+
+    def compete() -> str:
+        assert first_inspected.wait(timeout=5)
+        try:
+            return run([sys.executable, "-c", "print('competed')"])
+        finally:
+            competitor_done.set()
+
+    inspected_count = 0
+
+    def inspect(resources: Sequence[InventoryResource]) -> Sequence[InventoryResource]:
+        nonlocal inspected_count
+        result = inspect_group(resources)
+        inspected_count += 1
+        if inspected_count == 1:
+            first_inspected.set()
+            assert competitor_done.wait(timeout=5)
+        return result
+
+    with observation(replace(policy, max_total_launch_attempts=2)) as state:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            competitor = pool.submit(copy_context().run, compete)
+            try:
+                with (
+                    patch(
+                        "pywhales._inventory_staging.inspect_group", side_effect=inspect
+                    ),
+                    pytest.raises(ObservationLimitError) as refused,
+                ):
+                    bulk_reload(handles, policy=policy)
+            finally:
+                first_inspected.set()
+            assert competitor.result(timeout=5) == "competed"
+        assert state.launch_accounts[0].consumed == 2
+
+    assert refused.value.reason == "total_launch_attempts"
+    assert inspected_count == 1
+    for handle, (payload, timestamp) in zip(handles, before, strict=True):
+        assert handle._inspect_result is payload
+        assert handle._last_refreshed_time == timestamp

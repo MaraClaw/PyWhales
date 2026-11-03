@@ -47,6 +47,15 @@ class _StdinAccount(_ResponseAccount):
     """
 
 
+@dataclass(slots=True)
+class _LaunchAccount:
+    """Accumulate accepted launch reservations shared by copied contexts."""
+
+    limit: int
+    consumed: int = 0
+    lock: Lock = field(default_factory=Lock, repr=False, compare=False)
+
+
 def _charge(accounts: tuple[_ResponseAccount, ...], size: int, reason: str) -> None:
     """Charge every account under its own lock before reporting any overflow."""
     exceeded: tuple[int, int] | None = None
@@ -70,6 +79,36 @@ class ObservationState:
     response_accounts: tuple[_ResponseAccount, ...]
     stream_accounts: tuple[_StreamAccount, ...] = ()
     stdin_accounts: tuple[_StdinAccount, ...] = ()
+    launch_accounts: tuple[_LaunchAccount, ...] = ()
+
+    def check_launch_attempts(self, count: int, *, reserve: bool = False) -> None:
+        """Check every remaining launch allowance, optionally debiting all of them.
+
+        Lock enclosing accounts outermost first, then check all before updating
+        any. Copied contexts share those accounts. A successful reservation is
+        never refunded, even if interruption or spawn failure follows.
+
+        Args:
+            count: Nonnegative number of planned launches; one for a reservation.
+            reserve: Debit the checked count when true. The default only checks
+                a complete inventory plan and holds no capacity for it afterward.
+
+        Raises:
+            ObservationLimitError: With reason ``total_launch_attempts`` when
+                any account cannot fit the count. No account is changed.
+        """
+        with ExitStack() as locked:
+            for account in self.launch_accounts:
+                locked.enter_context(account.lock)
+            for account in self.launch_accounts:
+                measured = account.consumed + count
+                if measured > account.limit:
+                    raise ObservationLimitError(
+                        "total_launch_attempts", account.limit, measured
+                    )
+            if reserve:
+                for account in self.launch_accounts:
+                    account.consumed += count
 
     @property
     def binds_launches(self) -> bool:
@@ -234,6 +273,7 @@ def observation(
     response_limit = policy.max_total_response_bytes
     stream_limit = policy.max_total_stream_bytes
     stdin_limit = policy.max_total_stdin_bytes
+    launch_limit = policy.max_total_launch_attempts
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
@@ -253,6 +293,10 @@ def observation(
             max_total_stdin_bytes=_minimum_optional(
                 parent.policy.max_total_stdin_bytes, policy.max_total_stdin_bytes
             ),
+            max_total_launch_attempts=_minimum_optional(
+                parent.policy.max_total_launch_attempts,
+                policy.max_total_launch_attempts,
+            ),
         )
     deadlines = tuple(
         value
@@ -263,6 +307,7 @@ def observation(
     accounts = parent.response_accounts if parent is not None else ()
     stream_accounts = parent.stream_accounts if parent is not None else ()
     stdin_accounts = parent.stdin_accounts if parent is not None else ()
+    launch_accounts = parent.launch_accounts if parent is not None else ()
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
@@ -281,6 +326,11 @@ def observation(
             (*stdin_accounts, _StdinAccount(stdin_limit))
             if stdin_limit is not None
             else stdin_accounts
+        ),
+        launch_accounts=(
+            (*launch_accounts, _LaunchAccount(launch_limit))
+            if launch_limit is not None
+            else launch_accounts
         ),
     )
     token = _current_observation.set(state)

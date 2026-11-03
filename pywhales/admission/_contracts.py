@@ -43,16 +43,18 @@ class SaturationPolicy(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ClassLimit:
-    """Request-count limits with optional application-defined demand capacity.
+    """Request-count limits with optional active and queued demand capacities.
 
-    demand_capacity=None leaves aggregate demand unbounded. Reservations account
-    only for participating application work, not daemon memory or CPU limits.
+    None leaves the corresponding demand total unbounded. pending_demand_capacity
+    accepts zero and applies only when queueing, never to an immediate grant.
+    Reservations account only for participating work, not daemon memory or CPU.
     """
 
     active: int
     pending: int
     policy: SaturationPolicy = SaturationPolicy.WAIT
     demand_capacity: int | None = None
+    pending_demand_capacity: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.active) is not int or self.active <= 0:
@@ -63,6 +65,11 @@ class ClassLimit:
             raise ValueError("policy must be a SaturationPolicy")
         if self.demand_capacity is not None:
             validate_demand(self.demand_capacity)
+        if self.pending_demand_capacity is not None and (
+            type(self.pending_demand_capacity) is not int
+            or self.pending_demand_capacity < 0
+        ):
+            raise ValueError("pending_demand_capacity must be a nonnegative integer")
 
 
 def validate_demand(demand: int, capacity: int | None = None) -> None:
@@ -104,6 +111,7 @@ class OutcomeCounts:
     queue_timed_out: int
     rejected_closed: int
     saturated: bool
+    rejected_pending_demand_full: int = 0
 
 
 @dataclass(frozen=True, slots=True)

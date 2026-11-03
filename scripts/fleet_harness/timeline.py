@@ -100,17 +100,49 @@ def is_ordered(receipts: Sequence[Receipt]) -> bool:
         end = launched if launched is not None else receipt.terminal_seconds
         spans = receipt.attempts
         if spans is None:
+            if receipt.backoffs is not None:
+                return False
             attempts.append((arrival, 0, number, end, launched is not None))
         else:
+            delays = receipt.backoffs or ()
+            pending = len(delays) == len(spans)
             if (
                 not spans
                 or spans[0].enqueued_seconds != arrival
-                or spans[-1].ended_seconds != end
+                or (
+                    receipt.backoffs is not None
+                    and len(delays) not in {len(spans) - 1, len(spans)}
+                )
+                or (pending and launched is not None)
+                or (
+                    delays[-1].ended_seconds
+                    if delays and pending
+                    else spans[-1].ended_seconds
+                )
+                != end
             ):
                 return False
+            for index, delay in enumerate(delays):
+                if (
+                    delay.started_seconds != spans[index].ended_seconds
+                    or delay.ended_seconds < delay.started_seconds
+                    or delay.ended_seconds
+                    != (
+                        spans[index + 1].enqueued_seconds
+                        if index + 1 < len(spans)
+                        else end
+                    )
+                ):
+                    return False
             for index, span in enumerate(spans):
                 if span.enqueued_seconds > span.ended_seconds or (
-                    index and span.enqueued_seconds != spans[index - 1].ended_seconds
+                    index
+                    and span.enqueued_seconds
+                    != (
+                        delays[index - 1].ended_seconds
+                        if delays
+                        else spans[index - 1].ended_seconds
+                    )
                 ):
                     return False
                 attempts.append(
@@ -145,6 +177,8 @@ def consistent(receipt: Receipt, samples: Sequence[Observation]) -> bool:
     )
     if (
         queue.outcome != receipt.outcome
+        or queue.seconds is None
+        or not close(queue.seconds, left - receipt.arrival_seconds)
         or not close(queue.started_at_seconds, receipt.arrival_seconds)
         or not close(queue.ended_at_seconds, left)
         or any(
@@ -178,6 +212,14 @@ def bound(report: RunReport) -> bool:
         and len(present) == len(offsets)
         and present == sorted(present)
         and report.repetitions == 1
+        and schedule.version
+        == (
+            2
+            if any(
+                step.queue_retry_backoff_seconds is not None for step in report.steps
+            )
+            else 1
+        )
         and len(schedule.receipts) == report.submitted <= len(offsets)
         and all(
             receipt.arrival_seconds == step.arrival_seconds
@@ -205,6 +247,32 @@ def timed(report: RunReport, receipts: Sequence[Receipt]) -> bool:
     for sample in report.samples:
         by_submission[sample.submission].append(sample)
     window = report.workload.duration_seconds
+    cancelled = [
+        r.terminal_seconds
+        for r in receipts
+        if r.admitted_seconds is None and r.outcome == "cancelled"
+    ]
+    if cancelled:
+        stop = cancelled[0]
+        if (
+            any(time != stop for time in cancelled)
+            or any(
+                r.admitted_seconds is not None and r.admitted_seconds > stop
+                for r in receipts
+            )
+            or any(
+                r.admitted_seconds is None and r.terminal_seconds > stop
+                for r in receipts
+            )
+            or (
+                "asset_limit" not in report.reasons
+                and not any(
+                    r.terminal_seconds == stop and r.outcome != "cancelled"
+                    for r in receipts
+                )
+            )
+        ):
+            return False
     return keys == sorted(set(keys)) and all(
         receipt.arrival_seconds < window
         and receipt.terminal_seconds <= window + TOLERANCE
@@ -221,21 +289,56 @@ def timed(report: RunReport, receipts: Sequence[Receipt]) -> bool:
 
 
 def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
-    """Bind recorded queue attempts to the step's lease and attempt limit."""
+    """Bind alternating queue/backoff spans to leases, fixed delays and deadlines."""
     lease = step.queue_lease_seconds
     spans = receipt.attempts
+    delay = step.queue_retry_backoff_seconds
+    backoffs = receipt.backoffs
+    if receipt.admitted_seconds is None and receipt.outcome not in {
+        "timed_out",
+        "cancelled",
+    }:
+        return False
+    if (delay is None) != (backoffs is None):
+        return False
     if lease is None:
-        return spans is None
+        return spans is None and (
+            receipt.admitted_seconds < deadline
+            if receipt.admitted_seconds is not None
+            else receipt.outcome != "timed_out"
+            or close(receipt.terminal_seconds, deadline)
+        )
     if spans is None or not spans or len(spans) > (step.max_queue_attempts or 1):
         return False
+    pending = backoffs is not None and len(backoffs) == len(spans)
+    if backoffs is not None and delay is not None:
+        for index, span in enumerate(backoffs):
+            eligibility = span.started_seconds + delay
+            if (
+                span.started_seconds >= deadline
+                or index + 1 >= (step.max_queue_attempts or 1)
+                or span.ended_seconds > min(eligibility, deadline) + TOLERANCE
+            ):
+                return False
+            if index + 1 < len(spans):
+                if (
+                    not close(span.ended_seconds, eligibility)
+                    or span.ended_seconds >= deadline
+                ):
+                    return False
+            elif receipt.outcome == "timed_out":
+                if eligibility < deadline or not close(span.ended_seconds, deadline):
+                    return False
+            elif receipt.outcome != "cancelled":
+                return False
     valid = all(
         span.ended_seconds <= span.enqueued_seconds + lease + TOLERANCE
         and span.ended_seconds <= deadline + TOLERANCE
         and (
-            index == len(spans) - 1
+            (index == len(spans) - 1 and not pending)
             or close(span.ended_seconds, span.enqueued_seconds + lease)
         )
-        and (index == len(spans) - 1 or span.ended_seconds < deadline)
+        and ((index == len(spans) - 1 and not pending) or span.ended_seconds < deadline)
         for index, span in enumerate(spans)
     )
     if receipt.admitted_seconds is not None:
@@ -243,6 +346,8 @@ def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
             deadline, spans[-1].enqueued_seconds + lease
         )
     if receipt.outcome == "timed_out":
+        if pending:
+            return valid
         end = min(deadline, spans[-1].enqueued_seconds + lease)
         return (
             valid

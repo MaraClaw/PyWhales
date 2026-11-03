@@ -27,9 +27,10 @@ from that client retain the policy through ordinary list composition, shallow
 copy, and deep copy. A supplied `client_config` takes precedence over constructor
 settings, including `telemetry_observer`.
 
-## Version 6 schema and confidentiality
+## Version 7 schema and confidentiality
 
-The vocabulary is closed. `schema_version` is `6`; execution `phase` is `launch`,
+The vocabulary is closed. `schema_version` is `7` for every record kind; execution
+`phase` is `launch`,
 `completion`, or `refusal`; `family` is `captured`, `stream`, `archive_load`, or
 `archive_save`. Family describes the shared execution path, not an operation
 inferred from argv. `archive_load`/`archive_save` cover only the filename-free
@@ -54,6 +55,23 @@ free-form labels. `raw_diagnostics=True` does not relax this boundary. Explicit
 returned output, raw exception attributes, and application-owned logging remain
 confidential and outside telemetry's sanitization contract. An application can
 leak its own data from its callback or sink; PyWhales doesn't sanitize their code.
+
+Observed `AdmissionOwner` requests emit exactly one `AdmissionDecisionRecord`
+when activated, with phase `admission`, an opaque `admission_id`, nonnegative
+activation-to-decision `duration_seconds`, and a closed outcome: `granted`,
+`busy`, `queue_full`, `pending_demand_full`, `closed`, `queue_timeout`, `cancelled`,
+or `failed`. `pending_demand_full` means the queue's declared-demand limit
+refused the request; `queue_full` refers to its request-count limit. Neither
+retains or invokes the refused work. Decisions include no queue names, endpoint
+aliases, demand values, callables or exception text. Callbacks run outside owner
+and stream locks; ordinary observer errors do not change the admission result.
+An unobserved owner creates no telemetry IDs or telemetry clock reads.
+
+A grant describes acquisition, not subsequent operation success. Launch and
+refusal records can correlate to the innermost observed admission ID; completion
+records correlate through their launch attempt ID. Dormant cancellation emits
+no decision. Schema 7 extends the admission outcome vocabulary; consumers of
+schema 6 must update their closed-outcome handling before accepting schema 7.
 
 Launch is emitted immediately before an attempted local spawn, after shared
 preflight validation. It does not prove that spawn succeeded. A spawn failure has

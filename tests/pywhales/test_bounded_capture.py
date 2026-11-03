@@ -9,7 +9,7 @@ import time
 import traceback
 from collections.abc import Buffer, Generator, Iterable, Iterator, Mapping, Sequence
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Barrier, Event, Thread
 from typing import TypedDict, override
@@ -18,10 +18,12 @@ from unittest.mock import patch
 import pytest
 
 import pywhales._readiness
+from pywhales import DockerClient
 from pywhales._capture_pipes import CapturePipes
 from pywhales._observation import ObservationState, observation
 from pywhales.client_config import ClientConfig
 from pywhales.exceptions import (
+    DockerException,
     DockerTimeout,
     NoSuchContainer,
     ObservationCancelled,
@@ -29,7 +31,7 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.utils import run
+from pywhales.utils import run, stream_stdout_and_stderr
 
 
 def policy(response: int = 1024, argv: int = 65536) -> InspectionPolicy:
@@ -484,7 +486,7 @@ def pieces(payload: bytes, size: int) -> Iterator[bytes]:
 
 @pytest.fixture
 def children() -> Generator[list[subprocess.Popen[bytes]]]:
-    """Record every child a bounded capture launches, stdin pipe included."""
+    """Record scoped captured, stream, and archive children, stdin pipe included."""
     processes: list[subprocess.Popen[bytes]] = []
     popen = subprocess.Popen
 
@@ -492,10 +494,11 @@ def children() -> Generator[list[subprocess.Popen[bytes]]]:
         args: list[str],
         *,
         stdout: int,
-        stderr: int,
+        stderr: int | None,
         env: Mapping[str, str],
-        pass_fds: Sequence[int],
+        pass_fds: Sequence[int] = (),
         stdin: int | None = None,
+        bufsize: int = -1,
     ) -> subprocess.Popen[bytes]:
         process = popen(
             args,
@@ -504,11 +507,16 @@ def children() -> Generator[list[subprocess.Popen[bytes]]]:
             stderr=stderr,
             env=env,
             pass_fds=pass_fds,
+            bufsize=bufsize,
         )
         processes.append(process)
         return process
 
-    with patch("pywhales._bounded_capture.subprocess.Popen", side_effect=launch):
+    with (
+        patch("pywhales._bounded_capture.subprocess.Popen", side_effect=launch),
+        patch("pywhales.utils.Popen", side_effect=launch),
+        patch("pywhales.components.image.cli_wrapper.Popen", side_effect=launch),
+    ):
         yield processes
 
 
@@ -818,3 +826,129 @@ def test_a_stopped_scope_launches_nothing_and_never_pulls_input() -> None:
 
     launch.assert_not_called()
     assert pulled == []
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("failure", ["spawn", "exit", "response"])
+def test_launch_reservation_is_not_refunded_after_failure(
+    failure: str, children: list[subprocess.Popen[bytes]], tmp_path: Path
+) -> None:
+    command = {
+        "spawn": [str(tmp_path / "missing-cli")],
+        "exit": [sys.executable, "-c", "raise SystemExit(7)"],
+        "response": [sys.executable, "-c", "print('x' * 20)"],
+    }[failure]
+    expected = {
+        "spawn": FileNotFoundError,
+        "exit": DockerException,
+        "response": ObservationLimitError,
+    }[failure]
+    with observation(replace(policy(8), max_total_launch_attempts=1)) as state:
+        with pytest.raises(expected):
+            run(command)
+        with pytest.raises(ObservationLimitError) as refused:
+            run([sys.executable, "-c", "pass"])
+        assert refused.value.reason == "total_launch_attempts"
+        assert state.launch_accounts[0].consumed == 1
+
+    assert len(children) == (0 if failure == "spawn" else 1)
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_interrupted_child_is_reaped_without_refunding_its_launch(
+    children: list[subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancel = Event()
+    ready = CapturePipes.ready
+
+    def cancel_when_ready(
+        self: CapturePipes, timeout: float | None
+    ) -> list[tuple[int, int]]:
+        result = ready(self, timeout)
+        if result:
+            cancel.set()
+        return result
+
+    monkeypatch.setattr(CapturePipes, "ready", cancel_when_ready)
+    with observation(
+        replace(policy(), max_total_launch_attempts=1), cancel=cancel
+    ) as state:
+        with pytest.raises(ObservationCancelled):
+            run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import threading; print('ready', flush=True); threading.Event().wait()",
+                ]
+            )
+        cancel.clear()
+        with pytest.raises(ObservationLimitError) as refused:
+            run([sys.executable, "-c", "pass"])
+        assert refused.value.reason == "total_launch_attempts"
+        assert state.launch_accounts[0].consumed == 1
+
+    assert len(children) == 1
+    assert_released(children[0])
+
+
+ARCHIVE_CLI = """
+import json, sys
+if sys.argv[1:3] == ['image', 'inspect']:
+    print(json.dumps([{'Id': value} for value in sys.argv[3:]]))
+elif sys.argv[1:3] == ['image', 'load']:
+    sys.stdin.buffer.read()
+    print('Loaded image: sample')
+elif sys.argv[1:3] == ['image', 'save']:
+    sys.stdout.buffer.write(b'archive')
+else:
+    print('stream')
+"""
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_real_captured_stream_and_archive_children_share_one_launch_budget(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
+    bounds = replace(policy(), max_total_launch_attempts=5, max_total_stdin_bytes=1024)
+    with observation(bounds) as state:
+        assert run(client.docker_cmd) == "stream"
+        with stream_stdout_and_stderr(client.docker_cmd) as stream:
+            assert list(stream) == [("stdout", b"stream\n")]
+        saved = client.image.save("sha256:" + "a" * 64)
+        assert state.launch_accounts[0].consumed == 3
+        assert client.image.load(b"archive") == ["sample"]
+        assert b"".join(saved) == b"archive"
+        with pytest.raises(ObservationLimitError) as refused:
+            run(client.docker_cmd)
+        assert refused.value.reason == "total_launch_attempts"
+        assert state.launch_accounts[0].consumed == 5
+    assert len(children) == 5
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("same_scope", [True, False])
+def test_lazy_save_charges_eager_inspect_then_first_iteration_scope(
+    children: list[subprocess.Popen[bytes]], same_scope: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "-c", ARCHIVE_CLI])
+    bounds = replace(policy(), max_total_launch_attempts=1)
+    with observation(bounds) as creator:
+        saved = client.image.save("sha256:" + "a" * 64)
+        assert creator.launch_accounts[0].consumed == 1
+        if same_scope:
+            with pytest.raises(ObservationLimitError) as refused:
+                next(saved)
+            assert refused.value.reason == "total_launch_attempts"
+    if not same_scope:
+        with observation(bounds) as iterator:
+            assert b"".join(saved) == b"archive"
+            assert iterator.launch_accounts[0].consumed == 1
+        assert creator.launch_accounts[0].consumed == 1
+    assert len(children) == (1 if same_scope else 2)
+    for child in children:
+        assert_released(child)

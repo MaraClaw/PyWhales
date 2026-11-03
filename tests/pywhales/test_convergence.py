@@ -3225,6 +3225,225 @@ def test_node_target_is_frozen_and_dry_run_is_rejected(
 
 
 @pytest.mark.parametrize(
+    "flag,managers", [(1, ("node-a",)), (None, ("node-a",)), (True, ())]
+)
+def test_nodes_invalid_leadership_selection_rejected_before_lookup(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    flag: object,
+    managers: tuple[str, ...],
+) -> None:
+    selected_flag: Any = flag
+    with pytest.raises(ValueError):
+        capture_nodes(
+            fake_cli,
+            ("node-a",),
+            manager_ids=managers,
+            require_leader=selected_flag,
+            policy=policy,
+            timeout=5,
+        )
+    with pytest.raises(ValueError):
+        NodeTarget(
+            client_config=fake_cli.client_config,
+            node_ids=("node-a",),
+            manager_ids=managers,
+            require_leader=selected_flag,
+        )
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_nodes_malformed_leader_is_conditional_at_capture_and_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, value: object
+) -> None:
+    good, bad = node("node-a", manager=True), node("node-a", manager=True)
+    good["ManagerStatus"]["Leader"] = True
+    bad["ManagerStatus"]["Leader"] = value
+    store_nodes(tmp_path, {"node-a": [[bad], [good], [bad], [bad], [bad]]})
+    result = capture_nodes(
+        fake_cli,
+        ("node-a",),
+        manager_ids=("node-a",),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert result == Failure(reason="malformed")
+    assert isinstance(result, Failure) and result.cause is None
+    target = capture_nodes(
+        fake_cli,
+        ("node-a",),
+        manager_ids=("node-a",),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget) and target.require_leader is True
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="malformed")
+    assert isinstance(result, Failure) and result.cause is None
+    default = capture_nodes(
+        fake_cli, ("node-a",), manager_ids=("node-a",), policy=policy, timeout=5
+    )
+    assert isinstance(default, NodeTarget) and not default.require_leader
+    assert wait(default, policy=policy, timeout=5, poll_interval=1) == Success()
+
+
+@pytest.mark.parametrize("leaders", [(None, False), (False, False), (True, True)])
+def test_nodes_leader_mismatch_is_bounded_aggregate(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leaders: tuple[bool | None, bool],
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    first, second = node("node-a", manager=True), node("node-b", manager=True)
+    other = node("node-c", manager=True)
+    other["ManagerStatus"]["Leader"] = True
+    if leaders[0] is None:
+        del first["ManagerStatus"]["Leader"]
+    else:
+        first["ManagerStatus"]["Leader"] = leaders[0]
+    second["ManagerStatus"]["Leader"] = leaders[1]
+    store_nodes(
+        tmp_path, {"node-a": [[first]], "node-b": [[second]], "node-c": [[other]]}
+    )
+    target = capture_nodes(
+        fake_cli,
+        ("node-a", "node-b", "node-c"),
+        manager_ids=("node-a", "node-b"),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Deadline(DeadlineDetail(3, leader_mismatch_managers=2))
+    assert "node-a" not in repr(result) and "node-b" not in repr(result)
+
+
+@pytest.mark.parametrize("other_leader", [True, "invalid"])
+def test_nodes_leader_can_change_between_clear_passes_and_ignores_other_nodes(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    other_leader: object,
+) -> None:
+    first, second, other = (
+        node(identity, manager=True) for identity in ("node-a", "node-b", "node-c")
+    )
+    first["ManagerStatus"]["Leader"] = True
+    del second["ManagerStatus"]["Leader"]
+    other["ManagerStatus"]["Leader"] = other_leader
+    first_after, second_after = (
+        node("node-a", manager=True),
+        node("node-b", manager=True),
+    )
+    second_after["ManagerStatus"]["Leader"] = True
+    store_nodes(
+        tmp_path,
+        {
+            "node-a": [[first], [first], [first_after]],
+            "node-b": [[second], [second], [second_after]],
+            "node-c": [[other]],
+        },
+    )
+    target = capture_nodes(
+        fake_cli,
+        ("node-a", "node-b", "node-c"),
+        manager_ids=("node-a", "node-b"),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Success()
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_nodes_missing_or_demoted_manager_remains_pending_with_leadership(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: bool,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    manager = node("node-a", manager=True)
+    if missing:
+        del manager["ManagerStatus"]
+    else:
+        manager["Spec"]["Role"] = "worker"
+        manager["ManagerStatus"]["Leader"] = None
+    store_nodes(tmp_path, {"node-a": [[manager]]})
+    target = capture_nodes(
+        fake_cli,
+        ("node-a",),
+        manager_ids=("node-a",),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(
+            1,
+            non_manager_nodes=int(not missing),
+            unreachable_managers=int(missing),
+            leader_mismatch_managers=1,
+        )
+    )
+
+
+def test_nodes_leader_loss_on_confirming_pass_blocks_success(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    leader, follower = node("node-a", manager=True), node("node-a", manager=True)
+    leader["ManagerStatus"]["Leader"] = True
+    store_nodes(tmp_path, {"node-a": [[leader], [leader], [follower]]})
+    target = capture_nodes(
+        fake_cli,
+        ("node-a",),
+        manager_ids=("node-a",),
+        require_leader=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(1, leader_mismatch_managers=1)
+    )
+
+
+@pytest.mark.parametrize(
     "blocker", ["state", "availability", "demotion", "missing", "unreachable"]
 )
 def test_nodes_blockers_are_bounded_counts_without_identity(
@@ -3365,6 +3584,7 @@ def test_nodes_confirming_pass_regression_replaces_candidate(
 
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("confirming", [False, True])
+@pytest.mark.parametrize("require_leader", [False, True])
 def test_nodes_hung_child_is_reaped_and_partial_cycle_not_published(
     fake_cli: DockerClient,
     policy: InspectionPolicy,
@@ -3372,18 +3592,28 @@ def test_nodes_hung_child_is_reaped_and_partial_cycle_not_published(
     monkeypatch: pytest.MonkeyPatch,
     cancelled: bool,
     confirming: bool,
+    require_leader: bool,
 ) -> None:
     import pywhales._bounded_capture as capture_module
     import pywhales.convergence._compose as compose_module
     from pywhales.exceptions import ObservationTimeout
 
     manager, worker = node("node-a", manager=True), node("node-b")
+    manager["ManagerStatus"]["Leader"] = True
     down = node("node-a", manager=True)
     down["Status"]["State"] = "down"
     store_nodes(
         tmp_path, {"node-a": [[manager], [down], [manager]], "node-b": [[worker]]}
     )
-    target = captured_nodes(fake_cli, policy)
+    target = capture_nodes(
+        fake_cli,
+        ("node-a", "node-b"),
+        manager_ids=("node-a",),
+        require_leader=require_leader,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, NodeTarget)
     fifo = tmp_path / "notification"
     os.mkfifo(fifo)
     data = json.loads((tmp_path / "data.json").read_text())
@@ -3427,6 +3657,12 @@ def test_nodes_hung_child_is_reaped_and_partial_cycle_not_published(
         os.close(descriptor)
     assert not worker_thread.is_alive()
     assert results == [
-        Cancelled() if cancelled else Deadline(DeadlineDetail(2, non_ready_nodes=1))
+        Cancelled()
+        if cancelled
+        else Deadline(
+            DeadlineDetail(
+                2, non_ready_nodes=1, leader_mismatch_managers=int(require_leader)
+            )
+        )
     ]
     assert_reaped(processes)

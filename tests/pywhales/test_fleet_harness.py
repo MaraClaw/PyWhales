@@ -1232,13 +1232,21 @@ def test_launched_lease_submission_never_retries() -> None:
     assert row.outcome == "succeeded" and report.command_count == 1
 
 
-def test_early_stop_cancels_retry_pending_at_same_instant() -> None:
+@pytest.mark.parametrize("backoff", [None, 1.0])
+def test_early_stop_cancels_retry_pending_at_same_instant(
+    backoff: float | None,
+) -> None:
     report = run(
         overlap_manifest(2, "operation_count", 4),
         overlap_plan(
             at(0.0, 5.0),
             at(0.0, 5.0),
-            at(0.0, queue_lease_seconds=1.0, max_queue_attempts=3),
+            at(
+                0.0,
+                queue_lease_seconds=1.0,
+                max_queue_attempts=3,
+                queue_retry_backoff_seconds=backoff,
+            ),
             at(0.0, queue_lease_seconds=1.0, max_queue_attempts=1),
         ),
     )
@@ -1249,6 +1257,10 @@ def test_early_stop_cancels_retry_pending_at_same_instant() -> None:
         "timed_out",
     ]
     assert schedule(report).receipts[2].terminal_seconds == 1.0
+    if backoff is not None:
+        assert schedule(report).receipts[2].model_dump()["backoffs"] == (
+            {"started_seconds": 1.0, "ended_seconds": 1.0},
+        )
 
 
 @pytest.mark.parametrize("defect", ["missing", "gap", "overlap", "lease", "count"])
@@ -1314,6 +1326,9 @@ def test_legacy_digests_and_report_shapes_remain_unchanged() -> None:
     assert "queue_lease_seconds" not in sequential.steps[0].model_dump()
     assert "max_queue_attempts" not in sequential.steps[0].model_dump()
     assert "attempts" not in schedule(scheduled).receipts[0].model_dump()
+    assert "backoffs" not in schedule(scheduled).receipts[0].model_dump()
+    assert "version" not in schedule(scheduled).model_dump()
+    assert "queue_retry_backoff_seconds" not in sequential.steps[0].model_dump()
 
 
 def test_lease_declaration_changes_operation_digest() -> None:

@@ -335,12 +335,21 @@ def test_unlaunched_submission_when_exported_is_counted_once(
     } & set(report.flags)
 
 
-def test_retry_export_counts_logical_submissions_and_queue_samples_once() -> None:
+@pytest.mark.parametrize("backoff", [None, 1.0])
+def test_retry_export_counts_logical_submissions_and_queue_samples_once(
+    backoff: float | None,
+) -> None:
     declaration = overlap_manifest(1, "operation_count", 2)
     simulation = run(
         declaration,
         overlap_plan(
-            at(0.0, 1.5), at(0.0, queue_lease_seconds=1.0, max_queue_attempts=2)
+            at(0.0, 1.5),
+            at(
+                0.0,
+                queue_lease_seconds=1.0,
+                max_queue_attempts=2,
+                queue_retry_backoff_seconds=backoff,
+            ),
         ),
     )
     result = export_result(simulation, declaration)
@@ -348,6 +357,42 @@ def test_retry_export_counts_logical_submissions_and_queue_samples_once() -> Non
     assert result.populations.all_submissions == result.outcomes.accounted == 2
     assert [(sample.submission, sample.seconds) for sample in queue.samples] == [
         (1, 0.0),
-        (2, 1.5),
+        (2, 1.5 if backoff is None else 2.0),
     ]
     assert result.populations.launched_cli == 2
+
+
+@pytest.mark.parametrize(
+    ("fraction", "outcome"), [(0.5, "cancelled"), (1.0, "timed_out")]
+)
+def test_backoff_terminal_export_counts_no_extra_launch(
+    fraction: float, outcome: str
+) -> None:
+    declaration = overlap_manifest(1, "operation_count", 3, fraction)
+    simulation = run(
+        declaration,
+        overlap_plan(
+            at(0.0, 0.1),
+            at(0.1, 9.0),
+            at(
+                0.1,
+                queue_lease_seconds=1.0,
+                max_queue_attempts=4,
+                queue_retry_backoff_seconds=8.0,
+            ),
+            timeout=3.0,
+        ),
+    )
+    report = classify(exported(simulation, declaration))
+    result = report.evidence.result
+    assert result.populations.all_submissions == result.outcomes.accounted == 3
+    assert result.populations.launched_cli == 2
+    assert simulation.schedule is not None
+    assert simulation.schedule.receipts[2].outcome == outcome
+    assert report.qualification == "unqualified"
+    assert not {
+        "outcome_samples_mismatch",
+        "submission_outcome_conflict",
+        "latency_excluded",
+        "latency_missing",
+    } & set(report.flags)

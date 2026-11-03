@@ -202,6 +202,14 @@ class AdmissionOwner:
                         ticket.done = True
                         bucket.record(Outcome.REJECTED_FULL)
                         raise AdmissionRejected(RejectionReason.QUEUE_FULL)
+                    capacity = bucket.limit.pending_demand_capacity
+                    if (
+                        capacity is not None
+                        and bucket.pending_demand + ticket.demand > capacity
+                    ):
+                        ticket.done = True
+                        bucket.record(Outcome.REJECTED_PENDING_DEMAND_FULL)
+                        raise AdmissionRejected(RejectionReason.PENDING_DEMAND_FULL)
                 case unreachable:
                     assert_never(unreachable)
             bucket.enqueue(ticket)

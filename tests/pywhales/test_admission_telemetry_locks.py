@@ -1,6 +1,7 @@
 from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict
 from threading import Event
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from pywhales.admission import (
     ClassLimit,
     EndpointIdentity,
     PressureClass,
+    RejectionReason,
 )
 from pywhales.telemetry import AdmissionDecisionRecord, TelemetryRecord
 
@@ -127,3 +129,61 @@ def test_grant_callback_is_unlocked_and_failure_preserves_result_and_release() -
         1,
         0,
     )
+
+
+def test_pending_demand_decision_is_payload_free_unlocked_and_observer_isolated() -> (
+    None
+):
+    records: list[TelemetryRecord] = []
+    snapshots: list[tuple[int, int, int]] = []
+    pressure = PressureClass("private-pressure")
+
+    def observer(record: TelemetryRecord) -> None:
+        records.append(record)
+        if (
+            isinstance(record, AdmissionDecisionRecord)
+            and record.outcome == "pending_demand_full"
+        ):
+            snapshot = prober.submit(owner.snapshot).result(3).classes[0]
+            snapshots.append(
+                (snapshot.active, snapshot.pending, snapshot.demand.pending)
+            )
+            raise ValueError("private-observer-error")
+
+    owner = AdmissionOwner(
+        EndpointIdentity("private-endpoint"),
+        {pressure: ClassLimit(1, 1, pending_demand_capacity=0)},
+        telemetry_observer=observer,
+    )
+    with (
+        ThreadPoolExecutor(1) as prober,
+        owner.request(pressure, demand=123457).stream(lambda: nullcontext(iter(()))),
+    ):
+        request = owner.request(pressure, demand=345679)
+        with (
+            patch("pywhales.admission._telemetry.monotonic", side_effect=[10, 12]),
+            pytest.raises(AdmissionRejected) as raised,
+        ):
+            request.stream(lambda: pytest.fail("private-factory ran"))
+        assert raised.value.reason is RejectionReason.PENDING_DEMAND_FULL
+        assert not request.cancel()
+        with pytest.raises(RuntimeError):
+            request.call(lambda: pytest.fail("reused operation ran"))
+
+    assert snapshots == [(1, 0, 0)]
+    assert len(records) == 2
+    grant, refusal = records
+    assert isinstance(grant, AdmissionDecisionRecord)
+    assert isinstance(refusal, AdmissionDecisionRecord)
+    assert grant.admission_id != refusal.admission_id
+    assert asdict(refusal) == {
+        "admission_id": refusal.admission_id,
+        "outcome": "pending_demand_full",
+        "duration_seconds": 2,
+        "schema_version": 7,
+        "phase": "admission",
+    }
+    snapshot = owner.snapshot().classes[0]
+    assert snapshot.active == snapshot.pending == snapshot.demand.active == 0
+    assert snapshot.outcomes.rejected_pending_demand_full == 1
+    assert snapshot.outcomes.failed == 0

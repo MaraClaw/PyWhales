@@ -39,7 +39,9 @@ def _spawn[T](operation: Callable[[], T]) -> tuple[Thread, Queue[T | BaseExcepti
     "policy,pending,reason",
     [
         (SaturationPolicy.REJECT, 10, RejectionReason.BUSY),
+        (SaturationPolicy.REJECT, 0, RejectionReason.BUSY),
         (SaturationPolicy.WAIT, 0, RejectionReason.QUEUE_FULL),
+        (SaturationPolicy.WAIT, 10, RejectionReason.PENDING_DEMAND_FULL),
     ],
 )
 def test_busy_rejection_invokes_zero_work(
@@ -49,7 +51,7 @@ def test_busy_rejection_invokes_zero_work(
     records: list[TelemetryRecord] = []
     owner = AdmissionOwner(
         EndpointIdentity("local"),
-        {pressure: ClassLimit(1, pending, policy)},
+        {pressure: ClassLimit(1, pending, policy, pending_demand_capacity=0)},
         telemetry_observer=records.append,
     )
     active, release = Event(), Event()
@@ -72,6 +74,16 @@ def test_busy_rejection_invokes_zero_work(
             assert raised.value.reason is reason
             preflight.assert_not_called()
         assert owner.snapshot().classes[0].pending == 0
+        counts = owner.snapshot().classes[0].outcomes
+        assert (
+            counts.rejected_busy,
+            counts.rejected_full,
+            counts.rejected_pending_demand_full,
+        ) == (
+            int(reason is RejectionReason.BUSY),
+            int(reason is RejectionReason.QUEUE_FULL),
+            int(reason is RejectionReason.PENDING_DEMAND_FULL),
+        )
     finally:
         release.set()
         thread.join(3)

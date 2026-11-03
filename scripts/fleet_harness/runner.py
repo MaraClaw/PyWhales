@@ -132,7 +132,13 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
         (),
         0,
         (),
-        Schedule(peaks=Peaks(active=0, queued=0), receipts=())
+        Schedule(
+            version=2
+            if any(s.queue_retry_backoff_seconds is not None for s in plan.steps)
+            else 1,
+            peaks=Peaks(active=0, queued=0),
+            receipts=(),
+        )
         if plan.scheduled
         else None,
     )
@@ -156,7 +162,9 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
     keys = {"scenario", "endpoint", "action", "asset", "fault"}
     if plan.scheduled:
         keys.add("arrival_seconds")
-    keys.update({"queue_lease_seconds", "max_queue_attempts"})
+    keys.update(
+        {"queue_lease_seconds", "max_queue_attempts", "queue_retry_backoff_seconds"}
+    )
     operations = [step.model_dump(include=keys) for step in plan.steps]
     operation_digest = (
         "sha256:"

@@ -112,12 +112,18 @@ def _check_container_contract(client: DockerClient, policy: InspectionPolicy) ->
 
 def _check_node_contract(client: DockerClient, policy: InspectionPolicy) -> None:
     captured = capture_nodes(
-        client, ("node-a", "node-b"), manager_ids=("node-a",), policy=policy, timeout=1
+        client,
+        ("node-a", "node-b"),
+        manager_ids=("node-a",),
+        require_leader=True,
+        policy=policy,
+        timeout=1,
     )
     assert_type(captured, NodeTarget | Failure | Deadline | Cancelled)
     if isinstance(captured, NodeTarget):
         assert_type(captured.node_ids, tuple[str, ...])
         assert_type(captured.manager_ids, tuple[str, ...])
+        assert_type(captured.require_leader, bool)
         assert_type(
             wait(captured, policy=policy, timeout=1, poll_interval=0.1), Outcome
         )
@@ -125,3 +131,4 @@ def _check_node_contract(client: DockerClient, policy: InspectionPolicy) -> None
     assert_type(DeadlineDetail(1).unavailable_nodes, int)
     assert_type(DeadlineDetail(1).non_manager_nodes, int)
     assert_type(DeadlineDetail(1).unreachable_managers, int)
+    assert_type(DeadlineDetail(1).leader_mismatch_managers, int)

@@ -28,7 +28,7 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=6` for launch,
+The vocabulary is closed and currently at `schema_version=7` for launch,
 completion, refusal, and admission decision records. On execution records, `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
@@ -55,6 +55,10 @@ the original exception before any spawn. Its fields are fixed `family`, opaque
 launch/completion, duration, byte count or return code. Earlier argument
 validation and environment-resolution failures stay outside this contract;
 an observation rejected at scope entry also hasn't reached launch preflight.
+A depleted `max_total_launch_attempts` allowance produces a `"limit"` refusal
+with no launch/completion or upload input read; the refused reservation consumes
+no allowance. The records do not include the limit, demand, or rejection reason
+text beyond their closed outcome.
 A native argv failure after launch telemetry starts instead keeps its launch
 and `"limit"` completion.
 
@@ -169,6 +173,18 @@ separately from any local CLI deadline); `SaturationPolicy.REJECT` rejects
 immediately instead. A full WAIT pending queue rejects new requests; there's
 no overflow queue.
 
+`ClassLimit(..., pending_demand_capacity=20)` separately caps the sum of declared
+demand waiting in that queue, not active demand or pending request count. It
+accepts nonnegative integers excluding booleans; `None` is unbounded. An exact
+fit queues, and zero still allows immediate admission when the active slot and
+demand limits allow it. When queueing is needed, busy rejection and pending-count
+fullness take precedence over the distinct
+`AdmissionRejected.reason is RejectionReason.PENDING_DEMAND_FULL` (import both
+names from `pywhales.admission`; the enum value is `"pending_demand_full"`). A refused callable or stream
+factory never runs. Queue cancellation, timeout, closure and grants remove pending
+demand; active resizing does not consume this queue-only allowance. FIFO head
+blocking remains unchanged.
+
 `owner.request(...)` returns an inert, single-use handle. Calling `call()` or
 `stream()` on it attempts admission and only then runs the supplied callable.
 `request.cancel()` can stop a still-pending wait from another thread;
@@ -210,6 +226,8 @@ active/pending request counts, outcome counts, and request high-water marks;
 the separate `demand` snapshot tracks active/pending demand and independent
 demand high-water marks. These are local logical reservations, not daemon CPU,
 memory, subprocess counts, or a cross-process quota.
+The class outcome snapshot's `rejected_pending_demand_full` counts that rejection
+separately with the existing saturating-counter behavior.
 
 `owner.close()` permanently rejects new work and wakes pending callers, but
 doesn't cancel active calls or close their streams. After closing owned streams,
@@ -272,8 +290,9 @@ The owner's `telemetry_observer` is keyword-only and defaults to `None`, separat
 from the client's launch observer. Each activated request produces one immutable
 `AdmissionDecisionRecord` (`phase="admission"`): opaque `admission_id`, closed
 `outcome`, and nonnegative monotonic `duration_seconds` from activation to the
-decision, including lock/queue wait. Outcomes are `granted`, `busy`, `queue_full`,
-`closed`, `queue_timeout`, `cancelled`, and `failed` (including reentry failure).
+decision, including lock/queue wait. Schema-7 outcomes are `granted`, `busy`,
+`queue_full`, `pending_demand_full`, `closed`, `queue_timeout`, `cancelled`, and
+`failed` (including reentry failure).
 `granted` records admission, not successful execution of the callable. Cancelling
 an inert request before activation emits nothing. With no owner observer, no
 admission IDs, callbacks, or extra clock reads are added; snapshot counters keep
