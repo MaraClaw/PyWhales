@@ -120,6 +120,7 @@ def capture_compose(
     completion_services: tuple[str, ...] = (),
     max_restarts: int | None = None,
     fail_on_exit: bool = False,
+    fail_on_unhealthy: bool = False,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -153,6 +154,7 @@ def capture_compose(
             count on an enabled long-running container is ``malformed``.
         fail_on_exit: Fail on a non-restarting long-running container's exit,
             regardless of exit code, unless it exceeds its restart budget.
+        fail_on_unhealthy: Fail on an eligible running container reporting unhealthy.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -166,10 +168,12 @@ def capture_compose(
         ValueError: If the timeout is invalid, services isn't a nonempty tuple of
             distinct nonempty names, completion_services isn't a tuple of distinct
             selected names, max_restarts isn't ``None`` or a nonnegative integer,
-            fail_on_exit isn't a bool, or the client is in dry-run mode.
+            a failure policy isn't a bool, or the client is in dry-run mode.
     """
     _positive(timeout)
-    selection = Selection(services, completion_services, max_restarts, fail_on_exit)
+    selection = Selection(
+        services, completion_services, max_restarts, fail_on_exit, fail_on_unhealthy
+    )
     validate_selection(client.client_config, selection)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
     return capture_project(client.client_config, selection, scope)
@@ -182,6 +186,7 @@ def capture_containers(
     completion: tuple[str, ...] = (),
     max_restarts: int | None = None,
     fail_on_exit: bool = False,
+    fail_on_unhealthy: bool = False,
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -195,6 +200,7 @@ def capture_containers(
         max_restarts: Optional nonnegative restart budget for long-running members.
         fail_on_exit: Fail on a non-restarting long-running container's exit,
             regardless of exit code, unless it exceeds its restart budget.
+        fail_on_unhealthy: Fail on an eligible running container reporting unhealthy.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -206,7 +212,9 @@ def capture_containers(
         ValueError: If the timeout, selection, restart budget, flag, or client is invalid.
     """
     _positive(timeout)
-    selection = Selection(references, completion, max_restarts, fail_on_exit)
+    selection = Selection(
+        references, completion, max_restarts, fail_on_exit, fail_on_unhealthy
+    )
     validate_selection(client.client_config, selection)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
     return capture_selected(client.client_config, selection, scope)
@@ -277,6 +285,8 @@ def wait(
             every long-running container's ``RestartCount`` within that budget.
             With ``fail_on_exit``, an exited non-restarting long-running container
             within that budget fails as ``exited`` instead of blocking.
+            With ``fail_on_unhealthy``, a running, unpaused, non-restarting and
+            within-budget long-running container reporting unhealthy fails instead.
         policy: Required per-launch observation bounds.
         timeout: Positive finite total seconds from entry.
         poll_interval: Positive finite seconds between observations.

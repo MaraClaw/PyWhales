@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError, asdict, dataclass, field, fields, r
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import pytest
 
@@ -3137,6 +3137,243 @@ def test_target_exit_policy_defaults_false_and_rejects_invalid_values(
     invalid: Any = 1
     with pytest.raises(ValueError):
         replace(target, fail_on_exit=invalid)
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("confirming", [False, True])
+def test_fail_on_unhealthy_on_first_or_confirming_pass(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    confirming: bool,
+) -> None:
+    ready = container(A, health="healthy")
+    unhealthy = container(A, health="unhealthy")
+    stages = [ready, ready, unhealthy] if confirming else [ready, unhealthy]
+    if kind == "compose":
+        store_compose(tmp_path, *(snapshot(stage) for stage in stages))
+        target = capture_compose(
+            fake_cli, ("web",), fail_on_unhealthy=True, policy=policy, timeout=5
+        )
+    else:
+        store_standalone(tmp_path, {A: [[stage] for stage in stages]})
+        target = capture_containers(
+            fake_cli, (A,), fail_on_unhealthy=True, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_unhealthy is True
+    attribute = next(
+        field.name for field in fields(target) if field.name == "fail_on_unhealthy"
+    )
+    with pytest.raises(FrozenInstanceError):
+        setattr(target, attribute, False)
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="unhealthy")
+    assert isinstance(result, Failure) and result.cause is None
+    assert result.service_id is None and result.state is None
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("invalid", [0, 1, None, "true", [], 1.0])
+def test_fail_on_unhealthy_rejects_non_bool_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    invalid: object,
+) -> None:
+    value: Any = invalid
+    with pytest.raises(ValueError):
+        if kind == "compose":
+            capture_compose(
+                fake_cli, ("web",), fail_on_unhealthy=value, policy=policy, timeout=5
+            )
+        else:
+            capture_containers(
+                fake_cli, (A,), fail_on_unhealthy=value, policy=policy, timeout=5
+            )
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize(
+    "case,enabled,expected",
+    [
+        ("default", False, Deadline(DeadlineDetail(1, unhealthy_containers=1))),
+        ("starting", True, Deadline(DeadlineDetail(1, unhealthy_containers=1))),
+        (
+            "created",
+            True,
+            Deadline(
+                DeadlineDetail(1, non_running_containers=1, unhealthy_containers=1)
+            ),
+        ),
+        (
+            "paused",
+            True,
+            Deadline(DeadlineDetail(1, paused_containers=1, unhealthy_containers=1)),
+        ),
+        (
+            "restarting",
+            True,
+            Deadline(
+                DeadlineDetail(1, restarting_containers=1, unhealthy_containers=1)
+            ),
+        ),
+        (
+            "over_budget",
+            True,
+            Deadline(
+                DeadlineDetail(
+                    1, unhealthy_containers=1, restart_budget_exceeded_containers=1
+                )
+            ),
+        ),
+        ("missing_unconfigured", False, Success()),
+        ("missing_unconfigured", True, Success()),
+        (
+            "missing_configured",
+            True,
+            Deadline(DeadlineDetail(1, unhealthy_containers=1)),
+        ),
+        ("completion", True, Success()),
+    ],
+)
+def test_unhealthy_policy_eligibility_and_defaults(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    case: str,
+    enabled: bool,
+    expected: Outcome,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    member = container(
+        A,
+        status="created"
+        if case == "created"
+        else "exited"
+        if case == "completion"
+        else "running",
+        health=None
+        if case.startswith("missing_")
+        else "starting"
+        if case == "starting"
+        else "unhealthy",
+        restarting=case == "restarting",
+        paused=case == "paused",
+        restarts=2 if case == "over_budget" else 0,
+    )
+    if case == "missing_configured":
+        member["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+
+    class Options(TypedDict):
+        max_restarts: int
+        policy: InspectionPolicy
+        timeout: float
+        fail_on_unhealthy: NotRequired[bool]
+
+    options: Options = {"max_restarts": 1, "policy": policy, "timeout": 5}
+    if case != "default":
+        options["fail_on_unhealthy"] = enabled
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(member))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            completion_services=("web",) if case == "completion" else (),
+            **options,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[member]]})
+        target = capture_containers(
+            fake_cli, (A,), completion=(A,) if case == "completion" else (), **options
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_unhealthy is enabled
+    invalid: Any = 1
+    with pytest.raises(ValueError):
+        replace(target, fail_on_unhealthy=invalid)
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == expected
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize(
+    "case", ["blocker", "completion", "malformed", "exited", "superseded"]
+)
+def test_unhealthy_failure_precedence_across_members(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    case: str,
+) -> None:
+    first = container(A, health="unhealthy", restarts=0)
+    second = container(B, service="job", restarts=0)
+    ready_first, ready_second = (
+        container(A, restarts=0),
+        container(B, service="job", restarts=0),
+    )
+    if case == "completion":
+        second["State"]["Status"] = "exited"
+        second["State"]["ExitCode"] = 3
+    elif case == "malformed":
+        second["RestartCount"] = "bad"
+    elif case == "exited":
+        second["State"]["Status"] = "exited"
+    elif case == "superseded":
+        second["Id"] = C
+    else:
+        second["State"]["Status"] = "created"
+    if kind == "compose":
+        store_compose(
+            tmp_path, snapshot(ready_first, ready_second), snapshot(first, second)
+        )
+        target = capture_compose(
+            fake_cli,
+            ("web", "job"),
+            completion_services=("job",) if case == "completion" else (),
+            max_restarts=0,
+            fail_on_exit=True,
+            fail_on_unhealthy=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(
+            tmp_path, {A: [[ready_first], [first]], B: [[ready_second], [second]]}
+        )
+        target = capture_containers(
+            fake_cli,
+            (A, B),
+            completion=(B,) if case == "completion" else (),
+            max_restarts=0,
+            fail_on_exit=True,
+            fail_on_unhealthy=True,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    expected = {
+        "blocker": "unhealthy",
+        "completion": "completion_failed",
+        "malformed": "malformed",
+        "exited": "exited",
+        "superseded": "superseded",
+    }
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert isinstance(result, Failure)
+    assert result.reason == expected[case] and result.cause is None
 
 
 def node(identity: str, *, manager: bool = False) -> dict[str, Any]:

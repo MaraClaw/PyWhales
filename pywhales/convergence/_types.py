@@ -93,12 +93,14 @@ class ComposeTarget:
     ``max_restarts`` is a fixed restart budget for long-running containers, or
     ``None`` to leave Docker's ``RestartCount`` unchecked.
     ``fail_on_exit`` opts into failure for eligible long-running exits.
+    ``fail_on_unhealthy`` opts into failure for eligible unhealthy containers.
     """
 
     client_config: ClientConfig = field(repr=False, compare=False)
     services: tuple[ComposeService, ...]
     max_restarts: int | None = None
     fail_on_exit: bool = False
+    fail_on_unhealthy: bool = False
 
     def __post_init__(self) -> None:
         """Reject empty membership, duplicate names or IDs, or a bad restart budget."""
@@ -114,6 +116,8 @@ class ComposeTarget:
             raise ValueError("Restart budget must be None or a nonnegative integer")
         if type(self.fail_on_exit) is not bool:
             raise ValueError("fail_on_exit must be a bool")
+        if type(self.fail_on_unhealthy) is not bool:
+            raise ValueError("fail_on_unhealthy must be a bool")
         identities = [
             identity for service in services for identity in service.container_ids
         ]
@@ -125,13 +129,14 @@ class ComposeTarget:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContainerTarget:
-    """Fixed container IDs, completion designation, restart budget and exit policy."""
+    """Fixed container IDs, completion designation, restart budget and failure policies."""
 
     client_config: ClientConfig = field(repr=False, compare=False)
     container_ids: tuple[str, ...]
     completion: tuple[str, ...] = ()
     max_restarts: int | None = None
     fail_on_exit: bool = False
+    fail_on_unhealthy: bool = False
 
     def __post_init__(self) -> None:
         """Reject invalid membership, completion IDs, or restart budget."""
@@ -152,6 +157,8 @@ class ContainerTarget:
             raise ValueError("Restart budget must be None or a nonnegative integer")
         if type(self.fail_on_exit) is not bool:
             raise ValueError("fail_on_exit must be a bool")
+        if type(self.fail_on_unhealthy) is not bool:
+            raise ValueError("fail_on_unhealthy must be a bool")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -199,6 +206,7 @@ class Failure:
         "update_failed",
         "completion_failed",
         "exited",
+        "unhealthy",
         "observation",
     ]
     service_id: str | None = None
