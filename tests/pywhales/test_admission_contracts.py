@@ -184,15 +184,27 @@ def test_limit_rejects_invalid_pending_demand_capacity(capacity: int) -> None:
         ClassLimit(1, 1, pending_demand_capacity=capacity)
 
 
+@pytest.mark.parametrize("capacity", [-1, True, False, 1.5, "2"])
+def test_owner_rejects_invalid_pending_demand_capacity(capacity: int) -> None:
+    pressure = PressureClass("read")
+    with pytest.raises(ValueError):
+        AdmissionOwner(
+            EndpointIdentity("local"),
+            {pressure: ClassLimit(1, 1)},
+            owner_pending_demand_capacity=capacity,
+        )
+
+
 def test_outcome_snapshots_preserve_legacy_positional_meanings() -> None:
     legacy = OutcomeCounts(1, 2, 3, 4, 5, 6, 7, 8, True)
     assert legacy.rejected_closed == 8
     assert legacy.saturated is True
     assert legacy.rejected_pending_demand_full == 0
+    assert legacy.rejected_owner_pending_demand_full == 0
     bucket = Bucket(ClassLimit(1, 1))
-    bucket.counts[:] = range(1, 10)
+    bucket.counts[:] = range(1, 11)
     assert bucket.snapshot(PressureClass("read")).outcomes == OutcomeCounts(
-        1, 2, 3, 4, 5, 6, 7, 8, False, 9
+        1, 2, 3, 4, 5, 6, 7, 8, False, 9, 10
     )
 
 

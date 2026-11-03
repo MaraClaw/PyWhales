@@ -47,6 +47,7 @@ class AdmissionOwner:
         limits: Mapping[PressureClass, ClassLimit],
         *,
         telemetry_observer: TelemetryObserver | None = None,
+        owner_pending_demand_capacity: int | None = None,
     ) -> None:
         """Copy limits and optionally observe payload-free admission decisions.
 
@@ -58,14 +59,27 @@ class AdmissionOwner:
                 None adds no admission identifiers or telemetry clock reads.
                 Keep it nonblocking; do not synchronously reenter admitted work
                 or streams whose completion it can block.
+            owner_pending_demand_capacity: Optional nonnegative limit on the sum
+                of queued demand across classes. Immediate grants bypass it.
+
+        Raises:
+            ValueError: If limits is empty or the owner capacity is invalid.
         """
         if not limits:
             raise ValueError("limits must not be empty")
+        if owner_pending_demand_capacity is not None and (
+            type(owner_pending_demand_capacity) is not int
+            or owner_pending_demand_capacity < 0
+        ):
+            raise ValueError(
+                "owner_pending_demand_capacity must be a nonnegative integer"
+            )
         self._endpoint = endpoint
         self._buckets = {pressure: Bucket(limit) for pressure, limit in limits.items()}
         self._condition = Condition()
         self._closed = False
         self._telemetry_observer = telemetry_observer
+        self._owner_pending_demand_capacity = owner_pending_demand_capacity
 
     def close(self) -> None:
         """Permanently reject new admission and wake all pending callers.
@@ -210,6 +224,17 @@ class AdmissionOwner:
                         ticket.done = True
                         bucket.record(Outcome.REJECTED_PENDING_DEMAND_FULL)
                         raise AdmissionRejected(RejectionReason.PENDING_DEMAND_FULL)
+                    owner_capacity = self._owner_pending_demand_capacity
+                    if owner_capacity is not None and (
+                        sum(item.pending_demand for item in self._buckets.values())
+                        + ticket.demand
+                        > owner_capacity
+                    ):
+                        ticket.done = True
+                        bucket.record(Outcome.REJECTED_OWNER_PENDING_DEMAND_FULL)
+                        raise AdmissionRejected(
+                            RejectionReason.OWNER_PENDING_DEMAND_FULL
+                        )
                 case unreachable:
                     assert_never(unreachable)
             bucket.enqueue(ticket)

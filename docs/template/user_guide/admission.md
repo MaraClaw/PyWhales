@@ -73,6 +73,12 @@ The limit applies only when queueing: even demand greater than this limit can
 receive an immediate grant when active capacity is available and the queue is
 empty. Zero therefore permits immediate work but retains no waiting demand.
 
+`AdmissionOwner(..., owner_pending_demand_capacity=30)` optionally bounds the
+sum of queued demand across all classes of that owner. It accepts the same
+nonnegative exact integers or `None` (the unbounded default). Active demand is
+excluded, and immediate grants bypass this limit even when it is zero. Separate
+owners never share this budget, even if their endpoint identities match.
+
 ## Waiting, rejection, and cancellation
 
 When active capacity is unavailable, `SaturationPolicy.WAIT` waits in a bounded
@@ -84,12 +90,14 @@ consume the existing local launch timeout, which still starts at launch.
 
 After closure and same-owner reentry checks, admission tries an immediate grant.
 Otherwise `REJECT` reports `RejectionReason.BUSY`; `WAIT` checks pending request
-count first (`QUEUE_FULL`), then pending demand (`PENDING_DEMAND_FULL`, value
-`"pending_demand_full"`). Exact demand fits are accepted atomically; a refused
+count first (`QUEUE_FULL`), then class pending demand (`PENDING_DEMAND_FULL`),
+then the shared limit (`OWNER_PENDING_DEMAND_FULL`, value
+`"owner_pending_demand_full"`). Exact demand fits are accepted atomically; a refused
 request is never retained and never invokes its operation or stream factory.
 FIFO remains head-only: a large head blocks smaller followers, even if they fit
 the active demand budget. Cancellation, queue timeout and closure remove queued
-demand; active resizing does not change the queued total.
+demand, as do grants and exceptional waiter cleanup; active resizing does not
+change the queued total.
 
 `owner.request(...)` creates an inert, single-use handle. Calling `call()` or
 `stream()` on it attempts admission and runs the supplied callable only after a
@@ -177,6 +185,8 @@ refusals, separately from `rejected_full` (pending request count) and
 `rejected_busy` (the reject policy). Like the other outcome counters it saturates
 at the uint64 ceiling and marks `saturated`. This counter is appended with a
 zero default so existing positional `OutcomeCounts` arguments keep their meaning.
+`rejected_owner_pending_demand_full` separately counts shared-limit refusals,
+with the same saturation behavior and an appended zero-default positional field.
 
 Reentering the same owner from an admitted operation fails in the calling
 context. Avoid nested admission to that owner; treat the outer composite as one

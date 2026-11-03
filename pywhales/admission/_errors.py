@@ -14,6 +14,7 @@ class RejectionReason(Enum):
     QUEUE_FULL = "queue_full"
     CLOSED = "closed"
     PENDING_DEMAND_FULL = "pending_demand_full"
+    OWNER_PENDING_DEMAND_FULL = "owner_pending_demand_full"
 
 
 class AdmissionRejected(AdmissionError):
