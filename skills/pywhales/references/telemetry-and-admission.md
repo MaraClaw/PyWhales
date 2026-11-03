@@ -28,7 +28,7 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=7` for launch,
+The vocabulary is closed and currently at `schema_version=8` for launch,
 completion, refusal, and admission decision records. On execution records, `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
@@ -57,7 +57,9 @@ validation and environment-resolution failures stay outside this contract;
 an observation rejected at scope entry also hasn't reached launch preflight.
 A depleted `max_total_launch_attempts` allowance produces a `"limit"` refusal
 with no launch/completion or upload input read; the refused reservation consumes
-no allowance. The records do not include the limit, demand, or rejection reason
+no allowance. A saturated `max_concurrent_children` budget likewise refuses with
+`"limit"` before spawn, without consuming a launch attempt or child slot. The
+records do not include the limit, demand, or rejection reason
 text beyond their closed outcome.
 A native argv failure after launch telemetry starts instead keeps its launch
 and `"limit"` completion.
@@ -148,6 +150,7 @@ control = PressureClass("control")
 owner = AdmissionOwner(
     EndpointIdentity("primary"),
     {control: ClassLimit(active=2, pending=4, policy=SaturationPolicy.WAIT)},
+    owner_pending_demand_capacity=8,
 )
 
 containers = owner.request(control, queue_timeout=5.0).call(client.ps)
@@ -184,6 +187,19 @@ names from `pywhales.admission`; the enum value is `"pending_demand_full"`). A r
 factory never runs. Queue cancellation, timeout, closure and grants remove pending
 demand; active resizing does not consume this queue-only allowance. FIFO head
 blocking remains unchanged.
+
+`AdmissionOwner(..., owner_pending_demand_capacity=8)` optionally caps the sum of
+queued declared demand across all classes on that exact owner. It accepts only
+nonnegative exact integers (no booleans); `None` is unbounded. Exact fits queue;
+immediate grants bypass it, even at zero. It doesn't cap active demand, active
+slots, or resizing. Admission checks closure/reentry and the immediate-grant path
+first, then busy rejection, class pending-count fullness, class pending-demand
+fullness, and finally owner pending-demand fullness. The last rejects with
+`RejectionReason.OWNER_PENDING_DEMAND_FULL` (`"owner_pending_demand_full"`) without
+running the callable or stream factory. Grants, cancellation, timeouts, and
+closure return queued capacity. FIFO remains local to each class, with no
+cross-class FIFO or scheduler; equal endpoint aliases on different owners don't
+share this budget.
 
 `owner.request(...)` returns an inert, single-use handle. Calling `call()` or
 `stream()` on it attempts admission and only then runs the supplied callable.
@@ -227,7 +243,8 @@ the separate `demand` snapshot tracks active/pending demand and independent
 demand high-water marks. These are local logical reservations, not daemon CPU,
 memory, subprocess counts, or a cross-process quota.
 The class outcome snapshot's `rejected_pending_demand_full` counts that rejection
-separately with the existing saturating-counter behavior.
+separately with the existing saturating-counter behavior, as does
+`rejected_owner_pending_demand_full` on the class whose request was rejected.
 
 `owner.close()` permanently rejects new work and wakes pending callers, but
 doesn't cancel active calls or close their streams. After closing owned streams,
@@ -290,9 +307,9 @@ The owner's `telemetry_observer` is keyword-only and defaults to `None`, separat
 from the client's launch observer. Each activated request produces one immutable
 `AdmissionDecisionRecord` (`phase="admission"`): opaque `admission_id`, closed
 `outcome`, and nonnegative monotonic `duration_seconds` from activation to the
-decision, including lock/queue wait. Schema-7 outcomes are `granted`, `busy`,
-`queue_full`, `pending_demand_full`, `closed`, `queue_timeout`, `cancelled`, and
-`failed` (including reentry failure).
+decision, including lock/queue wait. Schema-8 outcomes are `granted`, `busy`,
+`queue_full`, `pending_demand_full`, `owner_pending_demand_full`, `closed`,
+`queue_timeout`, `cancelled`, and `failed` (including reentry failure).
 `granted` records admission, not successful execution of the callable. Cancelling
 an inert request before activation emits nothing. With no owner observer, no
 admission IDs, callbacks, or extra clock reads are added; snapshot counters keep
