@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.1.7
+
+### New Features
+
+- `InspectionPolicy.max_total_io_bytes` optionally shares one managed byte budget
+  across captured output, process streams, archive reads, and stdin uploads.
+  Nested scopes and copied contexts charge actual reads and accepted pipe writes
+  atomically, alongside existing response, stream, and stdin limits. Exact-budget
+  EOF succeeds; one output detection byte can exceed the budget before
+  `ObservationLimitError("total_io")` stops further participating I/O. Transfers
+  retain the account after scope exit. Cleanup drains, post-exit stderr accounting,
+  direct stream-stdin writes, and filename transfers remain outside this budget;
+  captured input still requires an explicit stdin budget.
+- `AdmissionOwner(owner_demand_capacity=...)` optionally bounds active declared
+  demand across all of its classes, separately from queued demand. Immediate and
+  queued grants and reservation growth share the allowance; exact fits succeed.
+  Growth cannot bypass pending requests in any class when this option is enabled.
+  Shrink and release wake waiters, and owned streams retain demand through source
+  cleanup and in-flight reads. Owner-only rejection uses `owner_demand_full` with
+  an appended saturating snapshot counter and admission telemetry outcome.
+- Completion and refusal telemetry records accept keyword-only `stop_reason`
+  values from a closed, payload-free vocabulary for command and scope deadlines,
+  cancellation, and recognized observation limits, including `total_io`.
+  `BoundedExporter.stop_reason_counts` returns detached immutable snapshots of all
+  fixed reason counts. Each offer counts once, including overflow, repeated
+  offers, and offers after shutdown; flush and sink failures never recount.
+- Scheduled offline fleet steps accept `queue_retry_exponential` with positive
+  finite `initial_seconds` and `max_seconds`, mutually exclusive with fixed
+  backoff. Capped doubling avoids overflow and preserves subnormal delays,
+  original deadlines, FIFO tail reentry, and attempt limits. Backoff occupies no
+  queue or active capacity; launched work never retries. Plans containing the
+  policy emit schedule version 3, including mixed and rejected plans, while
+  legacy versions 1 and 2 and omitted-policy operation digests remain compatible.
+
+### Behavior Changes And Fixes
+
+- All telemetry record kinds now emit schema version 10. Existing positional
+  fields and outcome meanings remain intact; ordinary success, failure, and
+  explicit close have no stop reason. Selected stream stop reasons survive error
+  delivery and later close. Unknown limit strings map to `other_limit` without
+  retaining arbitrary text.
+- Fleet report imports independently validate exponential retry histories and
+  policy-bound digests. Binding version remains 1; reports stay fake-only,
+  unqualified, and non-authorizing, with zero connections and unchanged `no_go`
+  decisions.
+
+### Documentation
+
+- Updated relevant agent guides and the consumer skill for shared managed I/O,
+  owner active demand, schema 10 stop attribution and exporter accounting, and
+  the offline fleet retry contracts.
+
 ## 1.1.6
 
 ### New Features
