@@ -11,7 +11,13 @@ from scripts.fleet_harness.export import ExportRefused, export_result
 from scripts.fleet_harness.models import RunnableManifest
 from scripts.fleet_harness.records import RunReport
 from scripts.fleet_harness.runner import run
-from tests.pywhales.test_fleet_harness import manifest, plan
+from tests.pywhales.test_fleet_harness import (
+    at,
+    manifest,
+    overlap_manifest,
+    overlap_plan,
+    plan,
+)
 from tests.pywhales.test_transport_experiment import semantics
 
 
@@ -202,3 +208,74 @@ def test_baseline_must_match_cli_workload_and_environment(mismatch: str) -> None
         assert decision.comparison_status == "rejected"
         assert f"baseline.{mismatch}_digest" in decision.mismatches
     assert decision.decision == "no_go" and decision.selected_route == "cli"
+
+
+EXPONENTIAL = {
+    "queue_lease_seconds": 1.0,
+    "max_queue_attempts": 3,
+    "queue_retry_exponential": {"initial_seconds": 0.5, "max_seconds": 1.0},
+}
+
+
+def test_exponential_policy_keeps_binding_version_and_declaration_digests() -> None:
+    declaration = overlap_manifest(1, "operation_count", 2)
+    reports = [
+        run(declaration, overlap_plan(at(0.0, 1.5), at(0.0) | policy))
+        for policy in ({}, EXPONENTIAL)
+    ]
+    rejected = run(
+        declaration,
+        overlap_plan(at(0.0, 1.5), at(0.0) | EXPONENTIAL).model_copy(
+            update={"opt_in": False}
+        ),
+    )
+    for report in (*reports, rejected):
+        assert report.binding is not None and report.binding.version == 1
+        assert report.binding == reports[0].binding
+        assert RunReport.model_validate_json(report.model_dump_json()) == report
+    assert len({report.operation_digest for report in (*reports, rejected)}) == 2
+    assert reports[-1].schedule is not None
+    assert reports[-1].schedule.model_dump()["version"] == 3
+    assert export_result(reports[-1], declaration).provenance == "synthetic"
+
+
+def test_exponential_report_cannot_export_under_changed_declaration() -> None:
+    declaration = overlap_manifest(1, "operation_count", 2)
+    report = run(declaration, overlap_plan(at(0.0, 1.5), at(0.0) | EXPONENTIAL))
+    raw = json.loads(declaration.model_dump_json())
+    raw["authorization"]["record_id"] = "other-record"
+    with pytest.raises(ExportRefused):
+        export_result(report, RunnableManifest.model_validate_json(json.dumps(raw)))
+
+
+def test_comparison_rejects_exponential_candidate_with_changed_policy() -> None:
+    declaration = overlap_manifest(1, "operation_count", 2)
+    reports = [
+        run(
+            declaration,
+            overlap_plan(
+                at(0.0, 1.5),
+                at(0.0)
+                | EXPONENTIAL
+                | {
+                    "queue_retry_exponential": {
+                        "initial_seconds": 0.5,
+                        "max_seconds": cap,
+                    }
+                },
+            ),
+        )
+        for cap in (1.0, 2.0)
+    ]
+    decision = decide(
+        Experiment(
+            comparison=Comparison(
+                cli=reports[0],
+                candidate=reports[1],
+                cli_contract=semantics(),
+                candidate_contract=semantics(),
+            )
+        )
+    )
+    assert "scope.operation_digest" in decision.mismatches
+    assert decision.decision == "no_go" and decision.candidate_launches == 0

@@ -335,9 +335,9 @@ def test_unlaunched_submission_when_exported_is_counted_once(
     } & set(report.flags)
 
 
-@pytest.mark.parametrize("backoff", [None, 1.0])
+@pytest.mark.parametrize("backoff", [None, 1.0, "exponential"])
 def test_retry_export_counts_logical_submissions_and_queue_samples_once(
-    backoff: float | None,
+    backoff: float | str | None,
 ) -> None:
     declaration = overlap_manifest(1, "operation_count", 2)
     simulation = run(
@@ -348,7 +348,12 @@ def test_retry_export_counts_logical_submissions_and_queue_samples_once(
                 0.0,
                 queue_lease_seconds=1.0,
                 max_queue_attempts=2,
-                queue_retry_backoff_seconds=backoff,
+                queue_retry_backoff_seconds=backoff
+                if isinstance(backoff, float)
+                else None,
+                queue_retry_exponential={"initial_seconds": 1.0, "max_seconds": 2.0}
+                if backoff == "exponential"
+                else None,
             ),
         ),
     )

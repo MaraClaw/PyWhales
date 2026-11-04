@@ -531,10 +531,10 @@ def test_decision_cli_when_scheduled_candidate_is_tampered_rejects_without_launc
     }
 
 
-@pytest.mark.parametrize("backoff", [None, 1.0])
+@pytest.mark.parametrize("backoff", [None, 1.0, "exponential"])
 @pytest.mark.parametrize("command", ["export", "decide"])
 def test_lease_retry_cli_runs_and_rejects_tampered_lineage(
-    tmp_path: Path, backoff: float | None, command: str
+    tmp_path: Path, backoff: float | str | None, command: str
 ) -> None:
     declaration = tmp_path / "manifest.json"
     declaration.write_text(overlap_manifest(1, "operation_count", 2).model_dump_json())
@@ -546,7 +546,12 @@ def test_lease_retry_cli_runs_and_rejects_tampered_lineage(
                 0.0,
                 queue_lease_seconds=1.0,
                 max_queue_attempts=2,
-                queue_retry_backoff_seconds=backoff,
+                queue_retry_backoff_seconds=backoff
+                if isinstance(backoff, float)
+                else None,
+                queue_retry_exponential={"initial_seconds": 1.0, "max_seconds": 2.0}
+                if backoff == "exponential"
+                else None,
             ),
         ).model_dump_json()
     )
@@ -557,6 +562,15 @@ def test_lease_retry_cli_runs_and_rejects_tampered_lineage(
     report = json.loads(result.stdout)
     assert report["submitted"] == 2 and report["command_count"] == 2
     assert report["connections"] == 0 and report["qualification"] == "unqualified"
+    if backoff == "exponential":
+        assert report["schedule"]["version"] == 3
+        valid = tmp_path / "valid-report.json"
+        valid.write_text(result.stdout)
+        exported = invoke(
+            ["export", "--manifest", str(declaration), "--input", str(valid)], tmp_path
+        )
+        assert exported.returncode == 0
+        assert json.loads(exported.stdout)["provenance"] == "synthetic"
     assert len(report["schedule"]["receipts"][1]["attempts"]) == 2
     imported = RunReport.model_validate_json(result.stdout)
     report["schedule"]["receipts"][1]["attempts"][1]["enqueued_seconds"] = 0.9

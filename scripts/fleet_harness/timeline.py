@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from scripts.fleet_contract.workload import Action
 
-from .models import Step
+from .models import Step, schedule_version
 
 if TYPE_CHECKING:
     from .records import Observation, Receipt, RunReport
@@ -212,14 +212,7 @@ def bound(report: RunReport) -> bool:
         and len(present) == len(offsets)
         and present == sorted(present)
         and report.repetitions == 1
-        and schedule.version
-        == (
-            2
-            if any(
-                step.queue_retry_backoff_seconds is not None for step in report.steps
-            )
-            else 1
-        )
+        and schedule.version == schedule_version(report.steps)
         and len(schedule.receipts) == report.submitted <= len(offsets)
         and all(
             receipt.arrival_seconds == step.arrival_seconds
@@ -292,14 +285,13 @@ def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
     """Bind alternating queue/backoff spans to leases, fixed delays and deadlines."""
     lease = step.queue_lease_seconds
     spans = receipt.attempts
-    delay = step.queue_retry_backoff_seconds
     backoffs = receipt.backoffs
     if receipt.admitted_seconds is None and receipt.outcome not in {
         "timed_out",
         "cancelled",
     }:
         return False
-    if (delay is None) != (backoffs is None):
+    if step.delayed != (backoffs is not None):
         return False
     if lease is None:
         return spans is None and (
@@ -311,9 +303,9 @@ def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
     if spans is None or not spans or len(spans) > (step.max_queue_attempts or 1):
         return False
     pending = backoffs is not None and len(backoffs) == len(spans)
-    if backoffs is not None and delay is not None:
+    if backoffs is not None:
         for index, span in enumerate(backoffs):
-            eligibility = span.started_seconds + delay
+            eligibility = span.started_seconds + step.retry_delay(index + 1)
             if (
                 span.started_seconds >= deadline
                 or index + 1 >= (step.max_queue_attempts or 1)

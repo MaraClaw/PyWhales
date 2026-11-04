@@ -1,5 +1,6 @@
 """Strict simulation inputs and resolved contributor declarations."""
 
+from collections.abc import Sequence
 from typing import Final, Literal, Self, assert_never
 
 from pydantic import Field, model_validator
@@ -46,6 +47,33 @@ class RunnableManifest(Contract):
         return self
 
 
+class QueueRetryExponential(Contract):
+    """Capped doubling delay after each expired queue attempt, in fake-clock seconds."""
+
+    initial_seconds: Positive
+    max_seconds: Positive
+
+    @model_validator(mode="after")
+    def capped(self) -> Self:
+        """Require a cap that admits the first delay."""
+        if self.max_seconds < self.initial_seconds:
+            raise PydanticCustomError("exponential_cap", "exponential_cap")
+        return self
+
+    def delay(self, attempt: int) -> float:
+        """Return `min(max, initial * 2**(attempt - 1))` by capped doubling.
+
+        The cap is reached within a few thousand doublings of any finite float,
+        so a large `attempt` neither loops long nor overflows.
+        """
+        delay = self.initial_seconds
+        for _ in range(attempt - 1):
+            if delay >= self.max_seconds - delay:
+                return self.max_seconds
+            delay *= 2
+        return delay
+
+
 class Step(Contract):
     """One scripted fake operation; timings are seconds on the fake clock.
 
@@ -68,6 +96,9 @@ class Step(Contract):
         default=None, exclude_if=lambda v: v is None
     )
     queue_retry_backoff_seconds: Positive | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    queue_retry_exponential: QueueRetryExponential | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
     queue_seconds: Amount = 0.0
@@ -93,18 +124,39 @@ class Step(Contract):
         if self.arrival_seconds is None and (
             self.queue_lease_seconds is not None
             or self.max_queue_attempts is not None
-            or self.queue_retry_backoff_seconds is not None
+            or self.delayed
         ):
             raise PydanticCustomError("lease_unscheduled", "lease_unscheduled")
         if (self.max_queue_attempts or 1) > 1 and self.queue_lease_seconds is None:
             raise PydanticCustomError("lease_required", "lease_required")
-        if self.queue_retry_backoff_seconds is not None and (
+        if (
+            self.queue_retry_backoff_seconds is not None
+            and self.queue_retry_exponential is not None
+        ):
+            raise PydanticCustomError(
+                "retry_policy_exclusive", "retry_policy_exclusive"
+            )
+        if self.delayed and (
             self.queue_lease_seconds is None or (self.max_queue_attempts or 1) < 2
         ):
             raise PydanticCustomError(
                 "backoff_requires_retry", "backoff_requires_retry"
             )
         return self
+
+    @property
+    def delayed(self) -> bool:
+        """Report whether an expired queue attempt waits before its next attempt."""
+        return (
+            self.queue_retry_backoff_seconds is not None
+            or self.queue_retry_exponential is not None
+        )
+
+    def retry_delay(self, attempt: int) -> float:
+        """Return the wait after queued attempt number `attempt` expires; zero if immediate."""
+        if self.queue_retry_exponential is not None:
+            return self.queue_retry_exponential.delay(attempt)
+        return self.queue_retry_backoff_seconds or 0.0
 
 
 type MetricName = Literal[
@@ -192,6 +244,15 @@ class Plan(Contract):
     def scheduled(self) -> bool:
         """Report whether the plan overlaps submissions (all steps, or none, have offsets)."""
         return bool(self.offsets)
+
+
+def schedule_version(steps: Sequence[Step]) -> Literal[1, 2, 3]:
+    """Return the local schedule version a plan's retry policies require."""
+    if any(step.queue_retry_exponential is not None for step in steps):
+        return 3
+    if any(step.queue_retry_backoff_seconds is not None for step in steps):
+        return 2
+    return 1
 
 
 def load_deadline(manifest: RunnableManifest) -> float:

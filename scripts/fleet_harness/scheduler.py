@@ -36,6 +36,7 @@ from .models import (
     load_deadline,
     metrics_for,
     resource_reasons,
+    schedule_version,
 )
 from .records import (
     Load,
@@ -149,10 +150,7 @@ class Simulation:
             submission.attempts.append(
                 QueueAttempt(enqueued_seconds=submission.enqueued, ended_seconds=now)
             )
-        if (
-            submission.pending_retry
-            and submission.step.queue_retry_backoff_seconds is not None
-        ):
+        if submission.pending_retry and submission.step.delayed:
             submission.backoffs.append(
                 QueueBackoff(
                     started_seconds=submission.attempts[-1].ended_seconds,
@@ -177,9 +175,7 @@ class Simulation:
             attempts=tuple(submission.attempts)
             if submission.step.queue_lease_seconds is not None
             else None,
-            backoffs=tuple(submission.backoffs)
-            if submission.step.queue_retry_backoff_seconds is not None
-            else None,
+            backoffs=tuple(submission.backoffs) if submission.step.delayed else None,
         )
         self.record(receipt, self.driver.lapse(submission.step, launch, outcome))
 
@@ -244,8 +240,8 @@ class Simulation:
             )
             submission.queued = False
             submission.pending_retry = True
-            eligibility = self.driver.now + (
-                submission.step.queue_retry_backoff_seconds or 0.0
+            eligibility = self.driver.now + submission.step.retry_delay(
+                len(submission.attempts)
             )
             self.push(
                 min(submission.deadline, eligibility),
@@ -258,7 +254,7 @@ class Simulation:
 
     def retry(self, submission: Submission) -> None:
         """End pending backoff at eligibility before the original deadline."""
-        if submission.step.queue_retry_backoff_seconds is not None:
+        if submission.step.delayed:
             submission.backoffs.append(
                 QueueBackoff(
                     started_seconds=submission.attempts[-1].ended_seconds,
@@ -326,7 +322,7 @@ class Simulation:
             if operation.step.queue_lease_seconds is not None
             else None,
             backoffs=tuple(self.submissions[number - 1].backoffs)
-            if operation.step.queue_retry_backoff_seconds is not None
+            if operation.step.delayed
             else None,
         )
         self.record(receipt, observed)
@@ -387,11 +383,7 @@ class Simulation:
             submitted=submitted,
             reasons=tuple(self.reasons),
             schedule=Schedule(
-                version=2
-                if any(
-                    s.queue_retry_backoff_seconds is not None for s in self.plan.steps
-                )
-                else 1,
+                version=schedule_version(self.plan.steps),
                 peaks=Peaks(
                     active=self.peak_active,
                     queued=self.peak_queued,
