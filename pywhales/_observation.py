@@ -50,6 +50,18 @@ class _StdinAccount(_ResponseAccount):
 
 
 @dataclass(slots=True)
+class _IoAccount(_ResponseAccount):
+    """Track every managed byte read from or written to a child during one scope.
+
+    Shared by captured output, stream and archive caller reads, and managed stdin
+    writes, on top of their own accounts. ``read_io`` and ``write_stdin`` judge
+    and charge it under ``lock`` in one step with the pipe operation, so only an
+    output read can leave ``consumed`` one byte past ``limit``; after that
+    nothing spends it.
+    """
+
+
+@dataclass(slots=True)
 class _LaunchAccount:
     """Accumulate accepted launch reservations shared by copied contexts."""
 
@@ -112,6 +124,7 @@ class ObservationState:
     response_accounts: tuple[_ResponseAccount, ...]
     stream_accounts: tuple[_StreamAccount, ...] = ()
     stdin_accounts: tuple[_StdinAccount, ...] = ()
+    io_accounts: tuple[_IoAccount, ...] = ()
     launch_accounts: tuple[_LaunchAccount, ...] = ()
     child_accounts: tuple[_LaunchAccount, ...] = ()
 
@@ -172,15 +185,16 @@ class ObservationState:
         """Whether a stream or archive launched here keeps enforcing this state.
 
         A launch retains the snapshot only when it has something to enforce after
-        the scope's ``with`` block exits: a deadline, a cancel token, or a stream
-        or stdin budget, or owned-child capacity. Only a deadline or a token ever
-        needs a timed wait.
+        the scope's ``with`` block exits: a deadline, a cancel token, or a stream,
+        stdin or aggregate I/O budget, or owned-child capacity. Only a deadline or
+        a token ever needs a timed wait.
         """
         return (
             self.deadline is not None
             or bool(self.cancel_tokens)
             or bool(self.stream_accounts)
             or bool(self.stdin_accounts)
+            or bool(self.io_accounts)
             or bool(self.child_accounts)
         )
 
@@ -240,13 +254,68 @@ class ObservationState:
         """
         _charge(self.stream_accounts, size, "total_stream")
 
-    def write_stdin(self, size: int, write: Callable[[int], int]) -> int:
-        """Run one pipe write bounded by, and charged to, every stdin account.
+    def read_io(
+        self, request: int, read: Callable[[int], bytes]
+    ) -> tuple[bytes, ObservationLimitError | None]:
+        """Run one output read allowed by, and charged to, every aggregate account.
 
-        Every enclosing account stays locked, outermost first, while ``write``
-        runs, so writers sharing an account never pass its limit and none holds
-        back capacity another could still use. ``write`` must not block: pass a
-        nonblocking pipe write and wait for readiness outside this call.
+        Every enclosing aggregate account stays locked, outermost first, while
+        ``read`` runs, so readers and writers sharing an account never spend it
+        between its allowance and the charge. ``read`` must not block: pass a
+        nonblocking pipe read and wait for readiness outside this call. The read
+        is cut so that an account passes its limit by one detection byte at most.
+
+        Args:
+            request: Positive bytes the caller would otherwise read.
+            read: Perform one read of at most the given bytes and return them;
+                empty at end of file. An exception it raises charges nothing.
+
+        Returns:
+            The bytes read, charged to every enclosing account, and the
+            ``total_io`` error for the first account the read pushed past its
+            limit, else ``None``. The caller applies its own source limits first,
+            so one of those wins a same-read tie.
+
+        Raises:
+            ObservationLimitError: With reason ``total_io`` when an enclosing
+                account was already overflowed. Nothing is read or charged.
+        """
+        accounts = self.io_accounts
+        if not accounts:
+            return read(request), None
+        with ExitStack() as locked:
+            for account in accounts:
+                locked.enter_context(account.lock)
+            for account in accounts:
+                if account.consumed > account.limit:
+                    raise ObservationLimitError(
+                        "total_io", account.limit, account.consumed
+                    )
+            chunk = read(
+                min(
+                    (
+                        request,
+                        *(account.limit - account.consumed + 1 for account in accounts),
+                    )
+                )
+            )
+            overflow: ObservationLimitError | None = None
+            for account in accounts:
+                account.consumed += len(chunk)
+                if overflow is None and account.consumed > account.limit:
+                    overflow = ObservationLimitError(
+                        "total_io", account.limit, account.consumed
+                    )
+        return chunk, overflow
+
+    def write_stdin(self, size: int, write: Callable[[int], int]) -> int:
+        """Run one pipe write bounded by, and charged to, every stdin and I/O account.
+
+        Every enclosing account stays locked, outermost first, stdin before
+        aggregate, while ``write`` runs, so writers sharing an account never pass
+        its limit and none holds back capacity another could still use. ``write``
+        must not block: pass a nonblocking pipe write and wait for readiness
+        outside this call.
 
         Args:
             size: Positive bytes the caller still wants to send.
@@ -258,17 +327,22 @@ class ObservationState:
             than ``size`` when cut to the tightest remaining allowance.
 
         Raises:
-            ObservationLimitError: With reason ``total_stdin`` when an enclosing
-                account has no allowance left. Nothing is written or charged.
+            ObservationLimitError: With reason ``total_stdin``, or ``total_io``
+                when only an aggregate account is spent, when an enclosing account
+                has no allowance left. Nothing is written or charged.
         """
-        accounts = self.stdin_accounts
+        accounts = (*self.stdin_accounts, *self.io_accounts)
         with ExitStack() as locked:
             for account in accounts:
                 locked.enter_context(account.lock)
             for account in accounts:
                 if account.consumed >= account.limit:
                     raise ObservationLimitError(
-                        "total_stdin", account.limit, account.limit + 1
+                        "total_io"
+                        if isinstance(account, _IoAccount)
+                        else "total_stdin",
+                        account.limit,
+                        max(account.limit + 1, account.consumed),
                     )
             written = write(
                 min((size, *(account.limit - account.consumed for account in accounts)))
@@ -332,6 +406,7 @@ def observation(
     response_limit = policy.max_total_response_bytes
     stream_limit = policy.max_total_stream_bytes
     stdin_limit = policy.max_total_stdin_bytes
+    io_limit = policy.max_total_io_bytes
     launch_limit = policy.max_total_launch_attempts
     child_limit = policy.max_concurrent_children
     if parent is not None:
@@ -353,6 +428,9 @@ def observation(
             max_total_stdin_bytes=_minimum_optional(
                 parent.policy.max_total_stdin_bytes, policy.max_total_stdin_bytes
             ),
+            max_total_io_bytes=_minimum_optional(
+                parent.policy.max_total_io_bytes, policy.max_total_io_bytes
+            ),
             max_total_launch_attempts=_minimum_optional(
                 parent.policy.max_total_launch_attempts,
                 policy.max_total_launch_attempts,
@@ -370,6 +448,7 @@ def observation(
     accounts = parent.response_accounts if parent is not None else ()
     stream_accounts = parent.stream_accounts if parent is not None else ()
     stdin_accounts = parent.stdin_accounts if parent is not None else ()
+    io_accounts = parent.io_accounts if parent is not None else ()
     launch_accounts = parent.launch_accounts if parent is not None else ()
     child_accounts = parent.child_accounts if parent is not None else ()
     state = ObservationState(
@@ -390,6 +469,11 @@ def observation(
             (*stdin_accounts, _StdinAccount(stdin_limit))
             if stdin_limit is not None
             else stdin_accounts
+        ),
+        io_accounts=(
+            (*io_accounts, _IoAccount(io_limit))
+            if io_limit is not None
+            else io_accounts
         ),
         launch_accounts=(
             (*launch_accounts, _LaunchAccount(launch_limit))

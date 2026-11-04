@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterator
 from contextlib import suppress
+from functools import partial
 from subprocess import Popen
 from threading import Event, Thread
 from time import monotonic
@@ -62,7 +63,11 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     a deadline or token. Each pipe read charges its stdout or stderr bytes to
     every enclosing account; the first read past a limit stops the stream like a
     scope stop, killing and reaping the local CLI, and iteration raises
-    ``ObservationLimitError`` (reason ``total_stream``) once.
+    ``ObservationLimitError`` (reason ``total_stream``) once. The scope's
+    aggregate I/O accounts are charged by the same reads, so a retained scope
+    with only that budget still stops the stream with reason ``total_io``; a
+    stream budget wins a same-read tie, and a read never starts on an account
+    another operation already overflowed.
 
     Attributes:
         stdin: Writable child input pipe when launch requested one; otherwise
@@ -250,11 +255,15 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                         with self._queue.condition:
                             if self._stop.is_set():
                                 return
-                            chunk = os.read(pipe.fileno(), self._read_size())
+                            try:
+                                chunk, overflow = self._read(pipe)
+                            except ObservationLimitError as error:
+                                self._charge_stream(0, error)
+                                return
                             if self._telemetry is not None:
                                 self._read_bytes[name] += len(chunk)
                             offset = 0
-                            if self._charge_stream(len(chunk)):
+                            if self._charge_stream(len(chunk), overflow):
                                 return
                     except BlockingIOError:
                         wait_ready(pipe.fileno(), latch=self._stop)
@@ -302,35 +311,58 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 self._live_readers -= 1
             self._queue.finish()
 
-    def _read_size(self) -> int:
-        """Return the next pipe read size, cut so a stream budget flags its overflow."""
-        scope = self._observation
-        return 65536 if scope is None else scope.stream_allowance(65536)
+    def _read(self, pipe: IO[bytes]) -> tuple[bytes, ObservationLimitError | None]:
+        """Read one chunk of a nonblocking pipe; the queue lock must be held.
 
-    def _charge_stream(self, size: int) -> bool:
+        The read is cut so a stream budget flags its overflow at the first excess
+        byte, and the scope's aggregate accounts allow and charge it in one step.
+
+        Returns:
+            The raw bytes, empty at end of file, and the ``total_io`` error this
+            read caused, if any.
+
+        Raises:
+            ObservationLimitError: An aggregate account was already overflowed;
+                nothing was read.
+        """
+        scope = self._observation
+        if scope is None:
+            return os.read(pipe.fileno(), 65536), None
+        return scope.read_io(
+            scope.stream_allowance(65536), partial(os.read, pipe.fileno())
+        )
+
+    def _charge_stream(
+        self, size: int, overflow: ObservationLimitError | None = None
+    ) -> bool:
         """Charge bytes just read from a pipe; the queue lock must be held.
 
         An overflow is recorded as the scope error and stops the stream like any
         scope stop, so the watchdog kills and reaps the child and delivery raises
-        it once. Nothing is raised on the reader thread.
+        it once. Nothing is raised on the reader thread. A stream budget overflow
+        wins over the same read's aggregate one.
 
         Args:
             size: Raw bytes the pipe read returned; zero at end of file.
+            overflow: The aggregate error that read caused, if any.
 
         Returns:
             Whether the charge overflowed and stopped the stream.
         """
         scope = self._observation
-        if scope is None or not size:
+        if scope is None:
             return False
-        try:
-            scope.charge_stream(size)
-        except ObservationLimitError as error:
-            self._scope_error = error.with_traceback(None)
-            self._stop.set()
-            self._queue.close()
-            return True
-        return False
+        if size:
+            try:
+                scope.charge_stream(size)
+            except ObservationLimitError as error:
+                overflow = error
+        if overflow is None:
+            return False
+        self._scope_error = overflow.with_traceback(None)
+        self._stop.set()
+        self._queue.close()
+        return True
 
     def _publish(self, name: str, record: bytes) -> bool:
         """Publish a record while tracking bytes waiting for queue capacity.

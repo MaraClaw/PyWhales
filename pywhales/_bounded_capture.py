@@ -3,6 +3,7 @@
 import os
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from time import monotonic
 
 from pywhales._capture_pipes import CapturePipes
@@ -62,7 +63,10 @@ def bounded_capture(
     Output is drained while ``input`` is uploaded by a writer thread, so a child
     that fills stdout or stderr before reading stdin cannot deadlock the call.
     Uploaded bytes are charged to the scope's stdin accounts; the caller supplies
-    ``input`` only under such a budget.
+    ``input`` only under such a budget. Each output read and upload write is also
+    allowed by and charged to the scope's aggregate I/O accounts in one locked
+    step, so concurrent launches never overspend them; a source limit wins a tie
+    with ``total_io`` on the same read.
 
     Args:
         args: Complete stringified command.
@@ -82,7 +86,8 @@ def bounded_capture(
 
     Raises:
         ObservationLimitError: Output, argv, or environment exceeded a limit, or
-            the input exceeded a stdin budget (reason ``total_stdin``).
+            the input exceeded a stdin budget (reason ``total_stdin``) or the
+            aggregate I/O budget (reason ``total_io``).
         DockerTimeout: The selected timeout expired first.
         ObservationTimeout: The scope deadline expired.
         ObservationCancelled: A cancellation token was set.
@@ -153,7 +158,9 @@ def bounded_capture(
                         - len(stderr)
                     )
                     allowance = observation.response_allowance(remaining)
-                    chunk = os.read(fd, min(available, allowance + 1, 65536))
+                    chunk, overflow = observation.read_io(
+                        min(available, allowance + 1, 65536), partial(os.read, fd)
+                    )
                     read_bytes[fd] += len(chunk)
                     if chunk:
                         observation.charge_response(len(chunk))
@@ -165,6 +172,8 @@ def bounded_capture(
                             observation.policy.max_response_bytes,
                             observation.policy.max_response_bytes + 1,
                         )
+                    elif overflow is not None:
+                        raise overflow
                     else:
                         buffers[fd].extend(chunk)
         check_observation(observation)

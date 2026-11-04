@@ -692,6 +692,23 @@ def test_invalid_selected_default_is_not_an_observation_environment_error() -> N
         pywhales.utils.run([*config.docker_cmd, "-c", "pass"])
 
 
+def test_captured_input_needs_a_stdin_budget_even_under_an_aggregate_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def launch(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        raise AssertionError("a process was launched")
+
+    monkeypatch.setattr("pywhales._bounded_capture.subprocess.Popen", launch)
+    policy = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_io_bytes=1024,
+    )
+    with observation(policy), pytest.raises(ValueError):
+        pywhales.utils.run([sys.executable, "-c", "pass"], input=b"x")
+
+
 def test_process_stream_times_out_without_consumption() -> None:
     stream = stream_stdout_and_stderr(
         [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1

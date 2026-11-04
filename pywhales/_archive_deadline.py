@@ -3,6 +3,7 @@
 import os
 from collections.abc import Buffer, Iterator
 from contextlib import suppress
+from functools import partial
 from io import BufferedReader, RawIOBase
 from subprocess import Popen
 from threading import Event, Lock, Thread
@@ -65,6 +66,16 @@ class ArchiveDeadline:
     stops the transfer like a stream overflow: ``check()`` raises reason
     ``total_stdin`` once the child is reaped. An upload ending exactly at the
     limit succeeds, and the transfer keeps charging after its scope exits.
+
+    The snapshot's aggregate I/O accounts cover the same two caller-thread paths:
+    ``read()`` and ``write()`` are each allowed by and charged to them in one
+    locked step, so concurrent launches in copied contexts never overspend them.
+    A read may take one detection byte past a limit and stops the transfer with
+    reason ``total_io``; a stream overflow wins a same-read tie, and a write that
+    finds an account spent stops it the same way. Nothing spends an overflowed
+    account afterwards. The watchdog's drains and the post-exit stderr
+    ``record_read`` stay outside it, and the readiness waits hold no account lock.
+    A scope with only that budget is retained, with a reaper, but adds no timer.
     """
 
     def __init__(
@@ -117,6 +128,7 @@ class ArchiveDeadline:
                         or self._scope.cancel_tokens
                         or self._scope.stream_accounts
                         or self._scope.stdin_accounts
+                        or self._scope.io_accounts
                     )
                 )
                 else None
@@ -258,6 +270,27 @@ class ArchiveDeadline:
         self.record_read(pipe, chunk)
         return chunk
 
+    def _read_charged(
+        self, pipe: IO[bytes], size: int
+    ) -> tuple[bytes, ObservationLimitError | None]:
+        """Read once for the caller thread, allowed by the scope's budgets; lock held.
+
+        The read is cut so a stream budget flags its overflow at the first excess
+        byte, and the aggregate accounts allow and charge it in the same locked
+        step. Watchdog drains never come through here.
+
+        Returns:
+            The bytes and the ``total_io`` error this read caused, if any.
+
+        Raises:
+            BlockingIOError: Nothing is readable; no account was charged.
+            ObservationLimitError: An aggregate account was already overflowed.
+        """
+        scope = self._scope
+        if scope is None:
+            return self._read(pipe, size), None
+        return scope.read_io(scope.stream_allowance(size), partial(self._read, pipe))
+
     def record_read(self, pipe: IO[bytes], chunk: bytes) -> None:
         """Account for one pipe-boundary read while holding the lock."""
         if pipe is self.process.stdout:
@@ -317,8 +350,10 @@ class ArchiveDeadline:
         with suppress(ProcessLookupError):
             self.process.kill()
 
-    def _charge(self, chunk: bytes) -> bool:
+    def _charge(self, chunk: bytes, overflow: ObservationLimitError | None) -> bool:
         """Charge a caller-thread read to the stream accounts; the lock is held.
+
+        A stream overflow wins over the aggregate ``overflow`` the same read caused.
 
         Returns:
             Whether the read overflowed and the chunk must be discarded.
@@ -329,9 +364,11 @@ class ArchiveDeadline:
         try:
             scope.charge_stream(len(chunk))
         except ObservationLimitError as error:
-            self._exceed(error)
-            return True
-        return False
+            overflow = error
+        if overflow is None:
+            return False
+        self._exceed(overflow)
+        return True
 
     def _send(self, pipe: IO[bytes], view: memoryview) -> int:
         """Write once, limited by and charged to the stdin accounts; lock held."""
@@ -349,15 +386,14 @@ class ArchiveDeadline:
             with self.lock:
                 if self.expired:
                     continue
-                scope = self._scope
                 try:
-                    chunk = self._read(
-                        pipe, size if scope is None else scope.stream_allowance(size)
-                    )
+                    chunk, overflow = self._read_charged(pipe, size)
                 except BlockingIOError:
                     settle = not self._wait(pipe, writable=False)
+                except ObservationLimitError as error:
+                    self._exceed(error)
                 else:
-                    if not self._charge(chunk):
+                    if not self._charge(chunk, overflow):
                         return chunk
             if settle:
                 self.released.wait()

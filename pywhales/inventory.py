@@ -104,12 +104,17 @@ class InspectionPolicy:
     the bytes that captured runs and archive uploads started inside the scope
     write to child stdin, counting only bytes the local pipe accepted; it is
     independent of both output totals, and a captured ``run()`` may send input
-    only while a scope sets it. ``max_total_launch_attempts`` caps accepted CLI
-    launch reservations after cancellation, deadline, and argument preflight.
-    Failed or interrupted launches are not refunded. ``max_concurrent_children``
-    caps owned local CLI children until reap, independently of output draining or
-    daemon workloads. A failed spawn returns its child slot, not its attempt.
-    ``None`` leaves an optional limit unset.
+    only while a scope sets it. ``max_total_io_bytes`` is one further shared
+    allowance over captured, stream and archive output reads and managed stdin
+    writes (captured input and archive uploads) inside the scope; it adds to
+    those budgets and never replaces them. An output read may take one byte past
+    it, which fails with reason ``total_io``, and nothing spends it after that.
+    ``max_total_launch_attempts`` caps accepted CLI launch reservations after
+    cancellation, deadline, and argument preflight. Failed or interrupted
+    launches are not refunded. ``max_concurrent_children`` caps owned local CLI
+    children until reap, independently of output draining or daemon workloads. A
+    failed spawn returns its child slot, not its attempt. ``None`` leaves an
+    optional limit unset.
     """
 
     max_references: int
@@ -119,6 +124,7 @@ class InspectionPolicy:
     max_total_response_bytes: int | None = None
     max_total_stream_bytes: int | None = None
     max_total_stdin_bytes: int | None = None
+    max_total_io_bytes: int | None = None
     max_total_launch_attempts: int | None = None
     max_concurrent_children: int | None = None
 
@@ -136,6 +142,7 @@ class InspectionPolicy:
             self.max_total_response_bytes,
             self.max_total_stream_bytes,
             self.max_total_stdin_bytes,
+            self.max_total_io_bytes,
             self.max_total_launch_attempts,
             self.max_concurrent_children,
         ):
