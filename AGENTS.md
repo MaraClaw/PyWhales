@@ -1,6 +1,6 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-03 for the feature contracts through `7fb32cd`; other guidance last checked 2026-11-01.
+**Verified:** 2026-11-04 for the release 1.1.7 feature contracts through `d9e47ad`; other guidance last checked 2026-11-01.
 
 ## Overview
 
@@ -14,10 +14,11 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 Bounded observation sits on top of the command groups:
 
 - `observation()` nests explicit limits, deadlines, and cancellation over launches, including shared optional `max_total_launch_attempts` and `max_concurrent_children` reservations. Child slots last until local CLI reap, not output drain or daemon-workload completion. Inventory checks its complete launch plan against remaining attempt allowances without reserving it. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
+- `InspectionPolicy.max_total_io_bytes` adds an optional shared total over actual captured, stream and archive output reads plus managed stdin writes. Nested and copied contexts share atomic accounts; source budgets still apply. See the runtime guide for detection-byte, EOF and input boundaries.
 - `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Swarm nodes, selected Compose services, or standalone containers. Node readiness uses fixed IDs and an explicit manager subset, not version fencing; `capture_nodes(require_leader=True)` additionally requires exactly one observed designated leader on both clear passes. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit` and `fail_on_unhealthy`; see the convergence guide.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
-- Admission `ClassLimit.pending_demand_capacity` bounds queued declared demand per class; `AdmissionOwner.owner_pending_demand_capacity` bounds its sum across classes, separately from pending count and active demand. Immediate grants bypass both queue-only bounds.
-- `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 8, including admission's `pending_demand_full` and `owner_pending_demand_full` outcomes. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
+- Admission `AdmissionOwner(..., owner_demand_capacity=...)` bounds active declared demand across classes for immediate/queued grants and resize growth. Separate `ClassLimit.pending_demand_capacity` and `owner_pending_demand_capacity` bound queued demand; immediate grants bypass those queue-only bounds. See the admission guide for growth guards and `owner_demand_full`.
+- `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 10. Completion/refusal `stop_reason` uses a closed vocabulary, including `total_io`; `BoundedExporter.stop_reason_counts` counts every offer, including dropped records. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
 - `strict_workload_errors` is an opt-in client setting for marked attached workload failures; see the shared runtime and container/Compose guides.
 
 ## Structure And Navigation
@@ -47,7 +48,7 @@ Bounded observation sits on top of the command groups:
 | `docs/` | Editable templates, API-doc generation, MkDocs configuration |
 | `scripts/` | Contributor tooling, not installed APIs: CI provisioning, plugin installation, overhead benchmark |
 | `scripts/fleet_contract/` | Offline fleet contract: strict manifest, support, and result schemas, validators, non-qualifying reports (see its `README.md`) |
-| `scripts/fleet_harness/` | Fake-only offline capacity simulation, including leased queue retries, and non-authorizing transport decisions; see its guide |
+| `scripts/fleet_harness/` | Fake-only offline capacity simulation, including leased retries with fixed or capped exponential delays, and non-authorizing transport decisions; see its guide |
 | `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
 | `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
 | `.github/workflows/` | Authoritative CI checks, docs/site artifact build, and the delivery chain from package build to release; no Pages deployment workflow is present |
