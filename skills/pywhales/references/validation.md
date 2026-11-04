@@ -44,7 +44,12 @@ from inspect import signature
 from typing import get_args, get_overloads
 
 from pywhales import DockerClient, InspectionPolicy, docker
-from pywhales.admission import AdmissionOwner, ClassLimit, OutcomeCounts, RejectionReason
+from pywhales.admission import (
+    AdmissionOwner,
+    ClassLimit,
+    OutcomeCounts,
+    RejectionReason,
+)
 from pywhales.client_config import ClientConfig
 from pywhales.convergence import (
     ComposeTarget,
