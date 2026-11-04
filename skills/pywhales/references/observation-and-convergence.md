@@ -8,6 +8,7 @@ calls automatically.
 ## Contents
 
 - [Bounding batch inspection](#bounding-batch-inspection)
+- [Sharing one IO budget](#sharing-one-io-budget)
 - [Manifest lists](#manifest-lists)
 - [Bounding streams and uploads](#bounding-streams-and-uploads)
 - [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm nodes](#swarm-node-readiness), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [standalone containers](#standalone-containers), [outcomes](#outcomes-and-budgets)
@@ -34,6 +35,7 @@ policy = InspectionPolicy(
     max_response_bytes=1_048_576,
     max_total_references=200,
     max_total_response_bytes=4_194_304,
+    max_total_io_bytes=8_388_608,
     max_total_launch_attempts=8,
     max_concurrent_children=2,
 )
@@ -51,9 +53,10 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
 `max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`,
-`max_total_stdin_bytes`, `max_total_launch_attempts`, and `max_concurrent_children`
-default to `None`. An unset output total leaves that
-aggregate unbounded; unset stdin still refuses captured input inside an
+`max_total_stdin_bytes`, `max_total_io_bytes`, `max_total_launch_attempts`, and `max_concurrent_children`
+default to `None`. An unset source-specific output total leaves that account
+unbounded; shared IO can still cap those reads. Unset stdin still refuses
+captured input inside an
 observation unless an enclosing scope supplies a stdin budget. Booleans, zero,
 negative values, and non-exact integers are invalid for every policy limit.
 The illustrative limits above aren't a universal sizing recommendation. `observation()`
@@ -178,6 +181,37 @@ exists; some limits reject before launch. Nothing rolls back daemon-side work,
 and the regular, selected-launch
 `DockerTimeout` from `default_timeout`/`timeout=` is unaffected and can still
 fire independently.
+
+### Sharing One IO Budget
+
+`max_total_io_bytes=None` leaves this additional total unset. A positive exact
+integer adds one shared allowance for actual captured stdout/stderr reads,
+stream stdout/stderr reads (including read-ahead), archive caller reads, and
+managed stdin writes from captured input and byte/iterator archive loads. Only
+bytes accepted by successful local pipe writes count as stdin, including partial
+writes. Bytes merely yielded by an input producer don't count.
+
+Each bounded scope adds an account shared across nested scopes and explicitly
+copied contexts. All enclosing IO accounts are checked and charged atomically
+with each pipe read or accepted write, so concurrent readers and writers cannot
+spend the same remaining allowance. Independently created scopes don't share it.
+Started streams and archive transfers retain their accounts after scope exit.
+
+Output may read one detection byte past the tightest allowance before raising
+`ObservationLimitError(reason="total_io")`; exact-budget EOF succeeds. After
+overflow no further reads or writes spend that account. Managed writes never
+send bytes beyond either the stdin or IO allowance. Source-specific response,
+stream, and stdin limits remain in force and win a same-operation tie; shared
+IO does not replace any of them. Captured input still requires an explicit
+`max_total_stdin_bytes` in the active or an enclosing scope: IO alone doesn't
+enable it.
+
+Archive cleanup/watchdog drains and post-exit stderr reads used to classify a
+Docker failure are excluded from IO spending. Direct or inherited stream stdin
+and archive file contents read/written by the CLI through filename arguments
+are also excluded; any captured or streamed progress output still counts.
+This is managed local pipe accounting, not daemon network traffic or a total
+memory cap.
 
 ### Bounding Streams And Uploads
 

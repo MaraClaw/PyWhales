@@ -1,5 +1,11 @@
 # Telemetry And Admission
 
+## Contents
+
+- [Sanitized execution telemetry](#sanitized-execution-telemetry)
+- [Bounded endpoint admission](#bounded-endpoint-admission)
+- [Measure admission waits and correlate launches](#measure-admission-waits-and-correlate-launches)
+
 Both features are opt-in. Neither name is exported from the `pywhales`
 package root; import them from `pywhales.telemetry` and `pywhales.admission`.
 Without them, ordinary `DockerClient` calls are unchanged.
@@ -28,7 +34,7 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=8` for launch,
+The vocabulary is closed and currently at `schema_version=10` for launch,
 completion, refusal, and admission decision records. On execution records, `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
@@ -37,12 +43,15 @@ which image operations use the archive families. `outcome` on
 `CompletionRecord` is `"success"`, `"failure"`, `"timeout"`, `"closed"`,
 `"cancelled"` (an `ObservationCancelled`), or `"limit"` (an
 `ObservationLimitError` after launch, including a `max_total_stream_bytes`
-overflow, a `max_total_stdin_bytes` limit, or a post-start `native_argv` failure).
+overflow, a `max_total_stdin_bytes` or shared `max_total_io_bytes` limit, or a
+post-start `native_argv` failure).
 `ObservationTimeout` and `DockerTimeout`
 stay `"timeout"` and `KeyboardInterrupt` stays `"failure"`. A stream reports the outcome of the error it delivers
 (deadline, then scope stop, then reader error), and `close()` keeps a stop
 recorded before it, such as a set cancel token; with none it reports
-`"closed"`. Each launch attempt has one opaque random `attempt_id`, shared with
+`"closed"`. The selected outcome and stop reason stay paired through cleanup and
+close; a later close doesn't replace an already selected stop. Each launch
+attempt has one opaque random `attempt_id`, shared with
 at most one completion. `LaunchRecord.admission_id` is the innermost observed
 admission's opaque ID, or `None` outside one; join completion to launch by
 `attempt_id`. Completion records don't repeat the admission ID.
@@ -50,7 +59,8 @@ admission's opaque ID, or `None` outside one; join completion to launch by
 An observation cancellation, deadline or limit exception escaping launch
 preflight emits exactly one `RefusalRecord` (`phase="refusal"`), then re-raises
 the original exception before any spawn. Its fields are fixed `family`, opaque
-`attempt_id`, optional `admission_id`, schema version, phase, and a closed
+`attempt_id`, optional `admission_id` and `stop_reason`, schema version, phase,
+and a closed
 `outcome` of `"cancelled"`, `"timeout"`, or `"limit"`. There is no matching
 launch/completion, duration, byte count or return code. Earlier argument
 validation and environment-resolution failures stay outside this contract;
@@ -59,10 +69,24 @@ A depleted `max_total_launch_attempts` allowance produces a `"limit"` refusal
 with no launch/completion or upload input read; the refused reservation consumes
 no allowance. A saturated `max_concurrent_children` budget likewise refuses with
 `"limit"` before spawn, without consuming a launch attempt or child slot. The
-records do not include the limit, demand, or rejection reason
-text beyond their closed outcome.
+records include a closed `stop_reason`, never the limit value, demand, or
+exception text.
 A native argv failure after launch telemetry starts instead keeps its launch
 and `"limit"` completion.
+
+`CompletionRecord` and `RefusalRecord` have keyword-only
+`stop_reason: StopReason | None = None`; import `StopReason` from
+`pywhales.telemetry`. Runtime records distinguish a local CLI deadline as
+`command_timeout`, an observation deadline as `scope_timeout`, and cancellation
+as `cancelled`. Limit reasons are `nul`, `argv`, `environment`, `native_argv`,
+`native_environment`, `native_limit_unknown`, `native_string`, `native_total`,
+`response`, `total_response`, `total_stream`, `total_stdin`, `total_io`,
+`total_references`, `total_launch_attempts`, and `concurrent_children`. Unknown
+limit reasons map to `other_limit`, so arbitrary reason text never reaches
+records or counter keys. Success, ordinary failure (including `BufferError`),
+and a close without a selected stop have `None`. Launch and admission decision
+records have no stop-reason field. This adds attribution without changing the
+existing outcome categories or launch/refusal correlation.
 
 This covers captured execution, process streams, byte/iterator image load, and
 lazy archive save. A lazy save emits its archive refusal only at first iteration
@@ -89,8 +113,8 @@ CLI's stdin pipe, including partial acceptance before a failure. It doesn't coun
 bytes merely yielded by an input iterator and doesn't prove consumption by the
 CLI or Docker daemon. An observed empty pipe is `0`; an unobserved channel is
 `None`. The same accepted-write measurement charges nested observation stdin
-budgets; reaching the exact budget at EOF succeeds, while further nonempty input
-reports `"limit"` without writing past it. See
+and shared IO budgets; reaching the exact budget at EOF succeeds, while further
+nonempty input reports `"limit"` without writing past it. See
 [Bound archive uploads](registry-and-archives.md#bound-archive-uploads).
 
 A stream completes only when its consumer exhausts it, observes a terminal
@@ -133,6 +157,18 @@ refusal, and admission decision records can be dropped independently: don't assu
 exported launch has an exported completion or decision. The application owns
 flushing, sink privacy, and shutdown.
 
+`exporter.stop_reason_counts` returns a detached immutable mapping with every
+`StopReason` key present, including zero counts. It counts each offered
+completion or refusal with a non-`None` reason before deciding whether to queue
+or drop it, including overflow and offers after shutdown. Offering the same
+record again increments again: these aren't unique-attempt or successful-export
+counts. `flush()`, sink failure, and shutdown discard don't recount offers or
+erase totals. Launch, admission decision and reasonless records don't increment
+them. Each snapshot stays unchanged as later offers arrive. With telemetry
+disabled there are no execution/admission IDs, telemetry clock reads, callbacks,
+or exporter counter updates; normal admission snapshots still work. See the
+[no-engine probes](validation.md) before assuming these APIs are installed.
+
 ## Bounded Endpoint Admission
 
 ```python
@@ -151,6 +187,7 @@ owner = AdmissionOwner(
     EndpointIdentity("primary"),
     {control: ClassLimit(active=2, pending=4, policy=SaturationPolicy.WAIT)},
     owner_pending_demand_capacity=8,
+    owner_demand_capacity=4,
 )
 
 containers = owner.request(control, queue_timeout=5.0).call(client.ps)
@@ -176,6 +213,22 @@ separately from any local CLI deadline); `SaturationPolicy.REJECT` rejects
 immediately instead. A full WAIT pending queue rejects new requests; there's
 no overflow queue.
 
+`AdmissionOwner(..., owner_demand_capacity=4)` adds an optional cap on active
+declared demand summed across all classes on that exact owner. `None` is
+unbounded; a supplied value must be a positive exact integer, never a boolean,
+float or zero. Fast grants, queued head grants and resize growth must fit both
+the class limits and this owner cap under the same owner lock; exact fits
+succeed. Initial demand above either configured active-demand cap raises
+`ValueError` from `request()` before activation, so impossible work never queues.
+
+Under `REJECT`, when the class is otherwise ready but owner active capacity is
+insufficient, `AdmissionRejected.reason` is
+`RejectionReason.OWNER_DEMAND_FULL` (`"owner_demand_full"`). Class occupancy,
+class demand or a class queue still take precedence as `BUSY`. Under `WAIT`,
+work queues under the separate pending-count and class/owner pending-demand
+bounds and can proceed when owner capacity frees. There is no cross-class FIFO
+or scheduler; head-only FIFO remains within each class.
+
 `ClassLimit(..., pending_demand_capacity=20)` separately caps the sum of declared
 demand waiting in that queue, not active demand or pending request count. It
 accepts nonnegative integers excluding booleans; `None` is unbounded. An exact
@@ -193,8 +246,9 @@ queued declared demand across all classes on that exact owner. It accepts only
 nonnegative exact integers (no booleans); `None` is unbounded. Exact fits queue;
 immediate grants bypass it, even at zero. It doesn't cap active demand, active
 slots, or resizing. Admission checks closure/reentry and the immediate-grant path
-first, then busy rejection, class pending-count fullness, class pending-demand
-fullness, and finally owner pending-demand fullness. The last rejects with
+first, then REJECT-policy busy/owner-active rejection, class pending-count
+fullness, class pending-demand fullness, and finally owner pending-demand
+fullness. The last rejects with
 `RejectionReason.OWNER_PENDING_DEMAND_FULL` (`"owner_pending_demand_full"`) without
 running the callable or stream factory. Grants, cancellation, timeouts, and
 closure return queued capacity. FIFO remains local to each class, with no
@@ -231,9 +285,12 @@ demand in place with `try_resize(new_total)`, available on both the original
 request handle and the returned stream handle, since they share one
 reservation. For an active reservation, shrinking or equal demand succeeds;
 growth returns `False`, unchanged, if any request is pending in that class or
-the aggregate active demand would exceed capacity. Invalid totals (including
-booleans, nonintegers, nonpositive values, or a total above class capacity)
-raise `ValueError`. Before admission, after release, or once stream cleanup
+the class or owner active demand would exceed capacity. When
+`owner_demand_capacity` is set, growth also yields to pending work in any other
+class, even if the new total would fit; unset, other classes' queues don't
+block growth. Invalid totals (including booleans, nonintegers, nonpositive
+values, or a total above class or owner capacity) raise `ValueError`.
+Before admission, after release, or once stream cleanup
 begins, valid resize attempts raise `RuntimeError` through either handle.
 `try_resize` never waits and never releases/reacquires the active slot.
 
@@ -245,12 +302,21 @@ memory, subprocess counts, or a cross-process quota.
 The class outcome snapshot's `rejected_pending_demand_full` counts that rejection
 separately with the existing saturating-counter behavior, as does
 `rejected_owner_pending_demand_full` on the class whose request was rejected.
+`rejected_owner_demand_full` separately counts owner active-demand refusals with
+the same saturation behavior; observed admission decisions use
+`outcome="owner_demand_full"`.
 
 `owner.close()` permanently rejects new work and wakes pending callers, but
 doesn't cancel active calls or close their streams. After closing owned streams,
 `owner.wait_drained(timeout=5.0)` returns whether all active permits drained.
 Stream cleanup failures propagate; an independent body and cleanup failure are
 preserved together in a `BaseExceptionGroup`.
+Active owner demand remains reserved through source exit and any in-flight read,
+including failing cleanup, and releases with the permit only after cleanup
+finishes. Local child exit, pending cancellation/timeout and owner closure don't
+free active demand; shrink or release wakes waiters across classes. Queue-only
+demand allowances and the local observation child-slot budget have separate
+lifetimes.
 
 For sequential work, `owner.iter_calls(control, operations)` consumes an iterable
 of callables lazily, admitting one at a time; it isn't a parallel scheduler.
@@ -307,8 +373,8 @@ The owner's `telemetry_observer` is keyword-only and defaults to `None`, separat
 from the client's launch observer. Each activated request produces one immutable
 `AdmissionDecisionRecord` (`phase="admission"`): opaque `admission_id`, closed
 `outcome`, and nonnegative monotonic `duration_seconds` from activation to the
-decision, including lock/queue wait. Schema-8 outcomes are `granted`, `busy`,
-`queue_full`, `pending_demand_full`, `owner_pending_demand_full`, `closed`,
+decision, including lock/queue wait. Schema-10 outcomes are `granted`, `busy`,
+`queue_full`, `pending_demand_full`, `owner_pending_demand_full`, `owner_demand_full`, `closed`,
 `queue_timeout`, `cancelled`, and `failed` (including reentry failure).
 `granted` records admission, not successful execution of the callable. Cancelling
 an inert request before activation emits nothing. With no owner observer, no
