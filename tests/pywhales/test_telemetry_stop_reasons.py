@@ -145,7 +145,7 @@ def test_concurrent_offers_have_exact_counts_for_every_reason() -> None:
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(offer, STOP_REASONS))
     exporter(LaunchRecord("captured", attempt_id="id"))
-    exporter(AdmissionDecisionRecord(AdmissionId("admission"), "busy", 0))
+    exporter(AdmissionDecisionRecord(AdmissionId("admission"), "owner_demand_full", 0))
     exporter(CompletionRecord("captured", "success", 0, attempt_id="id"))
     assert exporter.stop_reason_counts == dict.fromkeys(STOP_REASONS, 200)
     assert exporter.dropped == len(STOP_REASONS) * 200 + 2

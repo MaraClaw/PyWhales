@@ -104,6 +104,8 @@ def acquisition(owner: AdmissionOwner, ticket: Ticket) -> Generator[None]:
                         outcome = "pending_demand_full"
                     case RejectionReason.OWNER_PENDING_DEMAND_FULL:
                         outcome = "owner_pending_demand_full"
+                    case RejectionReason.OWNER_DEMAND_FULL:
+                        outcome = "owner_demand_full"
                     case RejectionReason.CLOSED:
                         outcome = "closed"
                     case unreachable:

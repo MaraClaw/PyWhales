@@ -34,6 +34,7 @@ class Outcome(IntEnum):
     REJECTED_CLOSED = 7
     REJECTED_PENDING_DEMAND_FULL = 8
     REJECTED_OWNER_PENDING_DEMAND_FULL = 9
+    REJECTED_OWNER_DEMAND_FULL = 10
 
 
 @dataclass(eq=False, slots=True)
@@ -129,6 +130,7 @@ class Bucket:
                 self.saturated,
                 self.counts[Outcome.REJECTED_PENDING_DEMAND_FULL],
                 self.counts[Outcome.REJECTED_OWNER_PENDING_DEMAND_FULL],
+                self.counts[Outcome.REJECTED_OWNER_DEMAND_FULL],
             ),
             DemandSnapshot(
                 self.active_demand,

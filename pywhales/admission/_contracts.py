@@ -113,6 +113,7 @@ class OutcomeCounts:
     saturated: bool
     rejected_pending_demand_full: int = 0
     rejected_owner_pending_demand_full: int = 0
+    rejected_owner_demand_full: int = 0
 
 
 @dataclass(frozen=True, slots=True)

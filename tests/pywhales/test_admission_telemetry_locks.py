@@ -180,7 +180,7 @@ def test_pending_demand_decision_is_payload_free_unlocked_and_observer_isolated(
         "admission_id": refusal.admission_id,
         "outcome": "pending_demand_full",
         "duration_seconds": 2,
-        "schema_version": 9,
+        "schema_version": 10,
         "phase": "admission",
     }
     snapshot = owner.snapshot().classes[0]

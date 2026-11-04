@@ -201,10 +201,11 @@ def test_outcome_snapshots_preserve_legacy_positional_meanings() -> None:
     assert legacy.saturated is True
     assert legacy.rejected_pending_demand_full == 0
     assert legacy.rejected_owner_pending_demand_full == 0
+    assert legacy.rejected_owner_demand_full == 0
     bucket = Bucket(ClassLimit(1, 1))
-    bucket.counts[:] = range(1, 11)
+    bucket.counts[:] = range(1, 12)
     assert bucket.snapshot(PressureClass("read")).outcomes == OutcomeCounts(
-        1, 2, 3, 4, 5, 6, 7, 8, False, 9, 10
+        1, 2, 3, 4, 5, 6, 7, 8, False, 9, 10, 11
     )
 
 
