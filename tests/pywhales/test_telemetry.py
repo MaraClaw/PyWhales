@@ -54,12 +54,12 @@ def test_metadata_is_sanitized_when_captured_results_contain_secrets(
     assert result == (secret + "\ufffd", secret)
     launch = records[0]
     assert isinstance(launch, LaunchRecord)
-    assert launch.family == "captured" and launch.schema_version == 8
+    assert launch.family == "captured" and launch.schema_version == 9
     assert launch.admission_id is None
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.attempt_id == launch.attempt_id
-    assert completed.schema_version == 8 and completed.return_code == 0
+    assert completed.schema_version == 9 and completed.return_code == 0
     assert completed.stdin_bytes is None
     assert completed.outcome == "success"
     assert (completed.stdout_bytes, completed.stderr_bytes) == (
@@ -296,5 +296,5 @@ def test_completion_outcome_follows_the_exception_that_ended_the_launch(
     launch, completed = records
     assert isinstance(launch, LaunchRecord)
     assert isinstance(completed, CompletionRecord)
-    assert launch.schema_version == completed.schema_version == 8
+    assert launch.schema_version == completed.schema_version == 9
     assert completed.outcome == outcome

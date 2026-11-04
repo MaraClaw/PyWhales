@@ -40,7 +40,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
-    assert records[0].schema_version == completed.schema_version == 8
+    assert records[0].schema_version == completed.schema_version == 9
     assert completed.attempt_id == records[0].attempt_id
     assert completed.stdin_bytes is None
     return completed
@@ -574,6 +574,7 @@ def test_native_argv_rejection_after_stream_start_reports_limit() -> None:
 
     assert failure.value.reason == "native_argv"
     completed = completion(records)
+    assert completed.stop_reason == "native_argv"
     assert (completed.outcome, completed.return_code) == ("limit", None)
 
 

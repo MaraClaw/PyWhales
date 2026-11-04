@@ -104,10 +104,16 @@ def test_preflight_refusal_preserves_exception_and_snapshot(
     assert (record.family, record.outcome, record.schema_version, record.phase) == (
         family,
         outcome,
-        8,
+        9,
         "refusal",
     )
     assert record.admission_id is None and len(record.attempt_id) == 32
+    assert (
+        record.stop_reason
+        == {"cancelled": "cancelled", "timeout": "scope_timeout", "limit": "argv"}[
+            outcome
+        ]
+    )
     assert secret not in json.dumps(asdict(record))
     with pytest.raises(FrozenInstanceError):
         record.__setattr__("outcome", "limit")
@@ -323,9 +329,10 @@ def test_launch_budget_refuses_each_family_without_spawn_or_input_read(
     assert (record.family, record.outcome, record.schema_version) == (
         family,
         "limit",
-        8,
+        9,
     )
     assert "private" not in json.dumps(asdict(record))
+    assert record.stop_reason == "total_launch_attempts"
 
 
 @pytest.mark.parametrize(
@@ -381,3 +388,4 @@ def test_child_saturation_is_one_refusal_without_attempt_spawn_or_input(
         (record,) = records
         assert isinstance(record, RefusalRecord)
         assert (record.family, record.outcome) == (family, "limit")
+        assert record.stop_reason == "concurrent_children"

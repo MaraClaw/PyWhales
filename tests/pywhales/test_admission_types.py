@@ -85,16 +85,16 @@ def _check_decision_telemetry(
             assert_type(record.outcome, AdmissionOutcome)
             assert_type(record.duration_seconds, float)
             assert_type(record.phase, Literal["admission"])
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[9])
         case LaunchRecord():
             assert_type(record.admission_id, AdmissionId | None)
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[9])
         case CompletionRecord():
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[9])
         case RefusalRecord():
             assert_type(record.admission_id, AdmissionId | None)
             assert_type(record.outcome, RefusalOutcome)
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[9])
         case unreachable:
             assert_never(unreachable)
 

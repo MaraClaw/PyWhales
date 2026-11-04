@@ -35,8 +35,8 @@ from pywhales.exceptions import (
     ObservationTimeout,
     get_docker_exception_type,
 )
-from pywhales.telemetry import Outcome
-from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of
+from pywhales.telemetry import Outcome, StopReason
+from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of, stop_reason_of
 
 if TYPE_CHECKING:
     from pywhales._observation import ObservationState, _ChildReservation
@@ -117,6 +117,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._strict_workload_errors = strict_workload_errors
         self._telemetry = telemetry
         self._telemetry_outcome: Outcome | None = None
+        self._telemetry_stop_reason: StopReason | None = None
         self._observation = (
             observation
             if observation is not None and observation.binds_launches
@@ -494,20 +495,22 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         finally:
             self._released.set()
 
-    def _stop_outcome(self) -> Outcome | None:
-        """Return the outcome of the error delivery would raise next, if any.
+    def _stop_outcome(self) -> tuple[Outcome | None, StopReason | None]:
+        """Return the outcome and reason of the error delivery would raise next.
 
         The one rule behind terminal delivery and ``close()``. It follows the
         order ``_raise_error`` delivers in: a launch deadline, then a scope stop,
         then a reader or budget error. The queue lock must be held.
         """
         if self._expired:
-            return "timeout"
+            return "timeout", "command_timeout"
         if self._scope_error is not None:
-            return outcome_of(type(self._scope_error))
+            return outcome_of(type(self._scope_error)), stop_reason_of(
+                self._scope_error
+            )
         if self._error is not None:
-            return outcome_of(type(self._error))
-        return None
+            return outcome_of(type(self._error)), stop_reason_of(self._error)
+        return None, None
 
     def _raise_error(self) -> None:
         """Wait for cleanup and deliver a recorded terminal error at most once.
@@ -524,7 +527,9 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._watchdog.join()
         with self._queue.condition:
             if self._telemetry_outcome is None:
-                self._telemetry_outcome = self._stop_outcome()
+                self._telemetry_outcome, self._telemetry_stop_reason = (
+                    self._stop_outcome()
+                )
             error = self._error
             self._error = None
             expired = self._expired
@@ -551,7 +556,9 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._telemetry.stdout_bytes = self._read_bytes["stdout"]
             self._telemetry.stderr_bytes = self._read_bytes["stderr"]
             self._telemetry.return_code = self._process.returncode
-            self._telemetry.finish(self._telemetry_outcome)
+            self._telemetry.finish(
+                self._telemetry_outcome, stop_reason=self._telemetry_stop_reason
+            )
 
     @override
     def __iter__(self) -> Self:
@@ -628,7 +635,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         with self._queue.condition:
             self._expire()
             if self._telemetry_outcome is None:
-                self._telemetry_outcome = self._stop_outcome() or "closed"
+                outcome, self._telemetry_stop_reason = self._stop_outcome()
+                self._telemetry_outcome = outcome or "closed"
             self._closed = True
             self._stop.set()
             self._queue.close()

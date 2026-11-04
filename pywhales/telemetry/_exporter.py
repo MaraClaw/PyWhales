@@ -1,10 +1,21 @@
 """Finite drop-newest buffering with explicit application flush ownership."""
 
 from collections import deque
+from collections.abc import Mapping
 from threading import Lock
-from typing import Literal
+from types import MappingProxyType
+from typing import Literal, assert_never
 
-from ._records import TelemetryObserver, TelemetryRecord
+from ._records import (
+    STOP_REASONS,
+    AdmissionDecisionRecord,
+    CompletionRecord,
+    LaunchRecord,
+    RefusalRecord,
+    StopReason,
+    TelemetryObserver,
+    TelemetryRecord,
+)
 
 
 class BoundedExporter:
@@ -48,10 +59,19 @@ class BoundedExporter:
         self._closed = False
         self._dropped = 0
         self._export_errors = 0
+        self._stop_reason_counts = dict.fromkeys(STOP_REASONS, 0)
 
     def __call__(self, record: TelemetryRecord) -> None:
         """Enqueue or drop immediately without invoking the sink."""
         with self._lock:
+            match record:
+                case CompletionRecord() | RefusalRecord():
+                    if record.stop_reason is not None:
+                        self._stop_reason_counts[record.stop_reason] += 1
+                case LaunchRecord() | AdmissionDecisionRecord():
+                    pass
+                case unreachable:
+                    assert_never(unreachable)
             if self._closed or len(self._queue) >= self._capacity:
                 self._dropped += 1
             else:
@@ -68,6 +88,16 @@ class BoundedExporter:
         """Return discarded records whose sink raised an ordinary exception."""
         with self._lock:
             return self._export_errors
+
+    @property
+    def stop_reason_counts(self) -> Mapping[StopReason, int]:
+        """Return detached immutable totals for all reasons, including zeros.
+
+        Each completion or refusal offer counts before overflow or shutdown
+        drops. Repeated offers count again; exporting never recounts.
+        """
+        with self._lock:
+            return MappingProxyType(self._stop_reason_counts.copy())
 
     @property
     def queued(self) -> int:

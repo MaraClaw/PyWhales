@@ -41,7 +41,7 @@ from pywhales._process_stream import ProcessStream as ProcessStream
 from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
-from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of
+from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of, stop_reason_of
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -697,7 +697,7 @@ def _start_process(
             unwind_launch(process, None, [])
         if reservation is not None:
             reservation.release()
-        telemetry.finish(outcome_of(type(error)))
+        telemetry.finish(outcome_of(type(error)), stop_reason=stop_reason_of(error))
         raise
 
 

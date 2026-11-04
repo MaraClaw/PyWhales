@@ -4,12 +4,12 @@ Only opaque attempt identifiers, numeric measurements, and closed vocabularies
 cross this boundary. Observer exceptions are contained without rendering details.
 """
 
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from threading import Lock
 from time import monotonic
-from types import TracebackType
-from typing import Self
+from types import MappingProxyType, TracebackType
+from typing import Final, Self
 from uuid import uuid4
 
 from pywhales.exceptions import (
@@ -25,11 +25,20 @@ from pywhales.telemetry import (
     Outcome,
     RefusalOutcome,
     RefusalRecord,
+    StopReason,
     TelemetryObserver,
     TelemetryRecord,
 )
 
 from ._context import current_admission_id
+from ._records import STOP_REASONS
+
+_EXCLUDED_FROM_LIMITS: Final[frozenset[StopReason]] = frozenset(
+    {"command_timeout", "scope_timeout", "cancelled", "other_limit"}
+)
+_LIMIT_REASONS: Final[Mapping[str, StopReason]] = MappingProxyType(
+    {reason: reason for reason in STOP_REASONS if reason not in _EXCLUDED_FROM_LIMITS}
+)
 
 
 def deliver(observer: TelemetryObserver, record: TelemetryRecord) -> None:
@@ -57,6 +66,33 @@ def outcome_of(error: type[BaseException]) -> Outcome:
     if issubclass(error, GeneratorExit):
         return "closed"
     return "failure"
+
+
+def stop_reason_of(error: BaseException | None) -> StopReason | None:
+    """Project one exception instance onto the closed stop-reason vocabulary.
+
+    A launch deadline is ``command_timeout``, an observation deadline
+    ``scope_timeout`` and a set token ``cancelled``. An observation limit keeps
+    its reason only when the vocabulary recognizes it; any other string becomes
+    ``other_limit``, so arbitrary text and keys never reach a record or counter.
+
+    Args:
+        error: The exception that ended the launch, or None for no exception.
+
+    Returns:
+        The matching reason, or None for success, closure and ordinary failures.
+    """
+    match error:
+        case ObservationTimeout():
+            return "scope_timeout"
+        case DockerTimeout():
+            return "command_timeout"
+        case ObservationCancelled():
+            return "cancelled"
+        case ObservationLimitError():
+            return _LIMIT_REASONS.get(error.reason, "other_limit")
+        case _:
+            return None
 
 
 class ExecutionTelemetry:
@@ -120,6 +156,7 @@ class ExecutionTelemetry:
                         outcome,
                         attempt_id=uuid4().hex,
                         admission_id=current_admission_id.get(),
+                        stop_reason=stop_reason_of(error),
                     ),
                 )
             raise
@@ -129,8 +166,16 @@ class ExecutionTelemetry:
         self.stdout_bytes = None if stdout is None else len(stdout)
         self.stderr_bytes = None if stderr is None else len(stderr)
 
-    def finish(self, outcome: Outcome) -> None:
-        """Publish the first completion outside the state lock."""
+    def finish(
+        self, outcome: Outcome, *, stop_reason: StopReason | None = None
+    ) -> None:
+        """Publish the first completion outside the state lock.
+
+        Args:
+            outcome: Closed result of the launch.
+            stop_reason: Boundary that ended a timeout, cancelled or limit
+                outcome, taken from the same exception as ``outcome``.
+        """
         with self._lock:
             if (
                 self._observer is None
@@ -149,6 +194,7 @@ class ExecutionTelemetry:
                 attempt_id=self._attempt_id,
                 return_code=self.return_code,
                 stdin_bytes=self.stdin_bytes,
+                stop_reason=stop_reason,
             )
         deliver(self._observer, record)
 
@@ -162,4 +208,7 @@ class ExecutionTelemetry:
         traceback: TracebackType | None,
     ) -> None:
         """Report captured completion without changing an active exception."""
-        self.finish("success" if exc_type is None else outcome_of(exc_type))
+        self.finish(
+            "success" if exc_type is None else outcome_of(exc_type),
+            stop_reason=stop_reason_of(exc_value),
+        )
