@@ -271,6 +271,13 @@ cap. Queue pressure blocks producers rather than dropping output; a record
 `image_stream_buffer_bytes` override falls back to this general budget when
 `None`; see [Registry transfers and archives](registry-and-archives.md).
 
+For a total across captured output, stream/archive reads and managed stdin
+writes, use `InspectionPolicy.max_total_io_bytes` inside `observation()`. It
+doesn't replace this buffer setting or the separate response, stream and stdin
+caps. Raw stream reads, including read-ahead, count before consumer decoding;
+direct/inherited stream stdin is excluded. See
+[Sharing one IO budget](observation-and-convergence.md#sharing-one-io-budget).
+
 ## Own Detached Containers and Streams Separately
 
 ```python

@@ -47,7 +47,7 @@ def test_decisions_are_frozen_payload_free_and_reentry_fails_once() -> None:
     assert (first.duration_seconds, second.duration_seconds) == (2, 0)
     assert first.admission_id != second.admission_id
     assert len(first.admission_id) == len(second.admission_id) == 32
-    assert first.schema_version == second.schema_version == 8
+    assert first.schema_version == second.schema_version == 10
     assert first.phase == second.phase == "admission"
     with pytest.raises(FrozenInstanceError):
         first.__setattr__("outcome", "failed")

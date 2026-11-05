@@ -255,6 +255,13 @@ limits around specific calls, see
 inspection or waiting for Swarm node readiness, service/job/stack, Compose project, or standalone container convergence,
 see [Observation budgets and convergence](observation-and-convergence.md).
 
+For one shared allowance over managed pipe reads and stdin writes, set
+`InspectionPolicy.max_total_io_bytes` inside `observation()`, not on the client.
+This adds to separate response/stream/stdin limits and doesn't bound file contents
+transferred by CLI filename arguments. For closed stop attribution and exporter
+offer counts, inspect schema-10 telemetry support as described in
+[Usage validation](validation.md).
+
 Application policy APIs also require explicit imports from `pywhales.profiles`,
 `pywhales.reconciliation`, or `pywhales.storage`, not the package root. They
 don't automatically add create policy, reconciliation, or storage gates to

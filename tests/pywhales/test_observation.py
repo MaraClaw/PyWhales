@@ -10,6 +10,7 @@ import pytest
 
 from pywhales._observation import (
     ObservationState,
+    _IoAccount,
     _ResponseAccount,
     _StreamAccount,
     check_observation,
@@ -333,6 +334,8 @@ def test_launches_keep_a_scope_only_when_something_outlives_the_with_block() -> 
         assert cancellable.binds_launches
     with observation(stdin_policy(1)) as uploading:
         assert uploading.binds_launches
+    with observation(io_policy(1)) as aggregate:
+        assert aggregate.binds_launches
 
 
 def test_stream_allowance_cuts_a_read_to_flag_overflow_at_its_first_excess_byte() -> (
@@ -603,6 +606,263 @@ def test_concurrent_stdin_writes_never_pass_the_limit_and_every_excess_fails() -
         assert {(error.reason, error.limit, error.measured) for error in overflows} == {
             ("total_stdin", limit, limit + 1)
         }
+
+
+def io_policy(limit: int | None, *, stdin: int | None = None) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=1,
+        max_response_bytes=1,
+        max_total_stdin_bytes=stdin,
+        max_total_io_bytes=limit,
+    )
+
+
+def fill(allowed: int) -> bytes:
+    return b"x" * allowed
+
+
+def never(allowed: int) -> int:
+    raise AssertionError("an overflowed account allowed a pipe operation")
+
+
+def test_nested_io_totals_take_the_smallest_set_value() -> None:
+    with observation(io_policy(10)) as outer:
+        with observation(io_policy(25)) as wider:
+            assert wider.policy.max_total_io_bytes == 10
+            assert [account.limit for account in wider.io_accounts] == [10, 25]
+        with observation(io_policy(4)) as tighter:
+            assert tighter.policy.max_total_io_bytes == 4
+        with observation(io_policy(None)) as inherited:
+            assert inherited.policy.max_total_io_bytes == 10
+            assert inherited.io_accounts == outer.io_accounts
+    with observation(io_policy(None)) as unset:
+        assert unset.policy.max_total_io_bytes is None
+        assert unset.io_accounts == ()
+
+
+def test_io_read_takes_one_detection_byte_and_then_nothing_spends_the_account() -> None:
+    asked: list[int] = []
+
+    def read(allowed: int) -> bytes:
+        asked.append(allowed)
+        return fill(allowed)
+
+    with observation(io_policy(10)) as outer, observation(io_policy(4)) as inner:
+        chunk, overflow = inner.read_io(65536, read)
+
+        assert (len(chunk), asked) == (5, [5])
+        assert overflow is not None
+        assert (overflow.reason, overflow.limit, overflow.measured) == (
+            "total_io",
+            4,
+            5,
+        )
+        assert [account.consumed for account in inner.io_accounts] == [5, 5]
+        assert outer.io_accounts[0].consumed == 5
+        with pytest.raises(ObservationLimitError) as stopped:
+            inner.read_io(1, read)
+        with pytest.raises(ObservationLimitError) as refused:
+            inner.write_stdin(1, never)
+
+        assert asked == [5]
+        for failure in (stopped, refused):
+            assert (
+                failure.value.reason,
+                failure.value.limit,
+                failure.value.measured,
+            ) == ("total_io", 4, 5)
+        assert outer.io_accounts[0].consumed == 5
+
+
+def test_io_read_ending_exactly_at_the_limit_reaches_end_of_file_without_overflow() -> (
+    None
+):
+    asked: list[int] = []
+
+    def end_of_file(allowed: int) -> bytes:
+        asked.append(allowed)
+        return b""
+
+    with observation(io_policy(4)) as state:
+        assert state.read_io(65536, lambda allowed: fill(min(allowed, 4))) == (
+            b"xxxx",
+            None,
+        )
+        assert state.read_io(65536, end_of_file) == (b"", None)
+
+        assert asked == [1]
+        assert state.io_accounts[0].consumed == 4
+
+
+def test_io_read_charges_only_returned_bytes_and_nothing_when_it_would_block() -> None:
+    def blocked(allowed: int) -> bytes:
+        raise BlockingIOError
+
+    with observation(io_policy(10)) as state:
+        with pytest.raises(BlockingIOError):
+            state.read_io(8, blocked)
+        assert state.io_accounts[0].consumed == 0
+        assert state.read_io(8, lambda allowed: b"abc") == (b"abc", None)
+
+        assert state.io_accounts[0].consumed == 3
+        assert not state.io_accounts[0].lock.locked()
+
+
+def test_io_write_is_cut_to_the_allowance_left_after_reads_and_then_overflows() -> None:
+    asked: list[int] = []
+
+    def accept(allowed: int) -> int:
+        asked.append(allowed)
+        return allowed
+
+    with observation(io_policy(10)) as state:
+        state.read_io(4, fill)
+
+        assert state.write_stdin(20, accept) == 6
+        with pytest.raises(ObservationLimitError) as refused:
+            state.write_stdin(1, never)
+
+        assert asked == [6]
+        assert (refused.value.reason, refused.value.limit, refused.value.measured) == (
+            "total_io",
+            10,
+            11,
+        )
+        # A spent account still lets a read take its one detection byte.
+        _, overflow = state.read_io(5, fill)
+        assert overflow is not None and overflow.measured == 11
+
+
+def test_a_write_reports_the_stdin_limit_before_the_aggregate_one_on_a_tie() -> None:
+    with observation(io_policy(3, stdin=3)) as tied:
+        tied.write_stdin(3, accept_all)
+        with pytest.raises(ObservationLimitError) as both:
+            tied.write_stdin(1, never)
+    with observation(io_policy(3, stdin=10)) as aggregate:
+        aggregate.write_stdin(3, accept_all)
+        with pytest.raises(ObservationLimitError) as only:
+            aggregate.write_stdin(1, never)
+        assert [account.consumed for account in aggregate.stdin_accounts] == [3]
+
+    assert both.value.reason == "total_stdin"
+    assert only.value.reason == "total_io"
+
+
+def test_stdin_writes_and_io_reads_charge_the_same_aggregate_without_other_accounts() -> (
+    None
+):
+    scope = replace(io_policy(8), max_total_response_bytes=8, max_total_stream_bytes=8)
+    with observation(scope) as state:
+        state.write_stdin(3, accept_all)
+        state.read_io(2, fill)
+
+        assert state.io_accounts[0].consumed == 5
+        assert state.response_accounts[0].consumed == 0
+        assert state.stream_accounts[0].consumed == 0
+        assert state.stdin_accounts == ()
+
+
+def test_state_built_without_io_accounts_reads_unchanged_and_binds_nothing() -> None:
+    asked: list[int] = []
+
+    def read(allowed: int) -> bytes:
+        asked.append(allowed)
+        return b"data"
+
+    state = ObservationState(
+        policy=policy(1, 1, 1),
+        deadline=None,
+        cancel_tokens=(),
+        response_accounts=(),
+    )
+
+    assert state.read_io(65536, read) == (b"data", None)
+    assert asked == [65536]
+    assert state.io_accounts == ()
+    assert not state.binds_launches
+
+
+class GuardedIoAccount(_IoAccount):
+    """An aggregate account that fails any update made without holding its lock."""
+
+    armed = False
+
+    @override
+    def __setattr__(self, name: str, value: object) -> None:
+        assert name != "consumed" or not self.armed or self.lock.locked(), (
+            "unlocked update"
+        )
+        super().__setattr__(name, value)
+
+
+def test_every_io_read_and_write_updates_its_account_under_the_account_lock() -> None:
+    accounts = tuple(GuardedIoAccount(limit) for limit in (10, 3))
+    for account in accounts:
+        account.armed = True
+    state = ObservationState(
+        policy=policy(1, 1, 1),
+        deadline=None,
+        cancel_tokens=(),
+        response_accounts=(),
+        io_accounts=accounts,
+    )
+
+    state.read_io(2, fill)
+    state.write_stdin(1, accept_all)
+    _, overflow = state.read_io(5, fill)
+
+    assert [account.consumed for account in accounts] == [4, 4]
+    assert overflow is not None and (overflow.limit, overflow.measured) == (3, 4)
+
+
+@pytest.mark.usefixtures("switch_often")
+def test_concurrent_reads_and_writes_never_overspend_the_shared_accounts() -> None:
+    threads, operations, limit = 8, 1500, 1000
+    start = Barrier(threads)
+    spent = [0] * threads
+    detections: list[list[ObservationLimitError]] = [[] for _ in range(threads)]
+    refusals: list[list[ObservationLimitError]] = [[] for _ in range(threads)]
+
+    def compete(index: int, state: ObservationState) -> None:
+        start.wait(timeout=3)
+        for _ in range(operations):
+            try:
+                if index % 2:
+                    spent[index] += state.write_stdin(1, accept_all)
+                else:
+                    chunk, overflow = state.read_io(1, fill)
+                    spent[index] += len(chunk)
+                    if overflow is not None:
+                        detections[index].append(overflow)
+            except ObservationLimitError as error:
+                refusals[index].append(error)
+
+    with (
+        observation(io_policy(limit, stdin=threads * operations)),
+        observation(io_policy(limit, stdin=threads * operations)) as state,
+    ):
+        workers = [
+            Thread(target=copy_context().run, args=(compete, index, state))
+            for index in range(threads)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30)
+            assert not worker.is_alive()
+
+        # Readers alone outnumber the limit, so exactly one detection byte is taken.
+        assert sum(spent) == limit + 1
+        assert [account.consumed for account in state.io_accounts] == [limit + 1] * 2
+        assert sum(map(len, detections)) == 1
+        refused = [error for group in refusals for error in group]
+        assert len(refused) == threads * operations - sum(spent)
+        assert {(error.reason, error.limit) for error in refused} == {
+            ("total_io", limit)
+        }
+        written = sum(spent[index] for index in range(1, threads, 2))
+        assert [account.consumed for account in state.stdin_accounts] == [written] * 2
 
 
 def launch_policy(limit: int | None) -> InspectionPolicy:

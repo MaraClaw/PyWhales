@@ -48,6 +48,7 @@ class AdmissionOwner:
         *,
         telemetry_observer: TelemetryObserver | None = None,
         owner_pending_demand_capacity: int | None = None,
+        owner_demand_capacity: int | None = None,
     ) -> None:
         """Copy limits and optionally observe payload-free admission decisions.
 
@@ -61,12 +62,21 @@ class AdmissionOwner:
                 or streams whose completion it can block.
             owner_pending_demand_capacity: Optional nonnegative limit on the sum
                 of queued demand across classes. Immediate grants bypass it.
+            owner_demand_capacity: Optional positive limit on the sum of active
+                declared demand across classes, enforced with each class's own
+                limits for grants, queued grants and resize growth. While it is
+                set, growth also yields to pending work in any class. Requests
+                with demand above it are rejected up front. None is unbounded.
 
         Raises:
-            ValueError: If limits is empty or the owner capacity is invalid.
+            ValueError: If limits is empty or an owner capacity is invalid.
         """
         if not limits:
             raise ValueError("limits must not be empty")
+        if owner_demand_capacity is not None and (
+            type(owner_demand_capacity) is not int or owner_demand_capacity <= 0
+        ):
+            raise ValueError("owner_demand_capacity must be a positive integer")
         if owner_pending_demand_capacity is not None and (
             type(owner_pending_demand_capacity) is not int
             or owner_pending_demand_capacity < 0
@@ -80,6 +90,7 @@ class AdmissionOwner:
         self._closed = False
         self._telemetry_observer = telemetry_observer
         self._owner_pending_demand_capacity = owner_pending_demand_capacity
+        self._owner_demand_capacity = owner_demand_capacity
 
     def close(self) -> None:
         """Permanently reject new admission and wake all pending callers.
@@ -138,7 +149,8 @@ class AdmissionOwner:
             queue_timeout: Positive finite seconds spent awaiting admission, or
                 None for no queue deadline. Timing starts at call() or stream().
             demand: Positive integer initial reservation, defaulting to one. It
-                must not exceed the class demand_capacity when configured.
+                must not exceed the class demand_capacity or the owner
+                owner_demand_capacity when configured.
 
         Raises:
             ValueError: If the class, queue timeout, or demand is invalid.
@@ -147,7 +159,9 @@ class AdmissionOwner:
         if pressure_class not in self._buckets:
             raise ValueError("pressure class is not configured")
         bucket = self._buckets[pressure_class]
-        return AdmissionRequest(self, bucket, queue_timeout, demand=demand)
+        request = AdmissionRequest(self, bucket, queue_timeout, demand=demand)
+        self._validate_owner_demand(demand)
+        return request
 
     def iter_calls[T](
         self,
@@ -181,6 +195,20 @@ class AdmissionOwner:
                 self._closed,
             )
 
+    def _validate_owner_demand(self, demand: int) -> None:
+        """Reject validated demand that can never fit the owner allowance."""
+        capacity = self._owner_demand_capacity
+        if capacity is not None and demand > capacity:
+            raise ValueError("demand exceeds the owner demand capacity")
+
+    def _owner_fits(self, demand: int) -> bool:
+        """Check owner-wide active demand; the caller owns the admission lock."""
+        capacity = self._owner_demand_capacity
+        return capacity is None or (
+            sum(item.active_demand for item in self._buckets.values()) + demand
+            <= capacity
+        )
+
     def _acquire(self, request: AdmissionRequest) -> None:
         ticket, bucket = request._ticket, request._bucket
         deadline = None if request._timeout is None else monotonic() + request._timeout
@@ -195,11 +223,12 @@ class AdmissionOwner:
                 ticket.done = True
                 bucket.record(Outcome.FAILED)
                 raise
-            if (
+            class_ready = (
                 bucket.active < bucket.limit.active
                 and bucket.fits(ticket.demand)
                 and not bucket.pending
-            ):
+            )
+            if class_ready and self._owner_fits(ticket.demand):
                 if deadline is not None and monotonic() >= deadline:
                     ticket.done = True
                     bucket.record(Outcome.QUEUE_TIMED_OUT)
@@ -209,6 +238,9 @@ class AdmissionOwner:
             match bucket.limit.policy:
                 case SaturationPolicy.REJECT:
                     ticket.done = True
+                    if class_ready:
+                        bucket.record(Outcome.REJECTED_OWNER_DEMAND_FULL)
+                        raise AdmissionRejected(RejectionReason.OWNER_DEMAND_FULL)
                     bucket.record(Outcome.REJECTED_BUSY)
                     raise AdmissionRejected(RejectionReason.BUSY)
                 case SaturationPolicy.WAIT:
@@ -253,6 +285,7 @@ class AdmissionOwner:
                         bucket.pending[0] is ticket
                         and bucket.active < bucket.limit.active
                         and bucket.fits(ticket.demand)
+                        and self._owner_fits(ticket.demand)
                     ):
                         bucket.reserve(ticket)
                         return
@@ -272,10 +305,18 @@ class AdmissionOwner:
         with self._condition:
             ticket, bucket = request._ticket, request._bucket
             validate_demand(demand, bucket.limit.demand_capacity)
+            self._validate_owner_demand(demand)
             if not ticket.active or ticket.closing:
                 raise RuntimeError("admission reservation is not active")
             delta = demand - ticket.demand
-            if delta > 0 and (bucket.pending or not bucket.fits(delta)):
+            pending = (
+                bucket.pending
+                if self._owner_demand_capacity is None
+                else any(item.pending for item in self._buckets.values())
+            )
+            if delta > 0 and (
+                pending or not bucket.fits(delta) or not self._owner_fits(delta)
+            ):
                 return False
             bucket.resize(ticket, demand)
             if delta < 0:

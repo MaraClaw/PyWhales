@@ -260,7 +260,7 @@ def test_owner_refusal_is_saturating_payload_free_and_unlocked() -> None:
         "owner_pending_demand_full",
         "owner_pending_demand_full",
     ]
-    assert all(r.schema_version == 8 for r in decisions)
+    assert all(r.schema_version == 10 for r in decisions)
     assert "private" not in repr(decisions)
     assert probes == [0, 0]
     counts = owner.snapshot().classes[0].outcomes

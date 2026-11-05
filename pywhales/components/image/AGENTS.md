@@ -60,11 +60,12 @@
 - Direct archives carry the preflight child reservation into `ArchiveDeadline`: release once at local reap,
   independently of payload-drain completion or generator exhaustion, or after failed setup leaves no owned child. Attempts stay
   consumed. A child-only scope retains ownership without a timed wait; lazy save reserves on first iteration.
+- Direct byte-input loads and lazy saves share enclosing `max_total_io_bytes` accounts with captured/stream output and managed stdin, including copied contexts and after scope exit. Charge actual caller reads and accepted upload writes atomically; exact EOF succeeds, output may read one detection byte, and source limits win ties. Cleanup drains and post-exit stderr accounting stay outside the total, preserving `NoSuchImage`. Filename payloads and direct caller stdin writes are excluded; see [the runtime guide](../../AGENTS.md#observation-and-subprocesses).
 - Path-based `load()` uses the general stream budget, not the pull/push override.
   Direct archive load/save subprocesses snapshot `raw_diagnostics` before launch for failure rendering;
   preserve archive payloads, exception classes, and raw attributes. Don't promise archive memory bounds.
 - Automatic missing-image reference diagnostics require `raw_diagnostics=True`; fallback behavior is unchanged.
-- Observation exceptions from `_prepare_archive_launch` preflight emit one schema-8 refusal in family `archive_load` or `archive_save`, before a child or upload read. Lazy save checks at first iteration with its policy-snapshotted observer; path-based load/save keep their existing shared-runtime families without duplicate records. Earlier validation stays outside refusal telemetry; see [the runtime guide](../../AGENTS.md#telemetry).
+- Observation exceptions from `_prepare_archive_launch` preflight emit one schema-10 refusal with a closed `stop_reason` in family `archive_load` or `archive_save`, before a child or upload read. Lazy save checks at first iteration with its policy-snapshotted observer; path-based load/save keep their existing shared-runtime families without duplicate records. Earlier validation stays outside refusal telemetry; see [the runtime guide](../../AGENTS.md#telemetry).
 
 ## Prune Deadline
 
@@ -86,5 +87,6 @@
   e.g. `test_push_inspect_preflight_is_outside_the_explicit_budget`). Static shapes: `tests/pywhales/test_command_deadline_types.py`.
 - `tests/pywhales/test_bounded_capture.py` and `test_telemetry_refusals.py` cover archive child-slot lifetimes,
   reap/drain independence, failed setup and saturation refusals with real local Python children, not Docker.
+- `test_bounded_capture.py` also covers aggregate I/O exact fits, detection bytes, partial uploads, retained scopes, source precedence, uncharged drains/stderr and contention across four execution families. `test_telemetry_stop_runtime.py` covers command/scope deadline reasons for both direct archive families.
 - Copy forwarding uses `test_copy_from_pull` and `test_copy_to_pull`; archive integration includes `test_save_load`
   and `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.

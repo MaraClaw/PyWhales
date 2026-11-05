@@ -476,3 +476,128 @@ def test_inventory_capture_is_never_charged_to_the_stream_budget() -> None:
 
     assert [item.id for item in snapshot.records] == ["x"]
     assert state.stream_accounts[0].consumed == 0
+
+
+def aggregate(limit: int | None, **bounds: int) -> InspectionPolicy:
+    return replace(BASE, max_total_io_bytes=limit, **bounds)
+
+
+def test_aggregate_total_allows_an_exact_total_across_captured_and_stream_output() -> (
+    None
+):
+    with observation(aggregate(8)) as state:
+        assert run([sys.executable, "-c", "import os; os.write(1,b'abcd')"]) == "abcd"
+        with stream_of("import os; os.write(2,b'efg\\n')") as stream:
+            assert list(stream) == [("stderr", b"efg\n")]
+
+    assert state.io_accounts[0].consumed == 8
+
+
+def test_aggregate_overflow_by_one_byte_stops_stream_capture_and_upload_alike() -> None:
+    raised: list[threading.ExceptHookArgs] = []
+    count = "import sys; sys.stdout.write(str(len(sys.stdin.buffer.read())))"
+    before = set(threading.enumerate())
+    with (
+        patch.object(threading, "excepthook", raised.append),
+        observation(aggregate(10, max_total_stdin_bytes=100)) as state,
+    ):
+        flood = stream_of(STALLED_FLOOD)
+        with flood, pytest.raises(ObservationLimitError) as first:
+            list(flood)
+        assert_reaped(flood)
+        assert list(flood) == []
+
+        # An overflowed account is never spent again, by any family.
+        with stream_of("print('z')") as later, pytest.raises(ObservationLimitError):
+            list(later)
+        assert_reaped(later)
+        with pytest.raises(ObservationLimitError) as captured:
+            run([sys.executable, "-c", "import os; os.write(1,b'x')"])
+        with pytest.raises(ObservationLimitError) as uploaded:
+            run([sys.executable, "-c", count], input=b"x")
+
+    for failure in (first, captured, uploaded):
+        assert (failure.value.reason, failure.value.limit, failure.value.measured) == (
+            "total_io",
+            10,
+            11,
+        )
+    assert state.io_accounts[0].consumed == 11
+    assert state.stdin_accounts[0].consumed == 0
+    assert raised == []
+    for thread in set(threading.enumerate()) - before:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    ("bounds", "reason"),
+    [
+        ({"max_response_bytes": 5}, "response"),
+        ({"max_total_response_bytes": 5}, "total_response"),
+    ],
+)
+def test_captured_source_limits_win_a_same_read_tie_with_the_aggregate(
+    bounds: dict[str, int], reason: str
+) -> None:
+    with (
+        observation(aggregate(5, **bounds)) as state,
+        pytest.raises(ObservationLimitError) as failure,
+    ):
+        run([sys.executable, "-c", "import os; os.write(1,b'x'*50)"])
+
+    assert failure.value.reason == reason
+    assert state.io_accounts[0].consumed == 6
+
+
+def test_stream_budget_wins_a_same_read_tie_with_the_aggregate() -> None:
+    with observation(aggregate(5, max_total_stream_bytes=5)) as state:
+        stream = stream_of(STALLED_FLOOD)
+    with stream, pytest.raises(ObservationLimitError) as failure:
+        list(stream)
+
+    assert (failure.value.reason, failure.value.limit) == ("total_stream", 5)
+    assert state.stream_accounts[0].consumed == state.io_accounts[0].consumed == 6
+    assert_reaped(stream)
+
+
+@pytest.mark.parametrize(("outer", "inner", "effective"), [(100, 5, 5), (10, 100, 10)])
+def test_nested_aggregate_scopes_charge_every_enclosing_account_and_never_widen(
+    outer: int, inner: int, effective: int
+) -> None:
+    with observation(aggregate(outer)), observation(aggregate(inner)) as scope:
+        stream = stream_of(STALLED_FLOOD)
+        with stream, pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+
+    assert (failure.value.limit, failure.value.measured) == (effective, effective + 1)
+    assert [account.consumed for account in scope.io_accounts] == [effective + 1] * 2
+
+
+def test_aggregate_only_scope_outlives_its_block_without_a_timer_or_direct_stdin() -> (
+    None
+):
+    code = "import os; os.write(1,b'ab\\n'); input(); os.write(1,b'cdefgh\\n')"
+    with observation(aggregate(4)) as state:
+        stream = stream_of(code, pipe_stdin=True)
+    try:
+        assert next(stream) == ("stdout", b"ab\n")
+        assert stream._observation is state
+        assert stream._wake_in() is None
+
+        # Writing the child's stdin directly is outside the managed contract.
+        assert stream.stdin is not None
+        stream.stdin.write(b"\n")
+        stream.stdin.flush()
+        with pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+
+        assert (failure.value.reason, failure.value.limit, failure.value.measured) == (
+            "total_io",
+            4,
+            5,
+        )
+        assert state.io_accounts[0].consumed == 5
+        assert_reaped(stream)
+    finally:
+        stream.close()

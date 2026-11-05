@@ -57,6 +57,7 @@ def _check_admission_generic_inference(
     assert_type(
         owner.snapshot().classes[0].outcomes.rejected_owner_pending_demand_full, int
     )
+    assert_type(owner.snapshot().classes[0].outcomes.rejected_owner_demand_full, int)
     assert_type(
         ClassLimit(1, 1, pending_demand_capacity=0).pending_demand_capacity, int | None
     )
@@ -76,6 +77,7 @@ def _check_decision_telemetry(
             {pressure: ClassLimit(1, 0)},
             telemetry_observer=observer,
             owner_pending_demand_capacity=0,
+            owner_demand_capacity=1,
         ),
         AdmissionOwner,
     )
@@ -85,16 +87,16 @@ def _check_decision_telemetry(
             assert_type(record.outcome, AdmissionOutcome)
             assert_type(record.duration_seconds, float)
             assert_type(record.phase, Literal["admission"])
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[10])
         case LaunchRecord():
             assert_type(record.admission_id, AdmissionId | None)
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[10])
         case CompletionRecord():
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[10])
         case RefusalRecord():
             assert_type(record.admission_id, AdmissionId | None)
             assert_type(record.outcome, RefusalOutcome)
-            assert_type(record.schema_version, Literal[8])
+            assert_type(record.schema_version, Literal[10])
         case unreachable:
             assert_never(unreachable)
 
@@ -117,5 +119,7 @@ def _check_pending_demand_outcome(record: AdmissionDecisionRecord) -> None:
             assert_type(record.outcome, Literal["pending_demand_full"])
         case "owner_pending_demand_full":
             assert_type(record.outcome, Literal["owner_pending_demand_full"])
+        case "owner_demand_full":
+            assert_type(record.outcome, Literal["owner_demand_full"])
         case unreachable:
             assert_never(unreachable)

@@ -1,5 +1,10 @@
 # Usage Validation
 
+## Contents
+
+- [Inspect the installed package first](#inspect-the-installed-package-first)
+- [Check the matching surface](#check-the-matching-surface)
+
 ## Inspect the Installed Package First
 
 Use the application's Python environment. This works outside a PyWhales
@@ -23,11 +28,12 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs for upcoming project version 1.1.6.
+The guidance describes source APIs for project version 1.1.7.
 An installed version string alone isn't proof of support. Check environment
 inheritance, node and standalone targets, completion/restart/failure keywords, strict workload
-errors, refusal/admission correlation records, class/owner queued-demand and
-launch-attempt/child-slot limits, startup health intervals and profile approvals,
+errors, schema-10 stop attribution and exporter counts, refusal/admission correlation,
+owner active and class/owner queued demand, shared IO and launch-attempt/child-slot
+limits, startup health intervals and profile approvals,
 optional manager leadership, prune deadlines, stdin policy fields, inventory kinds, and typed stream returns
 before copying their examples:
 
@@ -38,7 +44,12 @@ from inspect import signature
 from typing import get_args, get_overloads
 
 from pywhales import DockerClient, InspectionPolicy, docker
-from pywhales.admission import AdmissionOwner, ClassLimit, OutcomeCounts
+from pywhales.admission import (
+    AdmissionOwner,
+    ClassLimit,
+    OutcomeCounts,
+    RejectionReason,
+)
 from pywhales.client_config import ClientConfig
 from pywhales.convergence import (
     ComposeTarget,
@@ -58,9 +69,11 @@ from pywhales.reconciliation import ConvergenceSummary
 from pywhales.telemetry import (
     AdmissionDecisionRecord,
     AdmissionOutcome,
+    BoundedExporter,
     CompletionRecord,
     LaunchRecord,
     RefusalRecord,
+    StopReason,
 )
 
 print(signature(capture_compose, annotation_format=Format.STRING))
@@ -70,10 +83,11 @@ print(signature(wait_for_convergence, annotation_format=Format.STRING))
 print([f.name for f in fields(ContainerTarget)])
 print([f.name for f in fields(NodeTarget)])  # includes require_leader
 print({f.name: f.default for f in fields(NodeTarget)}["require_leader"])  # False
-print(signature(InspectionPolicy))  # launch attempts and max_concurrent_children
+print(signature(InspectionPolicy))  # includes max_total_io_bytes=None
 print(signature(ClassLimit))  # pending_demand_capacity: int | None = None
-print([f.name for f in fields(OutcomeCounts)])  # rejected_pending_demand_full
-print(get_args(AdmissionOutcome.__value__))  # both pending_demand_full outcomes
+print([f.name for f in fields(OutcomeCounts)])  # includes rejected_owner_demand_full
+print(RejectionReason.OWNER_DEMAND_FULL.value)  # owner_demand_full
+print(get_args(AdmissionOutcome.__value__))  # includes owner_demand_full
 print({f.name: f.default for f in fields(ComposeTarget)}["max_restarts"])
 print({f.name: f.default for f in fields(ComposeTarget)}["fail_on_exit"])  # False
 print({f.name: f.default for f in fields(ContainerTarget)}["fail_on_exit"])  # False
@@ -101,10 +115,16 @@ print(signature(DockerClient).parameters["inherit_environment"])  # bool = True
 print({f.name: f.default for f in fields(ClientConfig)}["inherit_environment"])
 print(signature(DockerClient).parameters["strict_workload_errors"])  # bool = False
 print({f.name: f.default for f in fields(ClientConfig)}["strict_workload_errors"])
-print(signature(AdmissionOwner, annotation_format=Format.STRING))  # owner queue cap
+print(signature(AdmissionOwner, annotation_format=Format.STRING))  # both owner caps
 print([f.name for f in fields(AdmissionDecisionRecord)])
 print([f.name for f in fields(LaunchRecord)])  # includes admission_id
 print([f.name for f in fields(RefusalRecord)])  # no execution measurements
+print(get_args(StopReason.__value__))  # closed reasons, including total_io
+for record_type in (CompletionRecord, RefusalRecord):
+    print(signature(record_type).parameters["stop_reason"])  # None, keyword-only
+    print(next(f.kw_only for f in fields(record_type) if f.name == "stop_reason"))
+print(signature(BoundedExporter))
+print(BoundedExporter.stop_reason_counts.fset is None)  # read-only property
 for record_type in (
     AdmissionDecisionRecord,
     LaunchRecord,
@@ -114,7 +134,7 @@ for record_type in (
     print(
         record_type.__name__,
         {f.name: f.default for f in fields(record_type)}["schema_version"],
-    )
+    )  # schema_version must be 10 for all four record types
 print(get_annotations(ServiceTarget, format=Format.STRING)["mode"])  # job modes?
 
 methods = [
@@ -164,6 +184,15 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   failed spawn consumes an attempt but returns the slot. Buffered reaped output
   doesn't retain a slot. Lazy save reserves on first iteration, with separately
   charged eager inspect.
+- `max_total_io_bytes: int | None = None` on `InspectionPolicy`: a positive exact
+  integer adds a shared total across captured/stream/archive caller reads and
+  managed stdin accepted writes, atomically across nested and copied scopes.
+  It keeps source-specific limits, permits one output detection byte, accepts
+  exact EOF and stops further spending after overflow. It excludes archive
+  cleanup drains, post-exit classification stderr, direct stream stdin and
+  filename-transferred archive contents. Captured input still needs an explicit
+  stdin cap. Check matching documentation as well as the field; see
+  [Sharing one IO budget](observation-and-convergence.md#sharing-one-io-budget).
 - `pending_demand_capacity: int | None = None` on `ClassLimit`: nonnegative exact
   integers bound queued demand only; zero still permits immediate grants.
   `OutcomeCounts.rejected_pending_demand_full` and `AdmissionOutcome`'s
@@ -174,6 +203,14 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   class-local and earlier class rejection checks take precedence. Check
   `OutcomeCounts.rejected_owner_pending_demand_full` and
   `AdmissionOutcome`'s `owner_pending_demand_full` too.
+- Keyword-only `owner_demand_capacity: int | None = None` on `AdmissionOwner`:
+  positive exact integers cap active demand across classes on fast/queued grants
+  and resize growth; impossible initial demand raises `ValueError`. Exact fits
+  succeed, and enabled growth yields to any class's pending work. Confirm
+  `RejectionReason.OWNER_DEMAND_FULL`, `OutcomeCounts.rejected_owner_demand_full`
+  and the `AdmissionOutcome` value `owner_demand_full`, separately from the
+  queue-only bounds and their outcomes. Streams retain active demand through
+  cleanup and in-flight reads.
 - `max_total_stdin_bytes: int | None = None` on `InspectionPolicy`: a positive
   value enables bounded captured input and accounts archive uploads separately
   from response and stream output. `None` does not enable uncapped observed input.
@@ -206,12 +243,21 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
 - Keyword-only `telemetry_observer` on `AdmissionOwner`, plus
   `AdmissionDecisionRecord`, `AdmissionId`, and `AdmissionOutcome` exports from
   `pywhales.telemetry`. Inspect the record fields and `TelemetryRecord` union;
-  schema-8 records include `owner_pending_demand_full` in the extended admission
+  schema-10 records include `owner_demand_full` in the extended admission
   outcome vocabulary. Launch and refusal records have `admission_id`, while completion records join by
   `attempt_id`. `RefusalRecord` has `phase="refusal"` and only `cancelled`,
   `timeout`, or `limit` outcomes, without duration, byte counts or return code.
   Configure both owner and client observers for correlation, not
   just the client's launch observer. See [Telemetry and admission](telemetry-and-admission.md#measure-admission-waits-and-correlate-launches).
+- Keyword-only `stop_reason: StopReason | None = None` on both `CompletionRecord`
+  and `RefusalRecord`, with `StopReason` exported by `pywhales.telemetry` and
+  schema version 10 on all four record types. Closed reasons distinguish command
+  and scope timeouts, cancellation and known limits (including `total_io`);
+  unknown limit text maps to `other_limit`. The selected reason survives cleanup
+  and close, and ordinary failures, success and unstopped close use `None`.
+  `BoundedExporter.stop_reason_counts` must accompany this: immutable detached
+  fixed-key snapshots count every reason-bearing completion/refusal offer,
+  including overflow, shutdown and repeated offers, without flush recounting.
 - A keyword-only `timeout: float | None = None` on Compose `build` and `execute`,
   and on `container.wait`, whose overloads return `int` for one reference and
   `list[int]` for an iterable.
@@ -249,6 +295,37 @@ behavior merely because `envs` exists: check its installed help and matching
 package documentation too. The empty-pull example in
 [Registry transfers and archives](registry-and-archives.md#pull-and-push) checks
 context management without locating or launching Docker.
+
+To check exporter counts without launching anything, offer a synthetic public
+record to an in-memory sink. This probes the installed counter API; it doesn't
+establish runtime stop selection or engine behavior:
+
+```python
+from typing import get_args
+
+from pywhales.telemetry import BoundedExporter, RefusalRecord, StopReason
+
+exporter = BoundedExporter(lambda record: None, capacity=1, drop_policy="drop_newest")
+before = exporter.stop_reason_counts
+assert set(before) == set(get_args(StopReason.__value__))
+assert all(count == 0 for count in before.values())
+record = RefusalRecord(
+    "captured", "limit", attempt_id="local-probe", stop_reason="total_io"
+)
+try:
+    exporter(record)
+    exporter(record)  # overflow counts the repeated offer too
+    assert exporter.stop_reason_counts["total_io"] == 2
+    assert exporter.dropped == 1
+    assert exporter.flush() == 1
+    assert exporter.stop_reason_counts["total_io"] == 2  # no recount
+finally:
+    exporter.shutdown(flush=False)
+exporter(record)  # post-shutdown offer is counted and dropped
+assert exporter.stop_reason_counts["total_io"] == 3
+assert exporter.dropped == 2
+assert before["total_io"] == 0  # detached immutable snapshot
+```
 
 ## Check the Matching Surface
 

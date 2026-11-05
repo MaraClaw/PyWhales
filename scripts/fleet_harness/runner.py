@@ -19,6 +19,7 @@ from .models import (
     load_deadline,
     metrics_for,
     resource_reasons,
+    schedule_version,
 )
 from .records import (
     Binding,
@@ -133,9 +134,7 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
         0,
         (),
         Schedule(
-            version=2
-            if any(s.queue_retry_backoff_seconds is not None for s in plan.steps)
-            else 1,
+            version=schedule_version(plan.steps),
             peaks=Peaks(active=0, queued=0),
             receipts=(),
         )
@@ -163,7 +162,12 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
     if plan.scheduled:
         keys.add("arrival_seconds")
     keys.update(
-        {"queue_lease_seconds", "max_queue_attempts", "queue_retry_backoff_seconds"}
+        {
+            "queue_lease_seconds",
+            "max_queue_attempts",
+            "queue_retry_backoff_seconds",
+            "queue_retry_exponential",
+        }
     )
     operations = [step.model_dump(include=keys) for step in plan.steps]
     operation_digest = (

@@ -11,6 +11,7 @@ from ._records import (
     Outcome,
     RefusalOutcome,
     RefusalRecord,
+    StopReason,
     TelemetryObserver,
     TelemetryRecord,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "Outcome",
     "RefusalOutcome",
     "RefusalRecord",
+    "StopReason",
     "TelemetryObserver",
     "TelemetryRecord",
 ]
