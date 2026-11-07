@@ -11,9 +11,10 @@ import shutil
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, override
 
 import pydantic
@@ -361,8 +362,12 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
 
     Resolve mutable references once, then inspect using the stored immutable
     identity. Snapshot access can run the CLI when data is absent or at least
-    CACHE_VALIDITY_PERIOD seconds old. Equality includes config equality as
-    well as identity, rather than comparing display names alone.
+    CACHE_VALIDITY_PERIOD seconds old on a monotonic clock. A hydrated listing
+    pins its snapshots instead: a pinned snapshot never expires by age and
+    ends at `reload()` or when a mutating call releases it. Copying or
+    unpickling a handle keeps its snapshot but drops freshness and the pin.
+    Equality includes config equality as well as identity, rather than
+    comparing display names alone.
     """
 
     def __init__(
@@ -388,6 +393,8 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
         """
         super().__init__(client_config)
         self._last_refreshed_time = datetime.min
+        self._refreshed_at: float | None = None
+        self._pinned = False
         self._inspect_result: InspectResultT | None = None
         self._id_in_inspect = id_in_inspect
         if is_immutable_id:
@@ -427,11 +434,30 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
             raise TypeError("__str__ returned non-string (type NoneType)")
         return reference
 
+    def __setstate__(self, state: dict[str, object]) -> None:
+        """Restore a copied or unpickled handle with its freshness and pin reset.
+
+        Monotonic readings are meaningless outside the process that took them,
+        so the snapshot is kept but counts as expired until the next read.
+
+        Args:
+            state: Instance attributes captured by copying or pickling.
+        """
+        self.__dict__.update(state)
+        self._last_refreshed_time = datetime.min
+        self._refreshed_at = None
+        self._pinned = False
+
     def _needs_reload(self) -> bool:
-        """Return whether the cached snapshot's validity period has elapsed."""
-        return (datetime.now() - self._last_refreshed_time) >= timedelta(
-            seconds=CACHE_VALIDITY_PERIOD
-        )
+        """Return whether the snapshot is absent, aged out, or from the future.
+
+        The age comes from a monotonic clock and is compared with the current
+        `CACHE_VALIDITY_PERIOD`. A negative age counts as expired.
+        """
+        if self._refreshed_at is None:
+            return True
+        age = monotonic() - self._refreshed_at
+        return age < 0 or age >= CACHE_VALIDITY_PERIOD
 
     def reload(self) -> None:
         """Inspect the stored identity and replace the cached snapshot now.
@@ -466,19 +492,45 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
         raise NotImplementedError
 
     def _get_inspect_result(self) -> InspectResultT:
-        """Return cached data, fetching when it is absent or expired."""
-        if self._inspect_result is None or self._needs_reload():
+        """Return cached data, fetching when it is absent or expired.
+
+        A pinned snapshot is returned without consulting its age.
+        """
+        if self._inspect_result is None or (not self._pinned and self._needs_reload()):
             return self._reload()
         return self._inspect_result
 
     def _set_inspect_result(self, inspect_result: InspectResultT) -> None:
-        """Install a snapshot and mark its refresh time as now.
+        """Install an unpinned snapshot and mark its refresh time as now.
+
+        Publication through this setter, including `reload()` and bulk reload,
+        also ends any pin; only `_set_pinned_inspect_result` pins.
 
         Args:
             inspect_result: Already parsed snapshot to publish without fetching.
         """
         self._inspect_result = inspect_result
         self._last_refreshed_time = datetime.now()
+        self._refreshed_at = monotonic()
+        self._pinned = False
+
+    def _set_pinned_inspect_result(self, inspect_result: InspectResultT) -> None:
+        """Install a snapshot that stays current until reloaded or released.
+
+        Args:
+            inspect_result: Already parsed snapshot to publish without fetching.
+        """
+        self._set_inspect_result(inspect_result)
+        self._pinned = True
+
+    def _release_pin(self) -> None:
+        """Expire a pinned snapshot so the next read inspects again.
+
+        An unpinned handle keeps its ordinary age-based expiry untouched.
+        """
+        if self._pinned:
+            self._pinned = False
+            self._refreshed_at = None
 
     def _get_immutable_id(self) -> ReferenceT:
         """Return the stored identity without triggering snapshot refresh."""
