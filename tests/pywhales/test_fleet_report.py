@@ -335,7 +335,7 @@ def test_unlaunched_submission_when_exported_is_counted_once(
     } & set(report.flags)
 
 
-@pytest.mark.parametrize("backoff", [None, 1.0, "exponential"])
+@pytest.mark.parametrize("backoff", [None, 1.0, "exponential", "jitter"])
 def test_retry_export_counts_logical_submissions_and_queue_samples_once(
     backoff: float | str | None,
 ) -> None:
@@ -351,8 +351,16 @@ def test_retry_export_counts_logical_submissions_and_queue_samples_once(
                 queue_retry_backoff_seconds=backoff
                 if isinstance(backoff, float)
                 else None,
-                queue_retry_exponential={"initial_seconds": 1.0, "max_seconds": 2.0}
-                if backoff == "exponential"
+                queue_retry_exponential={
+                    "initial_seconds": 1.0,
+                    "max_seconds": 2.0,
+                    **(
+                        {"jitter": {"seed": 7, "fraction": 0.25}}
+                        if backoff == "jitter"
+                        else {}
+                    ),
+                }
+                if backoff in ("exponential", "jitter")
                 else None,
             ),
         ),
@@ -360,9 +368,13 @@ def test_retry_export_counts_logical_submissions_and_queue_samples_once(
     result = export_result(simulation, declaration)
     queue = next(item for item in result.latency if item.boundary == "queue_wait")
     assert result.populations.all_submissions == result.outcomes.accounted == 2
+    expected = 1.5 if backoff is None else 2.0
+    if backoff == "jitter":
+        # Independently recorded SHA-256 unit for (seed=7, submission=2, attempt=1).
+        expected = 1.0 + 1.0 * (1 - 0.25 * 0.30873262866772744)
     assert [(sample.submission, sample.seconds) for sample in queue.samples] == [
         (1, 0.0),
-        (2, 1.5 if backoff is None else 2.0),
+        (2, expected),
     ]
     assert result.populations.launched_cli == 2
 

@@ -241,7 +241,7 @@ class Simulation:
             submission.queued = False
             submission.pending_retry = True
             eligibility = self.driver.now + submission.step.retry_delay(
-                len(submission.attempts)
+                len(submission.attempts), submission.number
             )
             self.push(
                 min(submission.deadline, eligibility),

@@ -305,7 +305,9 @@ def lineage(receipt: Receipt, step: Step, deadline: float) -> bool:
     pending = backoffs is not None and len(backoffs) == len(spans)
     if backoffs is not None:
         for index, span in enumerate(backoffs):
-            eligibility = span.started_seconds + step.retry_delay(index + 1)
+            eligibility = span.started_seconds + step.retry_delay(
+                index + 1, receipt.submission
+            )
             if (
                 span.started_seconds >= deadline
                 or index + 1 >= (step.max_queue_attempts or 1)

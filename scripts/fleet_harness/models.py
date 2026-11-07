@@ -1,7 +1,9 @@
 """Strict simulation inputs and resolved contributor declarations."""
 
+import hashlib
+import struct
 from collections.abc import Sequence
-from typing import Final, Literal, Self, assert_never
+from typing import Annotated, Final, Literal, Self, assert_never
 
 from pydantic import Field, model_validator
 from pydantic_core import PydanticCustomError
@@ -47,11 +49,32 @@ class RunnableManifest(Contract):
         return self
 
 
+class RetryJitter(Contract):
+    """Seeded downward spread of a capped delay; the same inputs give the same delay.
+
+    The unit value `u` in `[0, 1)` is the top 53 bits of SHA-256 over the
+    big-endian unsigned 64-bit `seed`, `submission` and `attempt`, so it is
+    identical in every process and never depends on `hash()` or `random`.
+    """
+
+    seed: Annotated[int, Field(ge=0, lt=2**63)]
+    fraction: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)]
+
+    def apply(self, capped: float, submission: int, attempt: int) -> float:
+        """Return `capped * (1 - fraction * u)`, or `capped` if that rounds to zero."""
+        digest = hashlib.sha256(
+            struct.pack(">QQQ", self.seed, submission, attempt)
+        ).digest()
+        unit = (int.from_bytes(digest[:8], "big") >> 11) / 2**53
+        return capped * (1 - self.fraction * unit) or capped
+
+
 class QueueRetryExponential(Contract):
     """Capped doubling delay after each expired queue attempt, in fake-clock seconds."""
 
     initial_seconds: Positive
     max_seconds: Positive
+    jitter: RetryJitter | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def capped(self) -> Self:
@@ -60,18 +83,23 @@ class QueueRetryExponential(Contract):
             raise PydanticCustomError("exponential_cap", "exponential_cap")
         return self
 
-    def delay(self, attempt: int) -> float:
+    def delay(self, attempt: int, submission: int = 1) -> float:
         """Return `min(max, initial * 2**(attempt - 1))` by capped doubling.
 
         The cap is reached within a few thousand doublings of any finite float,
-        so a large `attempt` neither loops long nor overflows.
+        so a large `attempt` neither loops long nor overflows. Declared jitter
+        then lowers the capped delay for this `submission`; the delay never
+        exceeds `max_seconds`, and `submission` is ignored without jitter.
         """
         delay = self.initial_seconds
         for _ in range(attempt - 1):
             if delay >= self.max_seconds - delay:
-                return self.max_seconds
+                delay = self.max_seconds
+                break
             delay *= 2
-        return delay
+        if self.jitter is None:
+            return delay
+        return self.jitter.apply(delay, submission, attempt)
 
 
 class Step(Contract):
@@ -152,10 +180,13 @@ class Step(Contract):
             or self.queue_retry_exponential is not None
         )
 
-    def retry_delay(self, attempt: int) -> float:
-        """Return the wait after queued attempt number `attempt` expires; zero if immediate."""
+    def retry_delay(self, attempt: int, submission: int) -> float:
+        """Return the wait after queued attempt `attempt` of `submission` expires.
+
+        Zero if immediate. Only seeded exponential jitter reads `submission`.
+        """
         if self.queue_retry_exponential is not None:
-            return self.queue_retry_exponential.delay(attempt)
+            return self.queue_retry_exponential.delay(attempt, submission)
         return self.queue_retry_backoff_seconds or 0.0
 
 
@@ -246,8 +277,14 @@ class Plan(Contract):
         return bool(self.offsets)
 
 
-def schedule_version(steps: Sequence[Step]) -> Literal[1, 2, 3]:
+def schedule_version(steps: Sequence[Step]) -> Literal[1, 2, 3, 4]:
     """Return the local schedule version a plan's retry policies require."""
+    if any(
+        step.queue_retry_exponential is not None
+        and step.queue_retry_exponential.jitter is not None
+        for step in steps
+    ):
+        return 4
     if any(step.queue_retry_exponential is not None for step in steps):
         return 3
     if any(step.queue_retry_backoff_seconds is not None for step in steps):
