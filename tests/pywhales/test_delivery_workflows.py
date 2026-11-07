@@ -7,6 +7,7 @@ dispatches, deploys, runs Docker or contacts a production service.
 import base64
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from scripts.delivery import api as http
 from scripts.delivery import archives, artifacts, budgets, limits, publication
 from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
 from scripts.delivery.artifacts import describe, download, inventory, sha256
-from scripts.delivery.chain import name, producer, receipt, seal
+from scripts.delivery.chain import name, producer, project_version, receipt, seal
 from scripts.delivery.distributions import inspect, smoke
 from scripts.delivery.models import (
     Artifact,
@@ -496,6 +497,7 @@ def test_rejects_incomplete_same_attempt_checks(service: Service, fault: str) ->
 
 
 ARM_CHECK = "Compose and Buildx ARM64 smoke tests"
+NOTES_CHECK = "Validate release notes"
 WORKFLOW = ROOT / ".github" / "workflows" / "python-package.yml"
 MODERN_COMMAND = (
     "uv run --locked pytest -vv -rs --no-runtime-skip --durations=10 "
@@ -513,6 +515,7 @@ EXPECTED_CHECKS = frozenset(
         ARM_CHECK,
         "build-windows",
         "Build tested distributions",
+        NOTES_CHECK,
         *(
             f"build-linux-test-component ({component})"
             for component in (
@@ -624,6 +627,25 @@ def test_native_arm64_smoke_job_is_required_and_runs_the_modern_suite() -> None:
     assert {"build-linux-test-modern", "build-linux-test-modern-arm64"} <= jobs[
         "delivery-eligible"
     ].needs
+
+
+def test_release_notes_job_is_a_dedicated_required_check() -> None:
+    jobs = workflow_jobs()
+    job, neighbor = jobs["release-notes"], jobs["build-distributions"]
+    triggers = WORKFLOW.read_text().split("\njobs:\n", 1)[0]
+
+    assert job.names == {NOTES_CHECK}
+    assert re.search(rf"(?m)^    name: {re.escape(NOTES_CHECK)}$", job.text)
+    assert {"if", "needs", "strategy", "continue-on-error", "container"}.isdisjoint(
+        job.keys
+    )
+    assert "uv run --locked python -m scripts.delivery notes" in job.command
+    assert set(matches(r"uses: (\S+)", job.text)) <= set(
+        matches(r"uses: (\S+)", neighbor.text)
+    )
+    assert "release-notes" in jobs["delivery-eligible"].needs
+    assert "  pull_request: {}" in triggers
+    assert "  push:\n    branches:\n      - main" in triggers
 
 
 def arm_faults(jobs: tuple[Job, ...], fault: str) -> tuple[Job, ...]:
@@ -1411,6 +1433,90 @@ def test_archive_paths_never_escape_or_supply_executable_checkout(
         download(service.api, artifact)
 
 
+def github_free_environment() -> dict[str, str]:
+    kept = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GITHUB_", "GH_"))
+    }
+    return kept | {"PYTHONPATH": str(ROOT)}
+
+
+@pytest.mark.parametrize(
+    ("changelog", "code", "message"),
+    [
+        (entry("```md\n## 0.6.1\n```\n\n- Example."), 0, ""),
+        ("## 0.6.1\n\n```\n- Body.\n", 1, "release notes fence unclosed"),
+        ("## 0.6.0\n\n- Earlier release.\n", 1, "release notes section missing"),
+    ],
+    ids=["valid", "unclosed", "missing"],
+)
+def test_notes_operation_needs_no_github_environment(
+    tmp_path: Path, changelog: str, code: int, message: str
+) -> None:
+    checkout(tmp_path, changelog)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.delivery", "notes"],
+        cwd=tmp_path,
+        env=github_free_environment(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == code, result.stderr
+    assert result.stdout == ""
+    assert result.stderr.strip() == (f"delivery rejected: {message}" if message else "")
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ("", ""),
+        ("size", "input byte budget exceeded"),
+        ("encoding", "changelog is not UTF-8"),
+    ],
+)
+def test_notes_operation_keeps_the_seal_input_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+    message: str,
+) -> None:
+    def no_github() -> Transport:
+        raise AssertionError("notes must not reach GitHub")
+
+    monkeypatch.setattr(cli, "Curl", no_github)
+    monkeypatch.chdir(tmp_path)
+    for key in ("GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    checkout(
+        tmp_path, b"## 0.6.1\n\n- Caf\xe9.\n" if fault == "encoding" else CHANGELOG
+    )
+    if fault == "size":
+        monkeypatch.setattr(limits, "CHANGELOG_BYTES", len(CHANGELOG.encode()) - 1)
+    assert invoke(monkeypatch, "notes") == (1 if fault else 0)
+    assert message in capsys.readouterr().err
+
+
+def test_seal_and_notes_share_the_project_version_reader(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkout(tmp_path)
+    assert project_version(tmp_path) == "0.6.1"
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match="project version missing"):
+        seal(service.api, 100, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert invoke(monkeypatch, "notes") == 1
+    assert "delivery rejected: project version missing" in capsys.readouterr().err
+
+
 def test_real_module_cli_help_and_invalid_input() -> None:
     for arguments, expected in (
         (["--help"], 0),
@@ -1426,6 +1532,8 @@ def test_real_module_cli_help_and_invalid_input() -> None:
             check=False,
         )
         assert result.returncode == expected, result.stderr
+        if arguments == ["--help"]:
+            assert "notes" in result.stdout
 
 
 def test_file_hashes_reject_repacked_tampering_with_valid_archive_digest(

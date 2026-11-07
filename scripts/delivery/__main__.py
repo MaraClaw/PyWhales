@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from .api import Curl, GitHub, Rejected, require
 from .artifacts import extract, inventory, select, verified
-from .chain import name, receipt, seal
+from .chain import name, project_version, receipt, release_notes, seal
 from .distributions import smoke
 from .models import Run
 from .pages import verify_pages_tar
@@ -28,6 +28,7 @@ def parser() -> argparse.ArgumentParser:
         "operation",
         choices=(
             "smoke",
+            "notes",
             "seal",
             "prepare",
             "confirm",
@@ -48,6 +49,9 @@ def main() -> int:
     try:
         if arguments.operation == "smoke":
             smoke(Path.cwd())
+            return 0
+        if arguments.operation == "notes":
+            release_notes(Path.cwd(), project_version(Path.cwd()))
             return 0
         if arguments.operation == "verify-pages":
             require(isinstance(arguments.archive, Path), "Pages archive required")

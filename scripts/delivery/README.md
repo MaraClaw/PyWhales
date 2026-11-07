@@ -26,8 +26,14 @@ release or deployment operations locally against the production repository.
    section runs to the next level-2 heading or the end of the file, keeps its
    `###` subheadings, and excludes the heading and surrounding blank lines. Line
    endings are folded to LF. The file is decoded as strict UTF-8, and a missing,
-   empty or duplicated section fails the seal. Code fences are not tracked, so
-   a line starting with `## ` inside a fence ends the section.
+   empty or duplicated section fails the seal. Lines inside top-level fenced code
+   blocks (CommonMark: 0-3 spaces of indent, three or more backticks or tildes,
+   a closer of the same character and at least the same length) are never
+   headings, duplicates or section ends; the fence scan starts at the first
+   line of the file, and an unclosed fence anywhere fails with its own reason.
+   Fences nested in lists or block quotes are not parsed. The same check runs
+   without GitHub access as `python -m scripts.delivery notes`, which the
+   `Validate release notes` job runs on every pull request and push.
 3. `python-publish.yml` runs from the trusted default-branch workflow revision.
    It revalidates the successful same-repository `push` to `main`, workflow ID,
    attempt endpoint and full job set, and queries authoritative associated PRs
@@ -147,7 +153,7 @@ workflows produce, with headroom:
 
 | Endpoint | Item cap | Requests allowed | Rationale |
 | --- | ---: | ---: | --- |
-| Attempt jobs | 200 | 3 | One producer attempt has 24 jobs (seven fixed checks, the 16-entry component matrix, the seal); the publisher has one. |
+| Attempt jobs | 200 | 3 | One producer attempt has 26 jobs (nine fixed checks, the 16-entry component matrix, the seal); the publisher has one. |
 | Run artifacts | 100 | 2 | Run-scoped across attempts; a producer attempt uploads three and a publisher attempt one, so over 30 full reruns fit. |
 | Releases | 500 | 6 | One release per published version, scanned for an authenticated draft. |
 | Commit pulls | 100 | 2 | A merged-main commit is associated with one merging pull request and rarely more. |
