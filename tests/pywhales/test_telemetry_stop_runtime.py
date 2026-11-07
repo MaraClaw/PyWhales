@@ -7,9 +7,20 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales._observation import observation
-from pywhales.exceptions import DockerTimeout, ObservationLimitError, ObservationTimeout
+from pywhales.exceptions import (
+    DockerTimeout,
+    ObservationLimitError,
+    ObservationTimeout,
+    StreamBufferLimitError,
+)
 from pywhales.inventory import InspectionPolicy
-from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry import (
+    BoundedExporter,
+    CompletionRecord,
+    LaunchRecord,
+    StopReason,
+    TelemetryRecord,
+)
 from pywhales.utils import run, stream_stdout_and_stderr
 
 
@@ -107,3 +118,38 @@ def test_stream_keeps_stop_reason_after_terminal_state_is_cleared(
         assert all(not thread.is_alive() for thread in stream._threads)
     finally:
         stream.close()
+
+
+@pytest.mark.parametrize(
+    ("write", "reason"),
+    [
+        ("os.write(1, b'overflow\\n')", "buffer_output_record"),
+        ("os.write(2, b'a\\nb\\nc\\n')", "buffer_stderr_history"),
+    ],
+)
+def test_real_stream_buffer_overflow_is_counted_under_its_own_reason(
+    write: str, reason: StopReason
+) -> None:
+    exporter = BoundedExporter(
+        lambda record: None, capacity=4, drop_policy="drop_newest"
+    )
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            f"import os,threading; {write}; threading.Event().wait()",
+        ],
+        telemetry_observer=exporter,
+    )
+    stream = stream_stdout_and_stderr(client.docker_cmd, buffer_bytes=4)
+    try:
+        assert stream._released.wait(3)
+        with pytest.raises(StreamBufferLimitError):
+            next(stream)
+        stream.close()
+    finally:
+        stream.close()
+
+    counts = exporter.stop_reason_counts
+    assert counts[reason] == 1 and sum(counts.values()) == 1
+    exporter.shutdown(flush=False)

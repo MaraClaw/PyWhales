@@ -31,6 +31,8 @@ type StopReason = Literal[
     "total_references",
     "total_launch_attempts",
     "concurrent_children",
+    "buffer_output_record",
+    "buffer_stderr_history",
     "other_limit",
 ]
 STOP_REASONS: Final[tuple[StopReason, ...]] = (
@@ -53,6 +55,8 @@ STOP_REASONS: Final[tuple[StopReason, ...]] = (
     "total_references",
     "total_launch_attempts",
     "concurrent_children",
+    "buffer_output_record",
+    "buffer_stderr_history",
     "other_limit",
 )
 AdmissionId = NewType("AdmissionId", str)
@@ -78,14 +82,14 @@ class AdmissionDecisionRecord:
         admission_id: Opaque identifier shared with admitted launch records.
         outcome: Closed admission result, independent of subsequent work success.
         duration_seconds: Nonnegative monotonic seconds from activation to decision.
-        schema_version: Record schema version, currently 10.
+        schema_version: Record schema version, currently 11.
         phase: Fixed admission decision discriminator.
     """
 
     admission_id: AdmissionId
     outcome: AdmissionOutcome
     duration_seconds: float
-    schema_version: Literal[10] = field(default=10, init=False)
+    schema_version: Literal[11] = field(default=11, init=False)
     phase: Literal["admission"] = field(default="admission", init=False)
 
 
@@ -97,14 +101,14 @@ class LaunchRecord:
         family: Fixed execution family, never inferred from command arguments.
         attempt_id: Opaque identifier shared with the completion record.
         admission_id: Innermost admitted request, or None outside observed admission.
-        schema_version: Record schema version, currently 10.
+        schema_version: Record schema version, currently 11.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
     attempt_id: str = field(kw_only=True)
     admission_id: AdmissionId | None = field(default=None, kw_only=True)
-    schema_version: Literal[10] = field(default=10, init=False)
+    schema_version: Literal[11] = field(default=11, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -127,7 +131,7 @@ class CompletionRecord:
         return_code: Reaped local process status, or None if unavailable.
         stop_reason: Closed boundary that ended a timeout, cancelled or limit
             completion, or None for every other outcome. Never exception text.
-        schema_version: Record schema version, currently 10.
+        schema_version: Record schema version, currently 11.
         phase: Fixed completion discriminator.
     """
 
@@ -140,7 +144,7 @@ class CompletionRecord:
     return_code: int | None = field(default=None, kw_only=True)
     stdin_bytes: int | None = field(default=None, kw_only=True)
     stop_reason: StopReason | None = field(default=None, kw_only=True)
-    schema_version: Literal[10] = field(default=10, init=False)
+    schema_version: Literal[11] = field(default=11, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 
@@ -155,7 +159,7 @@ class RefusalRecord:
         admission_id: Innermost observed admission, or None.
         stop_reason: Closed boundary that refused the launch, or None. Never
             exception text.
-        schema_version: Record schema version, currently 10.
+        schema_version: Record schema version, currently 11.
         phase: Fixed refusal discriminator.
     """
 
@@ -164,7 +168,7 @@ class RefusalRecord:
     attempt_id: str = field(kw_only=True)
     admission_id: AdmissionId | None = field(default=None, kw_only=True)
     stop_reason: StopReason | None = field(default=None, kw_only=True)
-    schema_version: Literal[10] = field(default=10, init=False)
+    schema_version: Literal[11] = field(default=11, init=False)
     phase: Literal["refusal"] = field(default="refusal", init=False)
 
 

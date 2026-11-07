@@ -16,6 +16,7 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferLimitError,
 )
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry import (
@@ -40,7 +41,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
-    assert records[0].schema_version == completed.schema_version == 10
+    assert records[0].schema_version == completed.schema_version == 11
     assert completed.attempt_id == records[0].attempt_id
     assert completed.stdin_bytes is None
     return completed
@@ -135,11 +136,72 @@ def test_close_keeps_recorded_buffer_failure_and_measured_read_count() -> None:
 
     stream.close()
 
-    with pytest.raises(BufferError):
+    with pytest.raises(StreamBufferLimitError) as failure:
         next(stream)
+    assert failure.value.category == "output_record"
     completed = completion(records)
-    assert (completed.outcome, completed.stdout_bytes) == ("failure", 10)
+    assert (completed.outcome, completed.stdout_bytes) == ("limit", 10)
+    assert completed.stop_reason == "buffer_output_record"
     assert completed.return_code == stream._process.returncode
+
+
+@pytest.mark.parametrize(
+    ("code", "category", "reason"),
+    [
+        (
+            "import os; os.write(1, b'oversized\\n'); input()",
+            "output_record",
+            "buffer_output_record",
+        ),
+        (
+            "import os; os.write(2, b'a\\nb\\nc\\nd\\n'); input()",
+            "stderr_history",
+            "buffer_stderr_history",
+        ),
+    ],
+)
+@pytest.mark.parametrize("close_first", [False, True])
+def test_real_buffer_overflow_reports_its_own_limit_reason(
+    code: str, category: str, reason: str, close_first: bool
+) -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, code), pipe_stdin=True, buffer_bytes=4
+    )
+    try:
+        assert stream._released.wait(timeout=3)
+        if close_first:
+            stream.close()
+
+        with pytest.raises(BufferError) as failure:
+            list(stream)
+
+        assert isinstance(failure.value, StreamBufferLimitError)
+        assert failure.value.category == category
+        completed = completion(records)
+        assert (completed.outcome, completed.stop_reason) == ("limit", reason)
+        assert completed.return_code == stream._process.returncode
+    finally:
+        stream.close()
+
+
+def test_builtin_buffer_error_stays_an_ordinary_stream_failure() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+    try:
+        with stream._queue.condition:
+            stream._error = BufferError()
+            stream._stop.set()
+            stream._queue.close()
+
+        with pytest.raises(BufferError) as failure:
+            next(stream)
+
+        assert not isinstance(failure.value, StreamBufferLimitError)
+        completed = completion(records)
+        assert (completed.outcome, completed.stop_reason) == ("failure", None)
+    finally:
+        stream.close()
 
 
 def test_throwing_observer_never_changes_original_stream_failure_or_confidentiality() -> (
@@ -529,6 +591,20 @@ def test_stream_budget_cut_short_by_a_deadline_keeps_the_earlier_stop() -> None:
         ),
         (False, ObservationTimeout(), OSError(), ObservationTimeout, "timeout"),
         (False, None, BufferError(), BufferError, "failure"),
+        (
+            False,
+            None,
+            StreamBufferLimitError("record", "output_record"),
+            StreamBufferLimitError,
+            "limit",
+        ),
+        (
+            False,
+            ObservationLimitError("total_stream", 1, 2),
+            StreamBufferLimitError("history", "stderr_history"),
+            ObservationLimitError,
+            "limit",
+        ),
         (False, None, OSError(), OSError, "failure"),
     ],
 )
@@ -559,6 +635,47 @@ def test_stream_outcome_matches_the_error_it_delivers(
 
         # Then the completion reports the delivered error's outcome, once.
         assert completion(records).outcome == outcome
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize(
+    ("expired", "scope", "delivered", "reason"),
+    [
+        (True, ObservationCancelled(), DockerTimeout, "command_timeout"),
+        (
+            False,
+            ObservationLimitError("total_stream", 1, 2),
+            ObservationLimitError,
+            "total_stream",
+        ),
+        (False, ObservationCancelled(), ObservationCancelled, "cancelled"),
+        (False, None, StreamBufferLimitError, "buffer_stderr_history"),
+    ],
+)
+def test_reader_buffer_overflow_never_outranks_an_earlier_stop(
+    expired: bool,
+    scope: ObservationCancelled | ObservationLimitError | None,
+    delivered: type[BaseException],
+    reason: str,
+) -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+    try:
+        with stream._queue.condition:
+            if expired:
+                stream._expired = True
+                stream._timeout_stdout = b""
+            stream._error = StreamBufferLimitError("history", "stderr_history")
+            if scope is not None:
+                stream._scope_error = scope
+            stream._stop.set()
+            stream._queue.close()
+
+        with pytest.raises(delivered):
+            next(stream)
+
+        assert completion(records).stop_reason == reason
     finally:
         stream.close()
 

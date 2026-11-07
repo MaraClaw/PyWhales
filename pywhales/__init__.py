@@ -33,6 +33,7 @@ from .exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferLimitError,
 )
 from .inventory import (
     InspectionPolicy,
@@ -76,6 +77,7 @@ __all__ = [
     "Secret",
     "Service",
     "Stack",
+    "StreamBufferLimitError",
     "SystemInfo",
     "Task",
     "Version",

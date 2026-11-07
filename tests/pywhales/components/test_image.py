@@ -38,6 +38,7 @@ from pywhales.exceptions import (
     NoSuchNetwork,
     NoSuchVolume,
     ObservationCancelled,
+    StreamBufferLimitError,
 )
 from pywhales.inventory import InspectionPolicy
 from pywhales.test_utils import get_all_jsons, random_name
@@ -361,8 +362,11 @@ def test_image_fallback_budget_rejects_mapped_stream_overflow(
     )
     stream = method(["one", "two"] if multiple else "one", stream_logs=True)
     assert isinstance(stream, (MappedProcessStream, MultiImageStream))
-    with stream, pytest.raises(BufferError):
+    with stream, pytest.raises(StreamBufferLimitError) as failure:
         list(stream)
+    assert failure.value.category == (
+        "output_record" if overflow == "record" else "stderr_history"
+    )
     for child in image_commands.children.values():
         _assert_image_process_released(child)
 
@@ -1211,13 +1215,17 @@ def test_multiple_image_failure_wakes_saturated_sibling_producer(
             assert not worker.is_alive()
         expected = {
             "mapper": RuntimeError,
-            "oversize": BufferError,
+            "oversize": StreamBufferLimitError,
             "child": DockerException,
         }[failure]
         with pytest.raises(expected) as raised:
             next(stream)
         if failure == "mapper":
             assert raised.value is error
+        if failure == "oversize":
+            assert isinstance(raised.value, StreamBufferLimitError)
+            assert raised.value.category == "output_record"
+            assert str(raised.value) == "image stream record exceeds buffer_bytes=4"
         assert list(stream) == []
         assert stream._queue._bytes == 0
         for child in image_commands.children.values():
@@ -1310,7 +1318,7 @@ def test_background_child_failure_cancels_group_without_consumer_drain(
                 assert not worker.is_alive()
         assert set(children) == {"bad", "sibling"}
         error = stream._error
-        expected = DockerException if failure == "exit" else BufferError
+        expected = DockerException if failure == "exit" else StreamBufferLimitError
         assert isinstance(error, expected)
         with pytest.raises(expected) as raised:
             next(stream)

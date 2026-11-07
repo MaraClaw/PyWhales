@@ -9,6 +9,7 @@ from types import TracebackType
 from typing import Self, override
 
 from pywhales._stream_buffer import StreamBuffer
+from pywhales.exceptions import StreamBufferLimitError
 from pywhales.utils import MappedProcessStream
 
 WORKERS = 4
@@ -80,7 +81,7 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
                 the caller's responsibility.
             factory: Start and return an owned child stream for one reference.
             buffer_bytes: Queued-payload budget in bytes, or `None` for unbounded
-                buffering. A record exceeding the budget raises `BufferError`
+                buffering. A record exceeding the budget raises `StreamBufferLimitError`
                 during consumption. Child budgets are supplied by the factory.
         """
         self._names = tuple(names)
@@ -134,8 +135,9 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
             child._on_failure(self._record_error)
             for item in child:
                 if self._buffer_bytes is not None and len(item[1]) > self._buffer_bytes:
-                    raise BufferError(
-                        f"image stream record exceeds buffer_bytes={self._buffer_bytes}"
+                    raise StreamBufferLimitError(
+                        f"image stream record exceeds buffer_bytes={self._buffer_bytes}",
+                        "output_record",
                     )
                 if not self._queue.put(item):
                     break

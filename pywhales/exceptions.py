@@ -5,7 +5,7 @@ Raw attributes remain available and confidential regardless of message policy.
 """
 
 import re
-from typing import override
+from typing import Literal, override
 
 
 class DockerException(Exception):
@@ -147,6 +147,27 @@ class ObservationLimitError(Exception):
         super().__init__(
             "An observation limit was exceeded or could not be determined."
         )
+
+
+type StreamBufferCategory = Literal["output_record", "stderr_history"]
+
+
+class StreamBufferLimitError(BufferError):
+    """A stream record or retained stderr history exceeded ``buffer_bytes``.
+
+    Derives from the builtin ``BufferError``, so existing handlers still catch
+    every overflow. ``category`` names the exceeded bound as a closed value and
+    never carries payload or message text.
+
+    Attributes:
+        category: ``output_record`` for one stdout or stderr record, or
+            ``stderr_history`` for retained stderr.
+    """
+
+    def __init__(self, message: str, category: StreamBufferCategory) -> None:
+        """Retain the overflow message and its closed category."""
+        self.category: StreamBufferCategory = category
+        super().__init__(message)
 
 
 class ObservationTimeout(TimeoutError):

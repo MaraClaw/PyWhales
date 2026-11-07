@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from threading import Lock
 from time import monotonic
 from types import MappingProxyType, TracebackType
-from typing import Final, Self
+from typing import Final, Self, assert_never
 from uuid import uuid4
 
 from pywhales.exceptions import (
@@ -17,6 +17,7 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferLimitError,
 )
 from pywhales.telemetry import (
     CompletionRecord,
@@ -34,7 +35,14 @@ from ._context import current_admission_id
 from ._records import STOP_REASONS
 
 _EXCLUDED_FROM_LIMITS: Final[frozenset[StopReason]] = frozenset(
-    {"command_timeout", "scope_timeout", "cancelled", "other_limit"}
+    {
+        "command_timeout",
+        "scope_timeout",
+        "cancelled",
+        "buffer_output_record",
+        "buffer_stderr_history",
+        "other_limit",
+    }
 )
 _LIMIT_REASONS: Final[Mapping[str, StopReason]] = MappingProxyType(
     {reason: reason for reason in STOP_REASONS if reason not in _EXCLUDED_FROM_LIMITS}
@@ -54,14 +62,15 @@ def outcome_of(error: type[BaseException]) -> Outcome:
 
     The same rule serves captured runs, archives, stream launches, and the error
     a stream delivers. ``ObservationCancelled`` is ``cancelled`` and
-    ``ObservationLimitError`` is ``limit``; deadlines stay ``timeout`` and every
-    other exception, ``KeyboardInterrupt`` included, is ``failure``.
+    ``ObservationLimitError`` and ``StreamBufferLimitError`` are ``limit``;
+    deadlines stay ``timeout`` and every other exception, ``KeyboardInterrupt``
+    and a builtin ``BufferError`` included, is ``failure``.
     """
     if issubclass(error, (DockerTimeout, ObservationTimeout)):
         return "timeout"
     if issubclass(error, ObservationCancelled):
         return "cancelled"
-    if issubclass(error, ObservationLimitError):
+    if issubclass(error, (ObservationLimitError, StreamBufferLimitError)):
         return "limit"
     if issubclass(error, GeneratorExit):
         return "closed"
@@ -75,6 +84,7 @@ def stop_reason_of(error: BaseException | None) -> StopReason | None:
     ``scope_timeout`` and a set token ``cancelled``. An observation limit keeps
     its reason only when the vocabulary recognizes it; any other string becomes
     ``other_limit``, so arbitrary text and keys never reach a record or counter.
+    A stream buffer overflow maps by its closed category, never by message text.
 
     Args:
         error: The exception that ended the launch, or None for no exception.
@@ -91,6 +101,14 @@ def stop_reason_of(error: BaseException | None) -> StopReason | None:
             return "cancelled"
         case ObservationLimitError():
             return _LIMIT_REASONS.get(error.reason, "other_limit")
+        case StreamBufferLimitError():
+            match error.category:
+                case "output_record":
+                    return "buffer_output_record"
+                case "stderr_history":
+                    return "buffer_stderr_history"
+                case unreachable:
+                    assert_never(unreachable)
         case _:
             return None
 
