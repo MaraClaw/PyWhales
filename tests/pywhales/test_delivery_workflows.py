@@ -1231,6 +1231,103 @@ def test_notes_heading_is_matched_exactly_without_patterns(
             section(text, "0.7.0rc1")
 
 
+def entry(body: str, tail: str = "") -> str:
+    return (
+        f"# Changelog\n\n## 0.6.1\n\n{body}\n{tail}\n## 0.6.0\n\n- Earlier release.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```md\n## 0.6.1\n## Other\n```\n\n- Tail.",
+        "~~~md\n## 0.6.1\n## Other\n~~~\n\n- Tail.",
+        "````\n```\n## Fake\n`````\n\n- Tail.",
+        "~~~~\n~~~\n## Fake\n~~~~~~\n\n- Tail.",
+        "   ```\n## Fake\n   ```\n\n- Tail.",
+        "```\n## Fake\n```  \t\n\n- Tail.",
+        "```\n~~~\n## Fake\n```\n\n- Tail.",
+        "```\n```python\n## Fake\n```\n\n- Tail.",
+        "```\n    ```\n## Fake\n```\n\n- Tail.",
+        "~~~a`b~c\n## Fake\n~~~\n\n- Tail.",
+    ],
+    ids=[
+        "backtick",
+        "tilde",
+        "longer-closer",
+        "longer-tilde-closer",
+        "indented-three",
+        "closer-blanks",
+        "other-character",
+        "closer-info",
+        "indented-four-closer",
+        "tilde-info-backtick",
+    ],
+)
+def test_notes_fenced_headings_never_end_the_section(body: str) -> None:
+    assert section(entry(body), "0.6.1") == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    ```\n- Body.",
+        "\t```\n- Body.",
+        "```a`b\n- Body.",
+        "``\n- Body.",
+    ],
+    ids=["four-spaces", "tab", "backtick-in-info", "two-backticks"],
+)
+def test_notes_non_fences_do_not_hide_the_next_heading(body: str) -> None:
+    assert section(entry(body), "0.6.1") == body
+
+
+def test_notes_fenced_fake_heading_is_not_a_duplicate_or_the_section() -> None:
+    fake = "```md\n## 0.6.1\n\n- Fake.\n```\n"
+    assert section(f"{fake}\n## 0.6.1\n\n- Real.\n", "0.6.1") == "- Real."
+    with pytest.raises(Rejected, match="section missing"):
+        section(f"{fake}\n## 0.6.0\n\n- Old.\n", "0.6.1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## 0.6.1\n\n```\n- Body.\n",
+        "## 0.6.1\n\n- Body.\n\n## 0.6.0\n\n```\n- Old.\n",
+        "```\n## 0.6.1\n\n- Body.\n",
+        "````\n```\n\n## 0.6.1\n\n- Body.\n",
+        "## 0.6.1\n\n```\n    ```\n- Body.\n",
+        "## 0.6.1\n\n```\n``` x\n- Body.\n",
+        "## 0.6.1\n\n~~~\n```\n- Body.\n",
+        "## 0.6.0\n\n```\n- Old.\n",
+    ],
+    ids=[
+        "in-section",
+        "older-section",
+        "before-heading",
+        "shorter-closer",
+        "indented-closer",
+        "closer-with-text",
+        "other-character",
+        "version-missing",
+    ],
+)
+def test_notes_unclosed_fence_anywhere_is_rejected_with_its_own_reason(
+    text: str,
+) -> None:
+    with pytest.raises(Rejected, match="release notes fence unclosed"):
+        section(text, "0.6.1")
+
+
+def test_sealer_keeps_fenced_example_in_notes(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "```md\n## 0.6.1\n```\n\n- Example."
+    checkout(tmp_path, entry(body))
+    uploaded(service, monkeypatch)
+    assert seal(service.api, 100, tmp_path).notes == body
+
+
 @pytest.mark.parametrize(
     ("changes", "removed"),
     [
