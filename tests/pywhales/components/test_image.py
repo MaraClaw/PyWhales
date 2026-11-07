@@ -6,6 +6,7 @@ images, and require disposable daemon state.
 """
 
 import contextlib
+import inspect
 import json
 import sys
 import time
@@ -43,6 +44,11 @@ from pywhales.exceptions import (
 from pywhales.inventory import InspectionPolicy
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+from tests.pywhales.components.hydration_fakes import (
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
@@ -2955,3 +2961,97 @@ def test_image_remove_single_selection_keeps_flags(
         client.image.remove(make_selection(), **kwargs)
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "image", "rm", *flags, "alpha"]
+
+
+def _image_ids(*indexes: int) -> list[str]:
+    return [identity_of("image", index) for index in indexes]
+
+
+def test_hydrated_image_list_deduplicates_in_cli_order_with_chunked_inspects() -> None:
+    listing = _image_ids(3, 1, 3, 2, 1, 5)
+    cli = FakeCli("image", listing)
+    with fake_daemon(cli, chunk_size=2) as client:
+        images = client.image.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [image.id for image in images] == _image_ids(3, 1, 2, 5)
+        assert all(image.repo_tags is not None for image in images)
+    assert launches == 3
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [_image_ids(3, 1), _image_ids(2, 5)]
+
+
+def test_default_image_list_still_returns_distinct_lazy_handles() -> None:
+    listing = _image_ids(3, 1, 3, 2, 1)
+    cli = FakeCli("image", listing)
+    with fake_daemon(cli) as client:
+        images = client.image.list()
+    assert sorted(image.id for image in images) == sorted(set(listing))
+    assert cli.inspects() == []
+    assert cli.lists() == [["docker-test", "image", "list", "--quiet", "--no-trunc"]]
+    assert all(image._inspect_result is None for image in images)
+
+
+def test_hydrated_image_list_forwards_selectors_like_the_default_list() -> None:
+    cli = FakeCli("image", _image_ids(1))
+    with fake_daemon(cli) as client:
+        client.image.list("repo", [("dangling", "false")], True)
+        client.image.list("repo", [("dangling", "false")], True, hydrate=True)
+        hydrate = inspect.signature(client.image.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+    default, hydrated = cli.lists()
+    assert default == hydrated
+    assert default == [
+        "docker-test",
+        "image",
+        "list",
+        "--quiet",
+        "--no-trunc",
+        "--all",
+        "--filter",
+        "dangling=false",
+        "repo",
+    ]
+
+
+def test_vanished_image_is_omitted_after_a_chunk_reprobe() -> None:
+    listing = _image_ids(1, 2, 3, 4)
+    cli = FakeCli("image", listing)
+    cli.vanish_on_list = {listing[1]}
+    with fake_daemon(cli, chunk_size=2) as client:
+        images = client.image.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [image.id for image in images] == [listing[0], listing[2], listing[3]]
+        assert all(image.repo_tags is not None for image in images)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [
+        listing[:2],
+        [listing[0]],
+        [listing[1]],
+        listing[2:],
+    ]
+
+
+def test_hydrated_image_snapshots_must_match_listed_ids_exactly() -> None:
+    listing = _image_ids(1, 2)
+    cli = FakeCli("image", listing)
+    cli.corrupt = {listing[0]: listing[0][:19]}
+    with fake_daemon(cli) as client, pytest.raises(ParsingError):
+        client.image.list(hydrate=True)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [lambda image: image.tag("repo:new"), lambda image: image.remove()],
+    ids=["handle-tag", "handle-remove"],
+)
+def test_mutating_image_call_releases_the_pin(
+    mutate: Callable[[Image], object],
+) -> None:
+    cli = FakeCli("image", _image_ids(1))
+    with fake_daemon(cli) as client:
+        (image,) = client.image.list(hydrate=True)
+        mutate(image)
+        before = len(cli.inspects())
+        with contextlib.suppress(NoSuchImage):
+            assert image.repo_tags is not None
+    assert len(cli.inspects()) == before + 1

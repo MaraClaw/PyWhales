@@ -43,6 +43,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components.container.cli_wrapper import (
     ContainerCLI,
     ContainerConfig,
@@ -752,6 +753,8 @@ class ImageCLI(DockerCLICaller):
         repository_or_tag: str | None = None,
         filters: Iterable[ImageListFilter] = (),
         all: bool = False,
+        *,
+        hydrate: bool = False,
     ) -> builtins.list[Image]:
         """Return unique image IDs present in the selected Docker daemon.
 
@@ -763,10 +766,21 @@ class ImageCLI(DockerCLICaller):
             repository_or_tag: Optional CLI repository or tag selector.
             filters: CLI filter pairs.
             all: Include intermediate images.
+            hydrate: If `True`, inspect the distinct full image IDs in bounded
+                batches, so a listing costs one launch plus one per chunk and
+                reading properties costs none. Snapshots stay pinned until
+                `reload()` or a mutating call on the handle, and images that
+                vanish before their inspect are omitted. If `False`, each
+                handle inspects lazily on first property access.
 
         Returns:
-            One handle per distinct image ID, with unspecified order, retaining
-            the originating client configuration.
+            One handle per distinct image ID, retaining the originating client
+            configuration. Order is unspecified unless `hydrate` is `True`,
+            which keeps first-seen CLI order.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -788,6 +802,15 @@ class ImageCLI(DockerCLICaller):
             full_cmd.append(repository_or_tag)
 
         ids = run(full_cmd).splitlines()
+        if hydrate:
+            return hydrate_handles(
+                [
+                    Image(self.client_config, x, is_immutable_id=True)
+                    for x in dict.fromkeys(ids)
+                ],
+                lambda refs: run([*self.docker_cmd, "image", "inspect", *refs]),
+                NoSuchImage,
+            )
         # the list of tags is bigger than the number of images. We uniquify
         ids = set(ids)
 
@@ -1367,7 +1390,10 @@ class ImageCLI(DockerCLICaller):
         full_cmd.add_flag("--force", force)
         full_cmd.add_flag("--no-prune", not prune)
         full_cmd.extend(images)
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(images)
 
     @overload
     def save(
@@ -1581,7 +1607,10 @@ class ImageCLI(DockerCLICaller):
                 new_tag,
             ]
         )
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins([source_image])
 
     def _pull_if_necessary(self, image: ValidImage) -> Image:
         if isinstance(image, Image):
