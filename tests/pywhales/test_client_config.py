@@ -21,9 +21,11 @@ from pywhales.client_config import (
     ClientConfig,
     ParsingError,
     ReloadableObject,
+    bulk_reload,
 )
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT
+from tests.pywhales.components.hydration_fakes import FakeCli, fake_daemon
 
 
 @pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("nan")])
@@ -675,3 +677,27 @@ def test_failed_reload_leaves_the_pin_and_snapshot() -> None:
         handle.reload()
     assert handle._pinned is True
     assert handle._inspect_result == _Snapshot("ref", 0)
+
+
+def test_bulk_reload_publishes_unpinned_snapshots_and_failure_keeps_pins() -> None:
+    cli = FakeCli("volume", ["alpha", "beta"])
+    with fake_daemon(cli) as client:
+        pinned = client.volume.list(hydrate=True)
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches
+        snapshots = [volume._inspect_result for volume in pinned]
+
+        cli.corrupt = {"beta": "other"}
+        with pytest.raises(ParsingError):
+            bulk_reload(pinned)
+        assert [volume._inspect_result for volume in pinned] == snapshots
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches
+
+        cli.corrupt = {}
+        bulk_reload(pinned)
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches + 2

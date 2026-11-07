@@ -31,6 +31,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components.volume.models import VolumeInspectResult
 from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchContainer, NoSuchImage, NoSuchVolume
@@ -253,16 +254,28 @@ class VolumeCLI(DockerCLICaller):
         else:
             return True
 
-    def list(self, filters: Iterable[VolumeListFilter] = ()) -> builtins.list[Volume]:
+    def list(
+        self, filters: Iterable[VolumeListFilter] = (), *, hydrate: bool = False
+    ) -> builtins.list[Volume]:
         """List Docker volumes.
 
         Args:
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
+            hydrate: If `True`, inspect the listed names in bounded batches, so
+                a listing costs one launch plus one per chunk and reading
+                properties costs none. Snapshots stay pinned until `reload()`
+                or a mutating call on the handle, and volumes that vanish
+                before their inspect are omitted. If `False`, each handle
+                inspects lazily on first property access.
 
         Returns:
             Volume handles in CLI output order.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed names.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -273,9 +286,16 @@ class VolumeCLI(DockerCLICaller):
 
         volumes_names = run(full_cmd).splitlines()
 
-        return [
+        volumes = [
             Volume(self.client_config, x, is_immutable_id=True) for x in volumes_names
         ]
+        if not hydrate:
+            return volumes
+        return hydrate_handles(
+            volumes,
+            lambda names: run([*self.docker_cmd, "volume", "inspect", *names]),
+            NoSuchVolume,
+        )
 
     def prune(
         self,
@@ -319,7 +339,10 @@ class VolumeCLI(DockerCLICaller):
         for v in volumes:
             full_cmd.append(str(v))
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(volumes)
 
     def clone(
         self,

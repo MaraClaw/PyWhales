@@ -1,3 +1,4 @@
+import inspect
 import json
 import math
 from collections.abc import Callable, Iterable, Sequence
@@ -12,6 +13,7 @@ from pytest_mock import MockerFixture
 
 from pywhales import Container, DockerClient, Image, Volume
 from pywhales._execution_policy import get_execution_policy
+from pywhales.client_config import ParsingError
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.container.cli_wrapper import ContainerCLI
 from pywhales.components.image.cli_wrapper import ImageCLI
@@ -25,6 +27,11 @@ from pywhales.exceptions import (
     NoSuchVolume,
 )
 from pywhales.test_utils import get_all_jsons, random_name
+from tests.pywhales.components.hydration_fakes import (
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
@@ -745,3 +752,81 @@ def test_volume_remove_single_selection_builds_argv_once(
         client.volume.remove(make_selection())
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "volume", "remove", "alpha"]
+
+
+def _volume_ids(count: int) -> list[str]:
+    return [identity_of("volume", index) for index in range(count)]
+
+
+def test_hydrated_volume_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
+    ids = _volume_ids(5)
+    cli = FakeCli("volume", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        resources = client.volume.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [str(resource) for resource in resources] == ids
+        assert all(resource.driver is not None for resource in resources)
+    assert launches == 4
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+
+
+def test_default_volume_list_stays_lazy_and_expiring() -> None:
+    ids = _volume_ids(3)
+    cli = FakeCli("volume", ids)
+    with fake_daemon(cli) as client:
+        resources = client.volume.list()
+        assert cli.inspects() == []
+        assert resources[0].driver is not None
+        assert resources[0].driver is not None
+        hydrate = inspect.signature(client.volume.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+
+
+def test_hydrated_volume_list_reprobes_only_the_chunk_with_a_vanished_resource() -> (
+    None
+):
+    ids = _volume_ids(4)
+    cli = FakeCli("volume", ids)
+    cli.vanish_on_list = {ids[2]}
+    with fake_daemon(cli, chunk_size=2) as client:
+        resources = client.volume.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [str(resource) for resource in resources] == [ids[0], ids[1], ids[3]]
+        assert all(resource.driver is not None for resource in resources)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [ids[:2], ids[2:], [ids[2]], [ids[3]]]
+
+
+def test_hydrated_volume_list_matches_results_by_exact_identity() -> None:
+    ids = _volume_ids(3)
+    cli = FakeCli("volume", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        for resource in client.volume.list(hydrate=True):
+            assert resource._inspect_result is not None
+            assert resource._inspect_result.name == str(resource)
+        cli.corrupt = {ids[1]: "other"}
+        with pytest.raises(ParsingError):
+            client.volume.list(hydrate=True)
+
+
+def test_reload_and_mutating_calls_release_the_pin_of_a_hydrated_volume() -> None:
+    ids = _volume_ids(3)
+    cli = FakeCli("volume", ids)
+    with fake_daemon(cli) as client:
+        reloaded, removed, untouched = client.volume.list(hydrate=True)
+        before = len(cli.launches)
+        assert None not in (reloaded.driver, removed.driver, untouched.driver)
+        assert len(cli.launches) == before
+        reloaded.reload()
+        assert reloaded.driver is not None
+        assert len(cli.launches) == before + 2
+        assert untouched.driver is not None
+        assert len(cli.launches) == before + 2
+        removed.remove()
+        used = len(cli.launches)
+        assert removed.driver is not None
+        assert len(cli.launches) == used + 1
