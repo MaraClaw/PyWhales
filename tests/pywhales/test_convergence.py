@@ -3376,6 +3376,300 @@ def test_unhealthy_failure_precedence_across_members(
     assert result.reason == expected[case] and result.cause is None
 
 
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("confirming", [False, True])
+def test_fail_on_restart_budget_on_first_or_confirming_pass(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    confirming: bool,
+) -> None:
+    ready = container(A, restarts=1)
+    over = container(A, restarts=2)
+    stages = [ready, ready, over] if confirming else [ready, over]
+    if kind == "compose":
+        store_compose(tmp_path, *(snapshot(stage) for stage in stages))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            max_restarts=1,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[stage] for stage in stages]})
+        target = capture_containers(
+            fake_cli,
+            (A,),
+            max_restarts=1,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_restart_budget is True
+    attribute = next(
+        field.name for field in fields(target) if field.name == "fail_on_restart_budget"
+    )
+    with pytest.raises(FrozenInstanceError):
+        setattr(target, attribute, False)
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert result == Failure(reason="restart_budget_exceeded")
+    assert isinstance(result, Failure) and result.cause is None
+    assert result.service_id is None and result.state is None
+    assert len([call for call in calls_of(tmp_path) if call == inspection(A)]) == len(
+        stages
+    )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("invalid", [0, 1, None, "true", [], 1.0])
+def test_fail_on_restart_budget_rejects_non_bool_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    invalid: object,
+) -> None:
+    value: Any = invalid
+    with pytest.raises(ValueError):
+        if kind == "compose":
+            capture_compose(
+                fake_cli,
+                ("web",),
+                max_restarts=1,
+                fail_on_restart_budget=value,
+                policy=policy,
+                timeout=5,
+            )
+        else:
+            capture_containers(
+                fake_cli,
+                (A,),
+                max_restarts=1,
+                fail_on_restart_budget=value,
+                policy=policy,
+                timeout=5,
+            )
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize(
+    "max_restarts,dry_run", [(None, False), (1, True), (None, True)]
+)
+def test_fail_on_restart_budget_needs_a_budget_and_a_live_client_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    max_restarts: int | None,
+    dry_run: bool,
+) -> None:
+    fake_cli.client_config.compose_dry_run = dry_run
+    with pytest.raises(ValueError):
+        if kind == "compose":
+            capture_compose(
+                fake_cli,
+                ("web",),
+                max_restarts=max_restarts,
+                fail_on_restart_budget=True,
+                policy=policy,
+                timeout=5,
+            )
+        else:
+            capture_containers(
+                fake_cli,
+                (A,),
+                max_restarts=max_restarts,
+                fail_on_restart_budget=True,
+                policy=policy,
+                timeout=5,
+            )
+    assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+def test_restart_budget_policy_defaults_false_and_validates_hand_built_targets(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    member = container(A, restarts=0)
+    config = fake_cli.client_config
+    invalid: Any = 1
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(member))
+        target = capture_compose(
+            fake_cli, ("web",), max_restarts=1, policy=policy, timeout=5
+        )
+    else:
+        store_standalone(tmp_path, {A: [[member]]})
+        target = capture_containers(
+            fake_cli, (A,), max_restarts=1, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert target.fail_on_restart_budget is False
+    assert replace(target, fail_on_restart_budget=True).fail_on_restart_budget is True
+    with pytest.raises(ValueError):
+        replace(target, fail_on_restart_budget=invalid)
+    with pytest.raises(ValueError):
+        replace(target, fail_on_restart_budget=True, max_restarts=None)
+    with pytest.raises(ValueError):
+        if isinstance(target, ComposeTarget):
+            ComposeTarget(
+                client_config=config,
+                services=target.services,
+                fail_on_restart_budget=True,
+            )
+        else:
+            ContainerTarget(
+                client_config=config,
+                container_ids=target.container_ids,
+                fail_on_restart_budget=True,
+            )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("status", ["running", "exited"])
+def test_restart_budget_blocker_is_unchanged_without_the_failure_flag(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    status: str,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+    from pywhales.exceptions import ObservationTimeout
+
+    member = container(A, status=status, restarts=2)
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(member))
+        target = capture_compose(
+            fake_cli,
+            ("web",),
+            max_restarts=1,
+            fail_on_exit=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[member]]})
+        target = capture_containers(
+            fake_cli, (A,), max_restarts=1, fail_on_exit=True, policy=policy, timeout=5
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+
+    def expire(state: ObservationState, interval: float) -> None:
+        raise ObservationTimeout()
+
+    monkeypatch.setattr(compose_module, "_pause", expire)
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
+        DeadlineDetail(
+            1,
+            non_running_containers=int(status == "exited"),
+            restart_budget_exceeded_containers=1,
+        )
+    )
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+def test_restart_budget_failure_ignores_completion_members(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    long_running = container(A, restarts=0)
+    job = container(B, service="job", status="exited", restarts=99)
+    if kind == "compose":
+        store_compose(tmp_path, snapshot(long_running, job))
+        target = capture_compose(
+            fake_cli,
+            ("web", "job"),
+            completion_services=("job",),
+            max_restarts=1,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(tmp_path, {A: [[long_running]], B: [[job]]})
+        target = capture_containers(
+            fake_cli,
+            (A, B),
+            completion=(B,),
+            max_restarts=1,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    assert wait(target, policy=policy, timeout=5, poll_interval=1) == Success()
+
+
+@pytest.mark.parametrize("kind", ["compose", "standalone"])
+@pytest.mark.parametrize("other", ["completion", "malformed", "exited", "unhealthy"])
+def test_restart_budget_failure_precedence_across_members(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    kind: str,
+    other: str,
+) -> None:
+    ready_first = container(A, restarts=0)
+    ready_second = container(B, service="job", restarts=0)
+    first = container(A, restarts=2)
+    second = container(B, service="job", restarts=0)
+    if other == "completion":
+        second["State"]["Status"] = "exited"
+        second["State"]["ExitCode"] = 3
+    elif other == "malformed":
+        second["RestartCount"] = "bad"
+    elif other == "exited":
+        second["State"]["Status"] = "exited"
+    else:
+        second["State"]["Health"] = {"Status": "unhealthy"}
+    if kind == "compose":
+        store_compose(
+            tmp_path, snapshot(ready_first, ready_second), snapshot(first, second)
+        )
+        target = capture_compose(
+            fake_cli,
+            ("web", "job"),
+            completion_services=("job",) if other == "completion" else (),
+            max_restarts=1,
+            fail_on_exit=True,
+            fail_on_unhealthy=True,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    else:
+        store_standalone(
+            tmp_path, {A: [[ready_first], [first]], B: [[ready_second], [second]]}
+        )
+        target = capture_containers(
+            fake_cli,
+            (A, B),
+            completion=(B,) if other == "completion" else (),
+            max_restarts=1,
+            fail_on_exit=True,
+            fail_on_unhealthy=True,
+            fail_on_restart_budget=True,
+            policy=policy,
+            timeout=5,
+        )
+    assert isinstance(target, (ComposeTarget, ContainerTarget))
+    expected = {
+        "completion": "completion_failed",
+        "malformed": "malformed",
+        "exited": "restart_budget_exceeded",
+        "unhealthy": "restart_budget_exceeded",
+    }
+    result = wait(target, policy=policy, timeout=5, poll_interval=1)
+    assert isinstance(result, Failure)
+    assert result.reason == expected[other] and result.cause is None
+
+
 def node(identity: str, *, manager: bool = False) -> dict[str, Any]:
     result: dict[str, Any] = {
         "ID": identity,

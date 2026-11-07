@@ -94,6 +94,8 @@ class ComposeTarget:
     ``None`` to leave Docker's ``RestartCount`` unchecked.
     ``fail_on_exit`` opts into failure for eligible long-running exits.
     ``fail_on_unhealthy`` opts into failure for eligible unhealthy containers.
+    ``fail_on_restart_budget`` opts into failure for a long-running container
+    past ``max_restarts``, and needs that budget.
     """
 
     client_config: ClientConfig = field(repr=False, compare=False)
@@ -101,6 +103,7 @@ class ComposeTarget:
     max_restarts: int | None = None
     fail_on_exit: bool = False
     fail_on_unhealthy: bool = False
+    fail_on_restart_budget: bool = False
 
     def __post_init__(self) -> None:
         """Reject empty membership, duplicate names or IDs, or a bad restart budget."""
@@ -118,6 +121,10 @@ class ComposeTarget:
             raise ValueError("fail_on_exit must be a bool")
         if type(self.fail_on_unhealthy) is not bool:
             raise ValueError("fail_on_unhealthy must be a bool")
+        if type(self.fail_on_restart_budget) is not bool:
+            raise ValueError("fail_on_restart_budget must be a bool")
+        if self.fail_on_restart_budget and budget is None:
+            raise ValueError("fail_on_restart_budget needs max_restarts")
         identities = [
             identity for service in services for identity in service.container_ids
         ]
@@ -137,9 +144,10 @@ class ContainerTarget:
     max_restarts: int | None = None
     fail_on_exit: bool = False
     fail_on_unhealthy: bool = False
+    fail_on_restart_budget: bool = False
 
     def __post_init__(self) -> None:
-        """Reject invalid membership, completion IDs, or restart budget."""
+        """Reject invalid membership, completion IDs, restart budget or policies."""
         ids, completion = self.container_ids, self.completion
         if (
             type(ids) is not tuple
@@ -159,6 +167,10 @@ class ContainerTarget:
             raise ValueError("fail_on_exit must be a bool")
         if type(self.fail_on_unhealthy) is not bool:
             raise ValueError("fail_on_unhealthy must be a bool")
+        if type(self.fail_on_restart_budget) is not bool:
+            raise ValueError("fail_on_restart_budget must be a bool")
+        if self.fail_on_restart_budget and budget is None:
+            raise ValueError("fail_on_restart_budget needs max_restarts")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -205,6 +217,7 @@ class Failure:
         "superseded",
         "update_failed",
         "completion_failed",
+        "restart_budget_exceeded",
         "exited",
         "unhealthy",
         "observation",
@@ -236,7 +249,8 @@ class DeadlineDetail:
     ``restart_budget_exceeded_containers`` counts long-running services with any
     container whose latest observed ``RestartCount`` exceeds the target's
     ``max_restarts``. It stays zero when the budget is disabled, and a later
-    within-budget observation clears it.
+    within-budget observation clears it. With ``fail_on_restart_budget`` an
+    over-budget reading ends the wait as a failure, so it is never published.
 
     For node targets each selected node is one captured unit. The node counters
     count non-ready state, non-active availability, designated managers no longer
