@@ -33,6 +33,16 @@ with docker.pull([], stream_logs=True) as progress:
 progress.close()  # safe after context exit too
 ```
 
+Inside `observation()`, multiple-reference pull and push size their fanout to
+the tightest remaining enclosing `max_concurrent_children` allowance, capped at
+four; one remaining slot serializes transfers. Unobserved or child-unbounded
+scopes still use four workers. Blocking calls size in the caller's context.
+Lazy multi-image streams read the allowance at first consumption in their
+snapshotted creation context, even after that scope exits. Sizing reserves no
+slots: a sibling can still consume capacity before launch and cause immediate
+`ObservationLimitError("concurrent_children")`. With zero slots the first launch
+is refused normally, without waiting or consuming a launch attempt.
+
 `push` batch-inspects every deduplicated reference before starting any
 transfer, including streamed ones, so a missing local image raises
 `NoSuchImage` before a registry connection is attempted.

@@ -16,6 +16,15 @@ WORKERS = 4
 """Most image transfers running at once, for blocking pools and stream groups."""
 
 
+def _fan_out(context: Context) -> int:
+    """Return one to ``WORKERS`` workers; no free slot still starts one to be refused."""
+    from pywhales._observation import get_observation
+
+    state = context.run(get_observation)
+    allowance = state.child_allowance() if state is not None else None
+    return WORKERS if allowance is None else max(1, min(WORKERS, allowance))
+
+
 def map_in_contexts[T, R](
     function: Callable[[T], R], arguments: Iterable[T]
 ) -> list[R]:
@@ -26,7 +35,8 @@ def map_in_contexts[T, R](
     settings like a single transfer does. A context can be entered by only one
     thread at a time, so sharing one across workers would raise ``RuntimeError``.
     The first failure terminates the pool, which drops queued calls; calls that
-    already run cannot be interrupted. On success the workers have exited.
+    already run cannot be interrupted. On success the workers have exited. The pool
+    fits the caller's remaining observation child slots, not below one.
 
     Args:
         function: Task applied to one argument on a worker thread.
@@ -36,12 +46,29 @@ def map_in_contexts[T, R](
         The results in the order of ``arguments``.
     """
     tasks = [(copy_context(), argument) for argument in arguments]
+    workers = _fan_out(copy_context())
+    failure_lock = Lock()
+    failures: list[BaseException] = []
 
     def run_one(context: Context, argument: T) -> R:
-        return context.run(function, argument)
+        with failure_lock:
+            if failures:
+                raise failures[0]
+        try:
+            return context.run(function, argument)
+        except BaseException as error:
+            with failure_lock:
+                if not failures:
+                    failures.append(error)
+            raise
 
-    with ThreadPool(WORKERS) as pool:
-        results = pool.starmap(run_one, tasks)
+    with ThreadPool(workers) as pool:
+        try:
+            results = pool.starmap(run_one, tasks)
+        except BaseException:
+            if failures:
+                raise failures[0] from None
+            raise
         pool.close()
         pool.join()
     return results
@@ -51,6 +78,7 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
     """Lazy image transfer group owning at most four active child streams.
 
     Workers start on the first `next()` call, not construction or context entry.
+    The first call sizes the pool to the creation context's remaining child slots.
     Records contain an image reference and output bytes; interleaving across
     images and stdout/stderr is not globally ordered. Exhaustion waits for worker
     cleanup. Use a context manager or explicit `close()` when stopping early;
@@ -104,7 +132,9 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         try:
             with self._lock:
                 if not self._stopped and self._executor is None:
-                    self._executor = ThreadPoolExecutor(max_workers=WORKERS)
+                    self._executor = ThreadPoolExecutor(
+                        max_workers=_fan_out(self._context.copy())
+                    )
                     for name in self._names:
                         future = self._executor.submit(
                             self._consume_in(self._context.copy()), name

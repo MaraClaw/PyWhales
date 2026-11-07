@@ -1032,3 +1032,30 @@ def test_child_limit_rejects_integer_subclasses() -> None:
 
     with pytest.raises(ValueError):
         replace(policy(1, 100, 100), max_concurrent_children=IntegerSubclass(1))
+
+
+def test_child_allowance_is_the_tightest_remaining_across_nested_and_copied_accounts() -> (
+    None
+):
+    outer_policy = replace(launch_policy(None), max_concurrent_children=3)
+    with observation(outer_policy) as outer:
+        assert outer.child_allowance() == 3
+        held = check_scoped_launch(["cli"], {}, outer)
+        with observation(replace(outer_policy, max_concurrent_children=1)) as inner:
+            assert inner.child_allowance() == 1
+            inner_held = check_scoped_launch(["cli"], {}, inner)
+            assert (inner.child_allowance(), outer.child_allowance()) == (0, 1)
+            assert copy_context().run(inner.child_allowance) == 0
+            inner_held.release()
+            assert inner.child_allowance() == 1
+        with observation(replace(outer_policy, max_concurrent_children=5)) as wider:
+            assert wider.child_allowance() == 2
+        held.release()
+        assert outer.child_allowance() == 3
+
+
+def test_child_allowance_is_unbounded_without_a_child_limit() -> None:
+    with observation(launch_policy(1)) as state:
+        assert state.child_allowance() is None
+        check_scoped_launch(["cli"], {}, state)
+        assert state.child_allowance() is None

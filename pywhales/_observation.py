@@ -151,6 +151,24 @@ class ObservationState:
                 account.consumed += 1
         return reservation
 
+    def child_allowance(self) -> int | None:
+        """Return the tightest remaining child slots across every enclosing account.
+
+        Lock the child accounts outermost first, as ``reserve_child`` does, so a
+        read never straddles a reservation. The value is a snapshot: a sibling
+        may take a slot right after, and a launch then still refuses immediately.
+
+        Returns:
+            Nonnegative remaining slots, or ``None`` when no scope bounds children.
+        """
+        accounts = self.child_accounts
+        if not accounts:
+            return None
+        with ExitStack() as locked:
+            for account in accounts:
+                locked.enter_context(account.lock)
+            return max(0, min(account.limit - account.consumed for account in accounts))
+
     def check_launch_attempts(self, count: int, *, reserve: bool = False) -> None:
         """Check every remaining launch allowance, optionally debiting all of them.
 
