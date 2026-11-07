@@ -50,7 +50,7 @@ Bounded observation sits on top of the command groups:
 | `scripts/fleet_contract/` | Offline fleet contract: strict manifest, support, and result schemas, validators, non-qualifying reports (see its `README.md`) |
 | `scripts/fleet_harness/` | Fake-only offline capacity simulation, including leased retries with fixed or capped exponential delays, and non-authorizing transport decisions; see its guide |
 | `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
-| `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
+| `skills/pywhales-docker-container/` | Consumer skill for using the installed library, not a contributor workflow |
 | `.github/workflows/` | Authoritative CI checks, docs/site artifact build, and the delivery chain from package build to release; no Pages deployment workflow is present |
 | `pyproject.toml`, `uv.lock`, `.python-version` | Project/tool configuration, locked dependencies, interpreter pin |
 

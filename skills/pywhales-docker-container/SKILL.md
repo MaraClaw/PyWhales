@@ -1,5 +1,5 @@
 ---
-name: pywhales
+name: pywhales-docker-container
 description: >-
   Use the installed pywhales package to automate Docker from Python applications
   and scripts. Use when translating docker run/build/compose commands into Python,
