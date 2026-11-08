@@ -29,6 +29,9 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   returns on only their own `NoSuch*` error; every other removal failure still reaches `resource_cleanup`.
   Context, Builder, and ManifestList use it without that `try`.
   Config, Secret, Plugin, Context, and Service `exists()` returns `False` only for that own error; other failures propagate.
+- Container, image, network and volume `list()` take keyword-only `hydrate=False` and return lists. Defaults stay lazy with their existing ordering; hydrated images deduplicate in first-seen CLI order. Volume identity is its exact name; the other three hydrate full IDs.
+- `_hydration.py::hydrate_handles` uses chunks of at most `HYDRATION_CHUNK_SIZE` (100), one listing plus one inspect per healthy chunk. Validate the whole response and exact identity set, map by identity, then pin that chunk's handles. Only the kind's missing-resource exception bisects the affected chunk and drops missing singletons; malformed data and other errors propagate. Ordinary batch `inspect()` seeds unpinned snapshots.
+- Mutation launches release supplied handles' pins even on failure: image tag/remove, network connect/disconnect/remove, and volume remove. Release is local to those handle instances; plain names don't invalidate other handles. Container mutation and cleanup rules live in its child guide.
 - Eleven scalar JSON hooks retain module-local `run()` and `-> dict[str, JsonValue]`, calling `_parse_single_inspect_json()`.
   Singleton shape and reload identity rules live in [the runtime guide](../AGENTS.md#configuration-and-policy); Builder and ManifestList keep distinct response shapes.
 - Config, Node, Secret, and Service inspect use `_swarm_inspect.py::parse_swarm_inspect_results`.

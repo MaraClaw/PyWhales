@@ -9,7 +9,8 @@ Local tests drive the real decisions through a stubbed `Transport`.
 | File | Role |
 | --- | --- |
 | `__main__.py` | CLI: `smoke notes seal prepare confirm release pages verify-pages`; failure exits 1 as `delivery rejected: <reason>` |
-| `api.py` | `Curl` (HTTPS only; 10 s connect, 120 s curl, 130 s supervisor), `GitHub.pages`, `Rejected`, `require` |
+| `api.py` | `Curl` (HTTPS only; 10 s connect, 120 s curl, 130 s supervisor; bounded `GET` retries), `GitHub.pages`; re-exports `Rejected`, `require` |
+| `failures.py`, `deadline.py` | `Rejected`, `CurlFailed` (exit code), `require`; context-local monotonic command deadline (`command_deadline`, `remaining`, `budget`, `afford`) entered once by `__main__.main` |
 | `models.py`, `limits.py` | Typed GitHub, PyPI, `Seal` and `Receipt` documents; every byte, entry, and item cap |
 | `budgets.py`, `archives.py` | Incremental payload accounting; data-only ZIP and tar decoders with `safe_path` |
 | `artifacts.py`, `chain.py` | Inventory, selection, download, verification; `seal`, `producer`, `receipt`, artifact names |
@@ -36,7 +37,18 @@ Pages deployment workflow. `pages` and `verify-pages` remain CLI helpers.
 - `release` and `pages` rebuild the producer chain through `receipt()`, then need a fresh `destination()` with nothing
   missing. `prepare` and `confirm` check `PRODUCER_ATTEMPT`; `release` checks `PUBLISHER_ATTEMPT`. Nothing borrows from
   an older attempt, so rerun the whole workflow, not failed jobs. `confirm` retries only missing files (12 times, 5 s
-  apart); conflicts and malformed responses fail at once.
+  apart, within the command deadline); conflicts and malformed responses fail at once.
+
+## Transport Retries And Deadline
+
+- Only `Curl.request` retries, and only `GET`: up to `READ_RETRIES` (3) retries after the first attempt on `TRANSIENT_STATUSES` (429, 502, 503, 504) or a
+  `CurlFailed` exit in `TRANSIENT_CURL_EXITS` (6, 7, 28, 52, 55, 56), with deterministic doubling backoff capped at
+  `READ_BACKOFF_MAX_SECONDS` (8 s); current delays are 1, 2 and 4 s. All constants live in `limits.py`. Callers get one final `Response` or the final failure, so
+  pagination counts accepted pages only. Writes are never retried; 403/404 and other nontransient statuses return on the first attempt for caller classification.
+  Protocol/TLS exits, byte-budget and invalid-status faults fail without retry. Stderr stays discarded; classification uses the exit code alone.
+- `__main__.main` wraps `execute` in one `command_deadline(COMMAND_SECONDS)` (900 s). `Curl.receive` shortens each attempt with
+  `budget`; backoff and `confirm` polling call `afford` first. Expired preflight or a wait that cannot finish before expiry raises
+  `Rejected("delivery deadline exceeded")` without another curl or sleep. An active attempt's supervisor timeout remains `Rejected("HTTP transport timed out")`, which isn't retried. Tests keep zero-argument `Curl` factories, so the deadline is context-local state.
 
 ## Limits And Pagination
 

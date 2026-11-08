@@ -45,6 +45,7 @@
 
 ## Inspection, Copy, And Archives
 
+- `list(hydrate=True)` deduplicates full IDs in first-seen CLI order and pins snapshots through `_hydration.py`; the default list retains unordered set-based deduplication and lazy handles. Image `tag()` and `remove()` release supplied handles' pins even when their launch fails.
 - Batch inspect must verify each snapshot's ID or normalized tag/digest aliases against its request.
   Positional pairing alone isn't identity validation; mismatches raise `ParsingError`.
 - Normalization handles Docker Hub/library prefixes, implicit `:latest`, and tagged digest references.
@@ -75,6 +76,7 @@
 ## Test Navigation
 
 - `tests/pywhales/test_container_image_enum_json.py`: nested config and graph-driver JSON contracts.
+- `tests/pywhales/components/test_image_child_limits.py`: barrier/event fake children prove blocking and streamed pull/push fanout, occupied nested accounts, late iteration, zero-allowance refusal without debit, and sibling races. These tests start no processes; `test_image.py` retains real-child lifecycle coverage and fake-CLI hydrated listing cases.
 - `tests/pywhales/components/test_image.py` contains mocked CLI and real child-process stream tests:
   `test_empty_image_operations_keep_existing_result_shapes`, `test_empty_pull_stream_is_owned_without_executable_resolution`,
   `test_multiple_image_stream_has_lazy_owned_lifecycle`,

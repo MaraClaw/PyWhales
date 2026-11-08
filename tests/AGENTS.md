@@ -7,6 +7,8 @@ Paths are relative to `tests/`. Repository-wide checks and safety rules are in t
 | Area | Start here |
 | --- | --- |
 | Client configuration, process ownership, buffering, timeouts | `pywhales/test_client_config.py`, `pywhales/test_docker_client.py`, `pywhales/test_utils.py` |
+| Hydrated listings, pinned snapshots and monotonic cache expiry | `pywhales/components/test_{container,image,network,volume}.py`, `pywhales/test_client_config.py` |
+| Image fanout under shared child limits | `pywhales/components/test_image_child_limits.py`, `pywhales/test_observation.py`; real-child lifecycle in `pywhales/components/test_image.py` |
 | Child environments and launch snapshots | `pywhales/test_environment.py`, `pywhales/test_inventory_cli.py` |
 | Bulk reload and inventory (13 kinds, including manifest lists) | `pywhales/test_bulk_reload.py`, `pywhales/test_bulk_reload_bounded.py`, `pywhales/test_inventory.py`, `pywhales/test_inventory_cli.py` |
 | Observation, launch limits, bounded capture | `pywhales/test_observation.py`, `pywhales/test_observation_budget_integration.py`, `pywhales/test_launch_limits.py`, `pywhales/test_bounded_capture.py` |
@@ -33,6 +35,8 @@ Filenames in this section are relative to `pywhales/`.
   Mocks don't prove cleanup or launch-time snapshots. `test_logging.py` keeps concurrent-client command/list composition and `copy()`/`deepcopy()` isolation.
 - Empty streaming image pull is a repeatedly closeable/context-managed `EmptyImageStream` without executable resolution:
   runtime cases are in `components/test_image.py`; static returns in `test_type_contracts.py` and `test_command_deadline_types.py`.
+- Hydrated listing cases in the four resource modules use `components/hydration_fakes.py` without real children. Keep exact-ID/name matching, bounded launch counts, affected-chunk disappearance re-probes, image CLI ordering, pin release and fresh container cleanup. `test_client_config.py` covers monotonic/negative-age expiry, current validity periods, copy/pickle resets, failed reload pin preservation and unpinned bulk publication.
+- `components/test_image_child_limits.py` uses barrier/event fake children with real shared reservations, without processes or sleeps. Keep nested occupied allowances, creator-context sizing at first iteration, four-worker unbounded behavior, zero-slot refusal without debit and immediate sibling-race refusal; mocks don't replace the real-child cleanup cases in `components/test_image.py`.
 - Assert raw failure details through `stderr`, `stdout`, or `docker_command`, not safe exception text. Test safe and raw rendering
   separately, including traceback chains and no inspect dumps in safe mode; raw opt-in must not change returned payloads.
 - Strict workload classification local-child cases live in `test_utils.py`, `test_exceptions.py`, and `test_client_config.py`: preserve captured and early/exhaustion stream errors, per-launch snapshots, and default, detached, and preflight controls.
@@ -48,6 +52,7 @@ Filenames in this section are relative to `pywhales/`.
   Keep explicit overlay precedence, mandatory Buildx values, safe diagnostics and limits; strict transport ignores excluded ambient app-name collisions but rejects client-overlay collisions.
 - Completion tests keep exited-zero success, safe nonzero failure, unfinished counters, and final-pass revalidation. Preserve closed
   `completion_failed` journal reasons, generation-fenced deadline-detail round-trips in the store, and static completion types.
+- Convergence batching cases in `test_convergence.py` compare reason/cause with single-ID walks, count policy-sized chunks, and cover response-limit fallback, launch checkpoints, complete confirming passes and hung-batch cleanup. Delivery retry cases belong in `test_delivery_workflows.py`; transport and command-deadline contracts live in `scripts/delivery/AGENTS.md`.
 - `test_convergence.py` covers opt-in `fail_on_exit` for Compose and standalone containers on the first and confirming passes, exit zero and nonzero, unchanged default behavior, and completion/restart budgets. `test_reconciliation.py` covers cause-free `exited` projection to the journal without exit-code/output payloads.
 - The same modules cover opt-in `fail_on_unhealthy` on first/confirming passes, eligibility and failure precedence,
   and the closed `unhealthy` journal reason with cleared deadline detail and no mutation replay. Static flags and
