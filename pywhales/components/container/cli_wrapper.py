@@ -37,6 +37,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components.container.models import (
     ContainerConfig,
     ContainerGraphDriver,
@@ -106,6 +107,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
     exit stops a running container, then removes it and its anonymous volumes
     unless automatic removal is enabled. Cleanup tolerates an already missing
     container; using an existing handle as a context manager opts into cleanup.
+    A hydrated listing pins snapshots; cleanup and mutating calls release the
+    pin so they never choose their action from a stale listing.
     """
 
     def __init__(
@@ -123,6 +126,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Container body and cleanup both failed"):
+            self._release_pin()
             try:
                 host_config = self.host_config
                 state = self.state
@@ -866,6 +870,7 @@ class ContainerCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "container", "cp"])
+        target = destination[0] if isinstance(destination, tuple) else None
 
         if isinstance(source, tuple):
             source = f"{source[0]!s}:{source[1]}"
@@ -877,7 +882,11 @@ class ContainerCLI(DockerCLICaller):
         else:
             destination = str(destination)
 
-        run([*full_cmd, source, destination], timeout=timeout)
+        try:
+            run([*full_cmd, source, destination], timeout=timeout)
+        finally:
+            if isinstance(target, Container):
+                target._release_pin()
 
     def create(
         self,
@@ -1353,28 +1362,32 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.append(container)
         full_cmd.extend(command)
 
-        if stream:
-            return stream_stdout_and_stderr(
-                full_cmd,
-                env=child_env,
-                pipe_stdin=interactive,
-                pass_fds=(),
-                timeout=timeout,
-                workload_status=True,
-            )
-        else:
-            result = run(
-                full_cmd,
-                env=child_env,
-                tty=tty,
-                pass_fds=(),
-                timeout=timeout,
-                workload_status=not detach,
-            )
-            if detach:
-                return None
+        try:
+            if stream:
+                return stream_stdout_and_stderr(
+                    full_cmd,
+                    env=child_env,
+                    pipe_stdin=interactive,
+                    pass_fds=(),
+                    timeout=timeout,
+                    workload_status=True,
+                )
             else:
-                return result
+                result = run(
+                    full_cmd,
+                    env=child_env,
+                    tty=tty,
+                    pass_fds=(),
+                    timeout=timeout,
+                    workload_status=not detach,
+                )
+                if detach:
+                    return None
+                else:
+                    return result
+        finally:
+            if isinstance(container, Container):
+                container._release_pin()
 
     def exists(self, x: ValidContainer) -> bool:
         """Return whether a container can be inspected in the selected daemon.
@@ -1515,7 +1528,10 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--signal", format_signal_arg(signal))
         full_cmd += container_list
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(container_list)
 
     @overload
     def logs(
@@ -1645,6 +1661,8 @@ class ContainerCLI(DockerCLICaller):
         self,
         all: bool = False,
         filters: Iterable[ContainerListFilter] = (),
+        *,
+        hydrate: bool = False,
     ) -> builtins.list[Container]:
         """List containers on the selected daemon, which may be remote.
 
@@ -1653,9 +1671,19 @@ class ContainerCLI(DockerCLICaller):
         Args:
             all: If `True`, also returns containers that are not running.
             filters: Filters to apply when listing containers.
+            hydrate: If `True`, inspect the listed IDs in bounded batches of
+                full IDs, so a listing costs one launch plus one per chunk and
+                reading properties costs none. Snapshots stay pinned until
+                `reload()` or a mutating call on the handle, and containers
+                that vanish before their inspect are omitted. If `False`, each
+                handle inspects lazily on first property access.
 
         Returns:
             Container handles in CLI order using the originating configuration.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -1668,10 +1696,17 @@ class ContainerCLI(DockerCLICaller):
 
         # TODO: add a test for the fix of is_immutable_id, without it, we get
         # race conditions (we read the attributes of a container but it might not exist.
-        return [
+        containers = [
             Container(self.client_config, x, is_immutable_id=True)
             for x in run(full_cmd).splitlines()
         ]
+        if not hydrate:
+            return containers
+        return hydrate_handles(
+            containers,
+            lambda ids: run([*self.docker_cmd, "container", "inspect", *ids]),
+            NoSuchContainer,
+        )
 
     def pause(self, containers: ValidContainer | Iterable[ValidContainer]) -> None:
         """Pause one or more containers.
@@ -1695,7 +1730,10 @@ class ContainerCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "pause"])
         full_cmd.extend(container_list)
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(container_list)
 
     @overload
     def prune(
@@ -1773,7 +1811,10 @@ class ContainerCLI(DockerCLICaller):
         full_cmd = Command(
             [*self.docker_cmd, "container", "rename", str(container), new_name]
         )
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins([container])
 
     def restart(
         self,
@@ -1808,7 +1849,10 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.extend(container_list)
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(container_list)
 
     def remove(
         self,
@@ -1843,7 +1887,10 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.extend(container_list)
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(container_list)
 
     @overload
     def run(
@@ -2448,14 +2495,17 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_flag("--interactive", interactive)
         full_cmd += container_list
 
-        if stream:
-            return stream_stdout_and_stderr(
-                full_cmd, timeout=timeout, workload_status=True
-            )
-        elif attach:
-            return run(full_cmd, timeout=timeout, workload_status=True)
-        else:
-            run(full_cmd, timeout=timeout)
+        try:
+            if stream:
+                return stream_stdout_and_stderr(
+                    full_cmd, timeout=timeout, workload_status=True
+                )
+            elif attach:
+                return run(full_cmd, timeout=timeout, workload_status=True)
+            else:
+                run(full_cmd, timeout=timeout)
+        finally:
+            release_pins(container_list)
 
     def stats(
         self,
@@ -2532,7 +2582,10 @@ class ContainerCLI(DockerCLICaller):
         )
         full_cmd.extend(container_list)
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(container_list)
 
     @overload
     def top(
@@ -2607,7 +2660,10 @@ class ContainerCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "container", "unpause"])
         full_cmd.extend(containers)
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(containers)
 
     def update(
         self,
@@ -2681,7 +2737,10 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--pids-limit", pids_limit)
         full_cmd.add_simple_arg("--restart", restart)
         full_cmd.extend(containers)
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(containers)
 
     @overload
     def wait(self, x: ValidContainer, *, timeout: float | None = None) -> int: ...
