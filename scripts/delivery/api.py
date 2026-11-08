@@ -6,31 +6,16 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Protocol, override
+from typing import Protocol
 
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from pywhales._json import dumps_compat
 
 from . import limits
+from .deadline import afford, budget
+from .failures import CurlFailed, Rejected, require
 from .models import Artifact, Job, PullNumber, Release, Repository
-
-
-@dataclass(slots=True)
-class Rejected(Exception):
-    """Fail closed; exception traceback metadata must remain mutable."""
-
-    reason: str
-
-    @override
-    def __str__(self) -> str:
-        return self.reason
-
-
-def require(condition: bool, reason: str) -> None:
-    """Reject an unsatisfied trust invariant."""
-    if not condition:
-        raise Rejected(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +36,14 @@ class Curl:
     """Use runner curl without shell interpolation or cross-host credentials."""
 
     def request(self, method: str, url: str, body: bytes | None = None) -> Response:
-        """Return a bounded HTTPS response; curl drops auth on host redirects."""
+        """Return a bounded HTTPS response; curl drops auth on host redirects.
+
+        Only `GET` is retried, at most `READ_RETRIES` times with doubling
+        backoff, on a `TRANSIENT_STATUSES` answer or a `TRANSIENT_CURL_EXITS`
+        exit. The caller receives the one final response, or the failure of the
+        final attempt. Every other failure, and every other method, is final on
+        the first attempt. Attempts and backoff stop at the command deadline.
+        """
         command = [
             "curl",
             "--silent",
@@ -84,7 +76,23 @@ class Curl:
                 "--data-binary",
                 "@-",
             ]
-        return self.receive([*command, url], body)
+        retries = limits.READ_RETRIES if method == "GET" else 0
+        retry = 0
+        while True:
+            try:
+                response = self.receive([*command, url], body)
+            except CurlFailed as failed:
+                if retry >= retries or failed.code not in limits.TRANSIENT_CURL_EXITS:
+                    raise
+            else:
+                if retry >= retries or response.status not in limits.TRANSIENT_STATUSES:
+                    return response
+            delay = min(
+                limits.READ_BACKOFF_MAX_SECONDS, limits.READ_BACKOFF_SECONDS * 2**retry
+            )
+            afford(delay)
+            time.sleep(delay)
+            retry += 1
 
     def receive(self, command: list[str], body: bytes | None) -> Response:
         """Drain stdout incrementally; discard stderr without buffering it.
@@ -92,8 +100,11 @@ class Curl:
         The four-byte curl status suffix has a separate framing allowance.
         Aborted receipt always kills and reaps the owned process, including on
         deadline expiry or exceptions. No command or stderr enters errors.
+        The 130-second attempt deadline is shortened to the command deadline,
+        and no process starts once that has passed. A nonzero curl exit raises
+        `CurlFailed` carrying its exit code.
         """
-        deadline = time.monotonic() + 130
+        deadline = time.monotonic() + budget(130)
         output = bytearray()
         # A file avoids blocking on a child that stops reading request stdin.
         with tempfile.TemporaryFile() as incoming:
@@ -131,11 +142,9 @@ class Curl:
                                     output.extend(data)
                                 else:
                                     selector.unregister(process.stdout)
-                        require(
-                            process.wait(timeout=max(0, deadline - time.monotonic()))
-                            == 0,
-                            "HTTP transport failed",
-                        )
+                        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+                        if code != 0:
+                            raise CurlFailed("HTTP transport failed", code)
                     finally:
                         if process.returncode is None:
                             process.kill()

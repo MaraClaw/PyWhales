@@ -102,7 +102,7 @@ expired artifacts require a new complete tested chain, not a rebuild downstream.
 
 The publisher serializes publication, and Pages serializes deployments, without
 cancelling an in-progress delivery. Confirmation allows up to 60 seconds of
-polling waits, in addition to request time. If visibility takes longer, retry
+polling waits, in addition to request time, all within the command deadline. If visibility takes longer, retry
 after PyPI's inventory exposes successfully uploaded files. No credentials are
 passed to downloaded artifacts, and privileged checkouts always use
 `github.workflow_sha`.
@@ -180,6 +180,15 @@ goes directly to the null device (zero retained bytes). The existing 10-second
 connect, 120-second curl and 130-second supervisor deadlines, HTTPS-only
 redirects and host-scoped authorization remain in effect. Every aborted owned
 curl is killed and reaped.
+
+Transient read faults are retried inside `Curl.request`, never by callers.
+Only `GET` retries, at most three times with 1, 2, then 4 seconds of backoff
+(`limits.py`), on HTTP 429, 502, 503 or 504 or on curl exit 6, 7, 28, 52, 55 or
+56. Writes, protocol and TLS exits, 403, 404, byte-budget and invalid-status
+faults fail on the first attempt; a PyPI 404 is a real answer. Each operation
+also runs under one 900-second monotonic deadline covering every attempt,
+backoff and confirmation poll. A wait that would not finish before it is
+rejected without sleeping, and no curl starts after it passes.
 
 The ZIP digest is checked before any member is trusted. Nested wheel/sdist and
 standalone tar/site checks have independent budgets; an outer ZIP limit is not

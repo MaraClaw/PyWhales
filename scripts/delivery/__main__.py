@@ -11,9 +11,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from . import limits
 from .api import Curl, GitHub, Rejected, require
 from .artifacts import extract, inventory, select, verified
 from .chain import name, project_version, receipt, release_notes, seal
+from .deadline import command_deadline
 from .distributions import smoke
 from .models import Run
 from .pages import verify_pages_tar
@@ -44,6 +46,12 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Run one operation under the single command deadline in `limits.py`."""
+    with command_deadline(limits.COMMAND_SECONDS):
+        return execute()
+
+
+def execute() -> int:
     """Execute a delivery decision, returning nonzero on absent or conflicting proof."""
     arguments = parser().parse_args()
     try:

@@ -27,9 +27,17 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from scripts.delivery import __main__ as cli
 from scripts.delivery import api as http
 from scripts.delivery import archives, artifacts, budgets, limits, publication
-from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
+from scripts.delivery.api import (
+    Curl,
+    CurlFailed,
+    GitHub,
+    Rejected,
+    Response,
+    Transport,
+)
 from scripts.delivery.artifacts import describe, download, inventory, sha256
 from scripts.delivery.chain import name, producer, project_version, receipt, seal
+from scripts.delivery.deadline import command_deadline, remaining
 from scripts.delivery.distributions import inspect, smoke
 from scripts.delivery.models import (
     Artifact,
@@ -51,7 +59,7 @@ from scripts.delivery.models import (
 )
 from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
-from scripts.delivery.publication import confirm, prepare
+from scripts.delivery.publication import confirm, destination, prepare
 from scripts.delivery.releases import release, release_record, released
 from scripts.delivery.trust import (
     CHECKS,
@@ -2026,7 +2034,7 @@ def test_http_transport_failures_never_expose_authorization(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "fixture-secret-token")
 
-    script = "import sys; sys.stderr.write('fixture-secret-token'); sys.exit(7)"
+    script = "import sys; sys.stderr.write('fixture-secret-token'); sys.exit(35)"
     processes, _commands = controlled_curl(monkeypatch, script)
     if timeout:
         clock = iter((0.0, 131.0))
@@ -2197,6 +2205,288 @@ def test_curl_rejects_malformed_status_without_partial_response(
     with pytest.raises(Rejected, match="invalid status"):
         Curl().request("GET", "https://delivery.invalid/")
     assert processes[0].returncode == 0
+
+
+OPEN_URL = "https://delivery.invalid/"
+
+
+@dataclass
+class Clock:
+    """Fake monotonic clock whose sleep only advances time."""
+
+    now: float = 1000.0
+    sleeps: list[float] = field(default_factory=list)
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    instance = Clock()
+    monkeypatch.setattr(http.time, "monotonic", instance.monotonic)
+    monkeypatch.setattr(http.time, "sleep", instance.sleep)
+    return instance
+
+
+@dataclass
+class Attempts:
+    """Scripted `Curl.receive` outcomes; each attempt consumes one."""
+
+    outcomes: list[Response | Rejected]
+    commands: list[list[str]] = field(default_factory=list)
+
+    def receive(self, command: list[str], body: bytes | None) -> Response:
+        assert self.outcomes, "unexpected extra attempt"
+        self.commands.append(command)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Rejected):
+            raise outcome
+        return outcome
+
+
+def attempts(
+    monkeypatch: pytest.MonkeyPatch, *outcomes: Response | Rejected
+) -> Attempts:
+    script = Attempts(list(outcomes))
+    monkeypatch.setattr(Curl, "receive", script.receive)
+    return script
+
+
+def transport_failure(code: int) -> CurlFailed:
+    return CurlFailed("HTTP transport failed", code)
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_curl_get_retries_transient_status_and_returns_the_final_response(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, status: int
+) -> None:
+    script = attempts(monkeypatch, Response(status, b"busy"), Response(200, b"ok"))
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert len(script.commands) == 2 and script.commands[0] == script.commands[1]
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+@pytest.mark.parametrize("code", [6, 7, 28, 52, 55, 56])
+def test_curl_get_retries_transient_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, code: int
+) -> None:
+    script = attempts(monkeypatch, transport_failure(code), Response(200, b"ok"))
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert len(script.commands) == 2
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_curl_get_backoff_doubles_to_its_cap_then_returns_the_last_status(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    monkeypatch.setattr(limits, "READ_RETRIES", 4)
+    monkeypatch.setattr(limits, "READ_BACKOFF_SECONDS", 1.5)
+    monkeypatch.setattr(limits, "READ_BACKOFF_MAX_SECONDS", 4.0)
+    script = attempts(monkeypatch, *[Response(503, b"busy")] * 5)
+    assert Curl().request("GET", OPEN_URL) == Response(503, b"busy")
+    assert len(script.commands) == 5
+    assert clock.sleeps == [1.5, 3.0, 4.0, 4.0]
+
+
+def test_curl_get_raises_the_last_transient_exit_after_bounded_attempts(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, *[transport_failure(7)] * (limits.READ_RETRIES + 1))
+    with pytest.raises(Rejected, match="HTTP transport failed"):
+        Curl().request("GET", OPEN_URL)
+    assert len(script.commands) == limits.READ_RETRIES + 1
+    assert len(clock.sleeps) == limits.READ_RETRIES
+
+
+@pytest.mark.parametrize("status", [200, 201, 400, 403, 404, 500, 501])
+def test_curl_get_returns_permanent_statuses_on_the_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, status: int
+) -> None:
+    script = attempts(monkeypatch, Response(status, b"answer"))
+    assert Curl().request("GET", OPEN_URL) == Response(status, b"answer")
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        transport_failure(1),
+        transport_failure(22),
+        transport_failure(35),
+        transport_failure(60),
+        Rejected("HTTP response byte budget exceeded"),
+        Rejected("HTTP transport invalid status"),
+        Rejected("HTTP transport timed out"),
+    ],
+)
+def test_curl_get_fails_permanent_transport_faults_on_the_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, failure: Rejected
+) -> None:
+    script = attempts(monkeypatch, failure)
+    with pytest.raises(Rejected) as rejected:
+        Curl().request("GET", OPEN_URL)
+    assert rejected.value is failure
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
+@pytest.mark.parametrize("outcome", [Response(503, b"busy"), transport_failure(7)])
+def test_curl_never_retries_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: Clock,
+    method: str,
+    outcome: Response | Rejected,
+) -> None:
+    script = attempts(monkeypatch, outcome)
+    if isinstance(outcome, Response):
+        assert Curl().request(method, OPEN_URL, b"{}") == outcome
+    else:
+        with pytest.raises(Rejected):
+            Curl().request(method, OPEN_URL, b"{}")
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+def test_curl_retries_a_transient_exit_from_a_real_child(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    marker = tmp_path / "seen"
+    processes, commands = controlled_curl(
+        monkeypatch,
+        f"import os, sys; m = {str(marker)!r}; first = not os.path.exists(m)\n"
+        "open(m, 'w').close()\n"
+        "if first: sys.exit(56)\n"
+        "sys.stdout.buffer.write(b'ok\\n200')",
+    )
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert [process.returncode for process in processes] == [56, 0]
+    assert commands[0] == commands[1]
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_pagination_counts_only_the_accepted_page_after_a_retry(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    page = service.routes[
+        ("GET", BASE_URL + "actions/runs/100/attempts/1/jobs?per_page=100&page=1")
+    ].body
+    monkeypatch.setenv("GH_TOKEN", "fixture-token")
+    monkeypatch.setattr(limits, "PAGINATION_BYTES", len(page))
+    script = attempts(
+        monkeypatch, Response(503, b"x" * (2 * len(page))), Response(200, page)
+    )
+    found = GitHub(Curl(), "owner/repo", 1).pages(
+        "actions/runs/100/attempts/1/jobs", Job, "jobs"
+    )
+    assert found == service.jobs
+    assert len(script.commands) == 2
+
+
+def test_destination_retries_a_transient_pypi_read(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    service.published()
+    page = service.routes[("GET", PYPI)].body
+    script = attempts(monkeypatch, Response(502, b""), Response(200, page))
+    assert destination(GitHub(Curl(), "owner/repo", 1), service.tested) == set()
+    assert len(script.commands) == 2
+
+
+def test_destination_treats_a_pypi_404_as_an_answer_without_retrying(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, Response(404, b"{}"))
+    missing = destination(GitHub(Curl(), "owner/repo", 1), service.tested)
+    assert missing == {WHEEL, SDIST}
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+def test_curl_attempt_is_shortened_to_the_command_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reads: scope entry, attempt start, budget, then the first select check.
+    readings = iter([1000.0, 1000.0, 1000.0, 1061.0])
+    monkeypatch.setattr(http.time, "monotonic", lambda: next(readings))
+    processes, _commands = controlled_curl(
+        monkeypatch, "import sys; sys.stdout.buffer.write(b'ok\\n200')"
+    )
+    with command_deadline(60), pytest.raises(Rejected, match="transport timed out"):
+        Curl().request("GET", OPEN_URL)
+    assert processes[0].returncode is not None
+
+
+def test_curl_starts_no_process_once_the_command_deadline_has_passed(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    processes, _commands = controlled_curl(monkeypatch, "pass")
+    with command_deadline(10):
+        clock.now += 10
+        with pytest.raises(Rejected, match="delivery deadline exceeded"):
+            Curl().request("GET", OPEN_URL)
+    assert processes == []
+
+
+def test_curl_backoff_that_outlasts_the_command_deadline_is_not_slept(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, *[Response(503, b"busy")] * 3)
+    with command_deadline(2.5), pytest.raises(Rejected, match="deadline exceeded"):
+        Curl().request("GET", OPEN_URL)
+    assert len(script.commands) == 2
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_confirm_polling_stops_at_the_command_deadline(
+    service: Service, clock: Clock
+) -> None:
+    with command_deadline(12), pytest.raises(Rejected, match="deadline exceeded"):
+        confirm(service.api, 100)
+    assert clock.sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS] * 2
+    assert [call for call in service.calls if call[1] == PYPI] == [
+        ("GET", PYPI, None)
+    ] * 3
+
+
+def test_cli_runs_each_operation_under_one_command_deadline(
+    service: Service,
+    clock: Clock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service.published()
+    seen: list[float | None] = []
+
+    def factory() -> Service:
+        seen.append(remaining())
+        return service
+
+    monkeypatch.setattr(cli, "Curl", factory)
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 0
+    )
+    assert seen == [limits.COMMAND_SECONDS]
+    assert remaining() is None
+
+
+def test_cli_reports_command_deadline_expiry_during_confirmation(
+    service: Service,
+    clock: Clock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(limits, "COMMAND_SECONDS", 12)
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 1
+    )
+    assert "delivery rejected: delivery deadline exceeded" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def tarred(files: dict[str, bytes], *, compressed: bool) -> bytes:
