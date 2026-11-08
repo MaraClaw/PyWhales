@@ -59,3 +59,19 @@ PULL_ITEMS: Final = 100
 # can carry notes up to NOTES_BYTES, so one full page of maximum-size releases
 # (100 * 120,000 bytes, about 11.4 MiB) still fits.
 PAGINATION_BYTES: Final = 16 * MIB
+# One monotonic deadline per CLI operation covers every transport attempt, retry
+# backoff and confirmation poll. A normal run takes seconds to a few minutes;
+# without this, retries and polling could stack 130-second attempts indefinitely.
+COMMAND_SECONDS: Final = 900
+# Only idempotent GET reads are retried, so a transient fault cannot repeat a
+# write. Backoff doubles from the base up to the cap and is deterministic.
+READ_RETRIES: Final = 3
+READ_BACKOFF_SECONDS: Final = 1.0
+READ_BACKOFF_MAX_SECONDS: Final = 8.0
+# Transient answers: too many requests and the gateway or availability errors.
+# Other statuses, including 403 and 404, are real answers and are never retried.
+TRANSIENT_STATUSES: Final = frozenset({429, 502, 503, 504})
+# curl exits that signal a transient network fault: 6 resolve, 7 connect,
+# 28 timeout, 52 empty reply, 55 send failure and 56 receive failure. Protocol
+# and TLS refusals stay out because retrying cannot change the outcome.
+TRANSIENT_CURL_EXITS: Final = frozenset({6, 7, 28, 52, 55, 56})

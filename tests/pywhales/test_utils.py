@@ -42,6 +42,7 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferCategory,
 )
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
@@ -1299,7 +1300,7 @@ def test_process_stream_timeout_preserves_read_scratch(
     resume = Event()
     check_size = stream._check_size
 
-    def pause_after_read(size: int, category: str) -> None:
+    def pause_after_read(size: int, category: StreamBufferCategory) -> None:
         check_size(size, category)
         read.set()
         assert resume.wait(timeout=3)

@@ -41,7 +41,7 @@
 ## Diagnostic Examples
 
 - Keep `docs/template/user_guide/exceptions.md`, the root `README.md`, source docstrings, and
-  `skills/pywhales/references/client-and-errors.md` consistent. Edit these sources, not generated pages.
+  `skills/pywhales-docker-container/references/client-and-errors.md` consistent. Edit these sources, not generated pages.
 - Examples should use safe summaries such as exit codes. PyWhales-owned automatic diagnostics withhold
   arbitrary argv, environment values, and captured payloads by default. Describe `raw_diagnostics=True`
   as a per-client opt-in for trusted troubleshooting; safe inspect errors don't dump responses or expose

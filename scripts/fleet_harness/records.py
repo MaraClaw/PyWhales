@@ -174,7 +174,7 @@ class Peaks(Contract):
 class Schedule(Contract):
     """Frozen overlap receipts in submission order with their observed peaks."""
 
-    version: Literal[1, 2, 3] = Field(default=1, exclude_if=lambda v: v == 1)
+    version: Literal[1, 2, 3, 4] = Field(default=1, exclude_if=lambda v: v == 1)
     peaks: Peaks
     receipts: tuple[Receipt, ...]
 

@@ -2,17 +2,26 @@
 
 import hashlib
 import json
+import os
 import socket
 import subprocess
+import sys
 from collections.abc import Iterable
-from typing import Literal, assert_never
+from itertools import product
+from pathlib import Path
+from typing import Final, Literal, assert_never
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from scripts.fleet_harness.experiment import Comparison, Experiment, decide
-from scripts.fleet_harness.models import Plan, QueueRetryExponential, Step
+from scripts.fleet_harness.models import (
+    Plan,
+    QueueRetryExponential,
+    RetryJitter,
+    Step,
+)
 from scripts.fleet_harness.records import Receipt, RunReport, Schedule
 from scripts.fleet_harness.runner import run
 from scripts.fleet_harness.timeline import lineage
@@ -494,6 +503,33 @@ def exponential(initial: float, cap: float, attempts: int = 4) -> dict[str, obje
     }
 
 
+def jittered(
+    initial: float,
+    cap: float,
+    attempts: int = 4,
+    seed: int = 7,
+    fraction: float = 0.5,
+) -> dict[str, object]:
+    """Return `exponential` with seeded downward jitter on the capped delay."""
+    return {
+        "queue_lease_seconds": 1.0,
+        "max_queue_attempts": attempts,
+        "queue_retry_exponential": {
+            "initial_seconds": initial,
+            "max_seconds": cap,
+            "jitter": {"seed": seed, "fraction": fraction},
+        },
+    }
+
+
+def jitter_unit(seed: int, submission: int, attempt: int) -> float:
+    """Recompute the documented unit: top 53 bits of SHA-256 over three big-endian u64."""
+    digest = hashlib.sha256(
+        b"".join(n.to_bytes(8, "big") for n in (seed, submission, attempt))
+    ).digest()
+    return (int.from_bytes(digest[:8], "big") >> 11) / 2**53
+
+
 def spans(items: Iterable[tuple[float, float]]) -> list[object]:
     """Compare fake-clock interval pairs within float noise."""
     return [pytest.approx(item) for item in items]
@@ -609,6 +645,8 @@ def test_exponential_delay_never_overflows_and_follows_the_closed_form() -> None
         ([POLICY], 2),
         ([exponential(0.5, 1.0)], 3),
         ([POLICY, exponential(0.5, 1.0)], 3),
+        ([jittered(0.5, 1.0)], 4),
+        ([POLICY, exponential(0.5, 1.0), jittered(0.5, 1.0)], 4),
     ],
 )
 def test_schedule_version_follows_the_policies_of_the_plan(
@@ -813,9 +851,15 @@ def test_independently_authored_capped_history_validates_without_scheduler_repla
             assert not lineage(row, other, 10.0)
         assert not lineage(row, step, 6.0)
     assert history.version == 3
-    with pytest.raises(ValidationError):
+    assert (
         Schedule.model_validate_json(
             history.model_dump_json().replace('"version":3', '"version":4')
+        ).version
+        == 4
+    )
+    with pytest.raises(ValidationError):
+        Schedule.model_validate_json(
+            history.model_dump_json().replace('"version":3', '"version":5')
         )
 
 
@@ -988,3 +1032,204 @@ def test_exponential_digest_is_distinct_and_legacy_digests_are_unchanged() -> No
         decision.decision == "no_go"
         and decision.connections == decision.candidate_launches == 0
     )
+
+
+ROOT: Final = Path(__file__).resolve().parents[2]
+
+
+def capped_delay(initial: float, cap: float, attempt: int) -> float:
+    """Return the closed-form capped doubling delay for ordinary magnitudes."""
+    return min(cap, initial * 2.0 ** (attempt - 1))
+
+
+def seeded(seed: int = 7, fraction: float = 0.5) -> QueueRetryExponential:
+    return QueueRetryExponential(
+        initial_seconds=0.5,
+        max_seconds=4.0,
+        jitter=RetryJitter(seed=seed, fraction=fraction),
+    )
+
+
+def test_jitter_delay_is_sha256_scaled_downward_after_the_cap() -> None:
+    policy = seeded()
+    assert jitter_unit(7, 2, 3) == 0.3411779377232852
+    assert policy.delay(3, 2) == pytest.approx(1.6588220622767147)
+    for submission, attempt in product(range(1, 9), range(1, 12)):
+        capped = capped_delay(0.5, 4.0, attempt)
+        expected = capped * (1 - 0.5 * jitter_unit(7, submission, attempt))
+        delay = policy.delay(attempt, submission)
+        assert delay == expected
+        assert capped * 0.5 < delay <= capped
+
+
+def test_jitter_is_applied_after_the_cap_so_saturated_attempts_stay_spread() -> None:
+    policy = QueueRetryExponential(
+        initial_seconds=2.0,
+        max_seconds=2.0,
+        jitter=RetryJitter(seed=3, fraction=0.9),
+    )
+    delays = [policy.delay(attempt, 1) for attempt in range(1, 60)]
+    assert all(0.2 < delay <= 2.0 for delay in delays)
+    assert len(set(delays)) == len(delays)
+    huge = QueueRetryExponential(
+        initial_seconds=1e308,
+        max_seconds=1.7e308,
+        jitter=RetryJitter(seed=1, fraction=0.5),
+    )
+    assert 0 < huge.delay(10**12, 1) <= 1.7e308
+
+
+def test_subnormal_jitter_falls_back_to_the_capped_delay() -> None:
+    tiny = 5e-324
+    policy = QueueRetryExponential(
+        initial_seconds=tiny,
+        max_seconds=tiny,
+        jitter=RetryJitter(seed=0, fraction=0.999999),
+    )
+    rounded_to_zero = 0
+    for submission, attempt in product(range(1, 65), range(1, 4)):
+        raw = tiny * (1 - 0.999999 * jitter_unit(0, submission, attempt))
+        rounded_to_zero += raw == 0.0
+        assert policy.delay(attempt, submission) == tiny
+    assert rounded_to_zero > 0
+
+
+def test_unjittered_delays_ignore_the_submission_number() -> None:
+    fixed = Step.model_validate_json(json.dumps(at(0.0) | POLICY))
+    capped = Step.model_validate_json(json.dumps(at(0.0) | exponential(0.5, 4.0)))
+    for step, expected in ((fixed, 1.0), (capped, 2.0)):
+        assert all(step.retry_delay(3, number) == expected for number in range(1, 40))
+    jitter = Step.model_validate_json(json.dumps(at(0.0) | jittered(0.5, 4.0)))
+    assert len({jitter.retry_delay(3, number) for number in range(1, 40)}) > 1
+
+
+def test_jitter_is_identical_across_interpreter_runs_and_hash_seeds() -> None:
+    snippet = (
+        "import json\n"
+        "from scripts.fleet_harness.models import QueueRetryExponential as Q\n"
+        "q = Q.model_validate({'initial_seconds': 0.5, 'max_seconds': 4.0,"
+        " 'jitter': {'seed': 2**63 - 1, 'fraction': 0.75}})\n"
+        "print(json.dumps([q.delay(a, s) for s in range(1, 6) for a in range(1, 9)]))\n"
+    )
+    policy = QueueRetryExponential(
+        initial_seconds=0.5,
+        max_seconds=4.0,
+        jitter=RetryJitter(seed=2**63 - 1, fraction=0.75),
+    )
+    expected = [
+        policy.delay(attempt, submission)
+        for submission, attempt in product(range(1, 6), range(1, 9))
+    ]
+    for hash_seed in ("0", "1", "random"):
+        child = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        assert json.loads(child.stdout) == expected
+
+
+def declared(jitter: object) -> dict[str, object]:
+    base = jittered(1.0, 4.0)
+    return base | {
+        "queue_retry_exponential": {
+            "initial_seconds": 1.0,
+            "max_seconds": 4.0,
+            "jitter": jitter,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "jitter",
+    [
+        {"seed": 0, "fraction": 1e-9},
+        {"seed": 2**63 - 1, "fraction": 0.999999},
+        None,
+    ],
+)
+def test_jitter_accepts_the_seed_and_fraction_ranges(jitter: object) -> None:
+    step = overlap_plan(at(0.0) | declared(jitter)).steps[0]
+    dumped = step.model_dump()["queue_retry_exponential"]
+    assert ("jitter" in dumped) is (jitter is not None)
+
+
+@pytest.mark.parametrize(
+    "jitter",
+    [
+        {"seed": -1, "fraction": 0.5},
+        {"seed": 2**63, "fraction": 0.5},
+        {"seed": True, "fraction": 0.5},
+        {"seed": "1", "fraction": 0.5},
+        {"seed": 1.0, "fraction": 0.5},
+        {"seed": None, "fraction": 0.5},
+        {"fraction": 0.5},
+        {"seed": 1},
+        {"seed": 1, "fraction": 0},
+        {"seed": 1, "fraction": 1},
+        {"seed": 1, "fraction": -0.1},
+        {"seed": 1, "fraction": 1.5},
+        {"seed": 1, "fraction": float("nan")},
+        {"seed": 1, "fraction": float("inf")},
+        {"seed": 1, "fraction": True},
+        {"seed": 1, "fraction": "0.5"},
+        {"seed": 1, "fraction": 0.5, "direction": "up"},
+        {},
+    ],
+)
+def test_jitter_rejects_out_of_range_and_malformed_values(jitter: object) -> None:
+    with pytest.raises(ValidationError):
+        overlap_plan(at(0.0) | declared(jitter))
+
+
+def test_jitter_is_omitted_from_unjittered_policies_and_normalized_when_set() -> None:
+    assert (
+        "jitter"
+        not in overlap_plan(at(0.0) | exponential(1, 4))
+        .steps[0]
+        .model_dump()["queue_retry_exponential"]
+    )
+    step = overlap_plan(at(0.0) | declared({"seed": 5, "fraction": 0.25})).steps[0]
+    assert step.model_dump()["queue_retry_exponential"]["jitter"] == {
+        "seed": 5,
+        "fraction": 0.25,
+    }
+
+
+@pytest.mark.parametrize("defect", ["seed", "fraction", "version"])
+def test_jittered_report_validates_without_replay_and_rejects_tampering(
+    defect: str,
+) -> None:
+    with (
+        patch.object(subprocess, "Popen", side_effect=AssertionError("process")),
+        patch.object(socket, "socket", side_effect=AssertionError("socket")),
+        patch.object(socket, "getaddrinfo", side_effect=AssertionError("dns")),
+    ):
+        report = run(
+            overlap_manifest(1, "operation_count", 3),
+            overlap_plan(
+                at(0.0, 2.5),
+                at(0.0, 0.5) | jittered(0.5, 1.0),
+                at(0.0, 0.5) | jittered(0.5, 1.0),
+            ),
+        )
+    assert schedule(report).version == 4
+    with patch(
+        "scripts.fleet_harness.scheduler.Simulation.run",
+        side_effect=AssertionError("replay"),
+    ):
+        assert RunReport.model_validate_json(report.model_dump_json()) == report
+        raw = json.loads(report.model_dump_json())
+        if defect == "version":
+            raw["schedule"]["version"] = 3
+        else:
+            raw["steps"][1]["queue_retry_exponential"]["jitter"][defect] = (
+                8 if defect == "seed" else 0.75
+            )
+        with pytest.raises(ValidationError) as caught:
+            RunReport.model_validate_json(json.dumps(raw))
+    assert any(error["type"].startswith("schedule_") for error in caught.value.errors())

@@ -33,6 +33,8 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferCategory,
+    StreamBufferLimitError,
     get_docker_exception_type,
 )
 from pywhales.telemetry import Outcome, StopReason
@@ -280,13 +282,13 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                     if name == "stderr":
                         with self._queue.condition:
                             self._check_size(
-                                len(self._stderr) + len(chunk), "stderr history"
+                                len(self._stderr) + len(chunk), "stderr_history"
                             )
                             self._stderr.extend(chunk)
                     while offset < len(chunk) and not self._stop.is_set():
                         newline = chunk.find(b"\n", offset)
                         end = len(chunk) if newline < 0 else newline + 1
-                        self._check_size(len(pending) + end - offset, "output record")
+                        self._check_size(len(pending) + end - offset, "output_record")
                         with self._queue.condition:
                             if self._stop.is_set():
                                 return
@@ -382,18 +384,22 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             finally:
                 self._inflight[name] = b""
 
-    def _check_size(self, size: int, category: str) -> None:
+    def _check_size(self, size: int, category: StreamBufferCategory) -> None:
         """Enforce an individual record or stderr-history byte limit.
 
         Args:
             size: Proposed retained byte count, including any newline.
-            category: Accounting category included in the failure message.
+            category: Exceeded bound, carried by the error and named in its message.
 
         Raises:
-            BufferError: If the proposed count exceeds a configured budget.
+            StreamBufferLimitError: If the proposed count exceeds a configured
+                budget.
         """
         if self._buffer_bytes is not None and size > self._buffer_bytes:
-            raise BufferError(f"{category} exceeds buffer_bytes={self._buffer_bytes}")
+            raise StreamBufferLimitError(
+                f"{category.replace('_', ' ')} exceeds buffer_bytes={self._buffer_bytes}",
+                category,
+            )
 
     def _expire(self) -> None:
         """Record the first stop of a running stream while the queue lock is held.
@@ -521,7 +527,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             ObservationTimeout: If the observation deadline expired.
             ObservationLimitError: If a scope stream budget was exceeded.
             DockerException: If a subprocess failure was recorded.
-            BufferError: If retained output exceeded an individual byte limit.
+            StreamBufferLimitError: If retained output exceeded an individual
+                byte limit.
             OSError: If a pipe reader recorded an operating-system failure.
         """
         self._watchdog.join()
@@ -582,7 +589,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             ObservationTimeout: If the launch-time observation deadline expired.
             ObservationLimitError: If the launch-time observation's stream budget
                 was exceeded, with reason ``total_stream``.
-            BufferError: If a record or retained stderr exceeded its byte limit.
+            StreamBufferLimitError: If a record or retained stderr exceeded its
+                byte limit.
             OSError: If a pipe read failed.
         """
         while True:

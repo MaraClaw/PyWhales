@@ -11,6 +11,8 @@ For wrapper edits, read the production [component](../../../pywhales/components/
 | Surface | Start here | Boundary |
 | --- | --- | --- |
 | Group commands, resources and wire models | `test_<group>.py`, including `test_image.py` | Mixed live, model and mocked cases; classify each test and its fixtures. |
+| Hydrated container/image/network/volume listings | `test_container.py`, `test_image.py`, `test_network.py`, `test_volume.py`; helper `hydration_fakes.py` | Hydration cases use in-memory CLI responses; whole modules still mix live tests. Cache clocks/pins/copying are in `../test_client_config.py`. |
+| Image transfer fanout under child limits | `test_image_child_limits.py`, `../test_observation.py` | Barrier/event fake children and shared account reservations; real-child stream cleanup remains in `test_image.py`. |
 | Compose top, logs, events and projects | `test_compose.py` | Mocked commands, local children and live projects share one module with a collection probe. |
 | Buildx and registry manifests | `buildx/test_buildx_cli_wrapper.py`, `buildx/imagetools/test_imagetools_cli_wrapper.py` | Global-client integration, including cases without a runtime fixture. |
 | Manifest model snapshots | `buildx/imagetools/test_models.py`, `jsons/` | The model module reads saved JSON without CLI launches; fixture directories aren't test selectors. |

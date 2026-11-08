@@ -12,7 +12,7 @@
 - Deduplicate iterable references in first-seen order before choosing single or multiple transfers.
   An iterable pull still returns a list without streaming, even with one unique reference.
 - `quiet=True` with `stream_logs=True` raises `ValueError` for both pull and push.
-- Nonstreamed transfers are eager; multiple unique references use a four-worker `ThreadPool`
+- Nonstreamed transfers are eager; multiple unique references use a `ThreadPool` sized to the caller's remaining child allowance, capped at `WORKERS` (4),
   through `streams.py::map_in_contexts`. Each task enters its own `copy_context()` made in the
   caller's thread; never share one `Context` across workers.
   Pull returns `Image` for a string or an ordered list for an iterable; push returns `None`.
@@ -31,9 +31,10 @@
 ## Multi-Image Streams
 
 - `MultiImageStream` starts workers on first consumption, not construction or context entry.
-  It owns active child streams and admits at most four concurrent transfers. It snapshots the
-  creating context and runs each worker in a fresh copy, so children keep the creator's
+  It owns active child streams and sizes workers then from the remaining child allowance in its snapshotted creation context, capped at four.
+  Each worker enters a fresh copy of that context, so children keep the creator's
   observation scope even if iteration starts after its `with` block.
+- Both fanouts use `ObservationState.child_allowance()`, including occupied outer accounts. Unobserved or child-unbounded scopes keep four workers; one slot serializes transfers. Zero allowance starts one worker so normal preflight refuses without consuming an attempt. Sizing reserves nothing; later sibling contention still refuses immediately rather than waiting.
 - A single unique reference uses an eager `MappedProcessStream`, including duplicate-only input.
 - Records are `(image_reference, bytes)`; don't promise global ordering across images or pipes.
 - The first worker error, a child's `DockerTimeout` included, stops sibling work and queued transfers without
@@ -44,6 +45,7 @@
 
 ## Inspection, Copy, And Archives
 
+- `list(hydrate=True)` deduplicates full IDs in first-seen CLI order and pins snapshots through `_hydration.py`; the default list retains unordered set-based deduplication and lazy handles. Image `tag()` and `remove()` release supplied handles' pins even when their launch fails.
 - Batch inspect must verify each snapshot's ID or normalized tag/digest aliases against its request.
   Positional pairing alone isn't identity validation; mismatches raise `ParsingError`.
 - Normalization handles Docker Hub/library prefixes, implicit `:latest`, and tagged digest references.
@@ -74,6 +76,7 @@
 ## Test Navigation
 
 - `tests/pywhales/test_container_image_enum_json.py`: nested config and graph-driver JSON contracts.
+- `tests/pywhales/components/test_image_child_limits.py`: barrier/event fake children prove blocking and streamed pull/push fanout, occupied nested accounts, late iteration, zero-allowance refusal without debit, and sibling races. These tests start no processes; `test_image.py` retains real-child lifecycle coverage and fake-CLI hydrated listing cases.
 - `tests/pywhales/components/test_image.py` contains mocked CLI and real child-process stream tests:
   `test_empty_image_operations_keep_existing_result_shapes`, `test_empty_pull_stream_is_owned_without_executable_resolution`,
   `test_multiple_image_stream_has_lazy_owned_lifecycle`,

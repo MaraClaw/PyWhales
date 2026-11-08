@@ -27,7 +27,7 @@ from pywhales.convergence._types import (
 from pywhales.convergence._wire import (
     ContainerWire,
     StandaloneContainerWire,
-    inspect_container,
+    inspect_containers,
     list_compose_ids,
 )
 from pywhales.exceptions import (
@@ -77,6 +77,7 @@ class Selection:
     max_restarts: int | None
     fail_on_exit: bool = False
     fail_on_unhealthy: bool = False
+    fail_on_restart_budget: bool = False
 
 
 def validate_selection(config: ClientConfig, selection: Selection) -> None:
@@ -103,6 +104,10 @@ def validate_selection(config: ClientConfig, selection: Selection) -> None:
         raise ValueError("fail_on_exit must be a bool")
     if type(selection.fail_on_unhealthy) is not bool:
         raise ValueError("fail_on_unhealthy must be a bool")
+    if type(selection.fail_on_restart_budget) is not bool:
+        raise ValueError("fail_on_restart_budget must be a bool")
+    if selection.fail_on_restart_budget and budget is None:
+        raise ValueError("fail_on_restart_budget needs max_restarts")
     if config.compose_dry_run:
         raise ValueError("A dry-run client cannot be captured")
 
@@ -111,13 +116,8 @@ def list_members(
     config: ClientConfig, services: tuple[str, ...]
 ) -> list[ContainerWire]:
     """List and inspect the selected services' containers, leaving out one-offs."""
-    members: list[ContainerWire] = []
-    for identity in list_compose_ids(config, services):
-        check_observation()
-        container = inspect_container(config, identity)
-        if container.config.labels.oneoff != "True":
-            members.append(container)
-    return members
+    containers = inspect_containers(config, list_compose_ids(config, services))
+    return [item for item in containers if item.config.labels.oneoff != "True"]
 
 
 def _restarts(container: ContainerWire | StandaloneContainerWire) -> int:
@@ -163,6 +163,7 @@ def snapshot_target(
         max_restarts=selection.max_restarts,
         fail_on_exit=selection.fail_on_exit,
         fail_on_unhealthy=selection.fail_on_unhealthy,
+        fail_on_restart_budget=selection.fail_on_restart_budget,
     )
 
 
@@ -227,7 +228,11 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
         for service in target.services
     ]
     return evaluate_groups(
-        groups, target.max_restarts, target.fail_on_exit, target.fail_on_unhealthy
+        groups,
+        target.max_restarts,
+        target.fail_on_exit,
+        target.fail_on_unhealthy,
+        target.fail_on_restart_budget,
     )
 
 
@@ -236,6 +241,7 @@ def evaluate_groups(
     budget: int | None,
     fail_on_exit: bool,
     fail_on_unhealthy: bool,
+    fail_on_restart_budget: bool,
 ) -> DeadlineDetail | Failure:
     """Evaluate grouped containers using the shared Compose readiness rules."""
     completion = [group for done, group in groups if done]
@@ -246,6 +252,8 @@ def evaluate_groups(
     if budget is not None:
         counts = [[_restarts(container) for container in group] for group in running]
         over_budget = sum(any(count > budget for count in group) for group in counts)
+    if fail_on_restart_budget and over_budget:
+        return Failure(reason="restart_budget_exceeded")
     if fail_on_exit and any(
         container.state.status == "exited"
         and not container.state.restarting

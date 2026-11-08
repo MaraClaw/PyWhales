@@ -59,6 +59,17 @@ def release_notes(root: Path, version: str) -> str:
     return section(text, version)
 
 
+def project_version(root: Path) -> str:
+    """Read the version declared by the checkout's bounded pyproject.toml."""
+    project = tomllib.loads(
+        local(root / "pyproject.toml", limits.PROJECT_BYTES).decode("utf-8")
+    ).get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    require(isinstance(version, str), "project version missing")
+    assert isinstance(version, str)
+    return version
+
+
 def seal(api: GitHub, run_id: int, root: Path) -> Seal:
     """Seal after all existing checks succeeded in the current producer attempt.
 
@@ -95,9 +106,7 @@ def seal(api: GitHub, run_id: int, root: Path) -> Seal:
             "uploader output linkage",
         )
     distributions = download(api, dist)
-    version = tomllib.loads(
-        local(root / "pyproject.toml", limits.PROJECT_BYTES).decode("utf-8")
-    )["project"]["version"]
+    version = project_version(root)
     notes = release_notes(root, version)
     inspect(distributions, version)
     return Seal(

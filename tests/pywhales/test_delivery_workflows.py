@@ -7,6 +7,7 @@ dispatches, deploys, runs Docker or contacts a production service.
 import base64
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -26,9 +27,17 @@ from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from scripts.delivery import __main__ as cli
 from scripts.delivery import api as http
 from scripts.delivery import archives, artifacts, budgets, limits, publication
-from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
+from scripts.delivery.api import (
+    Curl,
+    CurlFailed,
+    GitHub,
+    Rejected,
+    Response,
+    Transport,
+)
 from scripts.delivery.artifacts import describe, download, inventory, sha256
-from scripts.delivery.chain import name, producer, receipt, seal
+from scripts.delivery.chain import name, producer, project_version, receipt, seal
+from scripts.delivery.deadline import command_deadline, remaining
 from scripts.delivery.distributions import inspect, smoke
 from scripts.delivery.models import (
     Artifact,
@@ -50,7 +59,7 @@ from scripts.delivery.models import (
 )
 from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
-from scripts.delivery.publication import confirm, prepare
+from scripts.delivery.publication import confirm, destination, prepare
 from scripts.delivery.releases import release, release_record, released
 from scripts.delivery.trust import (
     CHECKS,
@@ -496,6 +505,7 @@ def test_rejects_incomplete_same_attempt_checks(service: Service, fault: str) ->
 
 
 ARM_CHECK = "Compose and Buildx ARM64 smoke tests"
+NOTES_CHECK = "Validate release notes"
 WORKFLOW = ROOT / ".github" / "workflows" / "python-package.yml"
 MODERN_COMMAND = (
     "uv run --locked pytest -vv -rs --no-runtime-skip --durations=10 "
@@ -513,6 +523,7 @@ EXPECTED_CHECKS = frozenset(
         ARM_CHECK,
         "build-windows",
         "Build tested distributions",
+        NOTES_CHECK,
         *(
             f"build-linux-test-component ({component})"
             for component in (
@@ -624,6 +635,25 @@ def test_native_arm64_smoke_job_is_required_and_runs_the_modern_suite() -> None:
     assert {"build-linux-test-modern", "build-linux-test-modern-arm64"} <= jobs[
         "delivery-eligible"
     ].needs
+
+
+def test_release_notes_job_is_a_dedicated_required_check() -> None:
+    jobs = workflow_jobs()
+    job, neighbor = jobs["release-notes"], jobs["build-distributions"]
+    triggers = WORKFLOW.read_text().split("\njobs:\n", 1)[0]
+
+    assert job.names == {NOTES_CHECK}
+    assert re.search(rf"(?m)^    name: {re.escape(NOTES_CHECK)}$", job.text)
+    assert {"if", "needs", "strategy", "continue-on-error", "container"}.isdisjoint(
+        job.keys
+    )
+    assert "uv run --locked python -m scripts.delivery notes" in job.command
+    assert set(matches(r"uses: (\S+)", job.text)) <= set(
+        matches(r"uses: (\S+)", neighbor.text)
+    )
+    assert "release-notes" in jobs["delivery-eligible"].needs
+    assert "  pull_request: {}" in triggers
+    assert "  push:\n    branches:\n      - main" in triggers
 
 
 def arm_faults(jobs: tuple[Job, ...], fault: str) -> tuple[Job, ...]:
@@ -1231,6 +1261,103 @@ def test_notes_heading_is_matched_exactly_without_patterns(
             section(text, "0.7.0rc1")
 
 
+def entry(body: str, tail: str = "") -> str:
+    return (
+        f"# Changelog\n\n## 0.6.1\n\n{body}\n{tail}\n## 0.6.0\n\n- Earlier release.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```md\n## 0.6.1\n## Other\n```\n\n- Tail.",
+        "~~~md\n## 0.6.1\n## Other\n~~~\n\n- Tail.",
+        "````\n```\n## Fake\n`````\n\n- Tail.",
+        "~~~~\n~~~\n## Fake\n~~~~~~\n\n- Tail.",
+        "   ```\n## Fake\n   ```\n\n- Tail.",
+        "```\n## Fake\n```  \t\n\n- Tail.",
+        "```\n~~~\n## Fake\n```\n\n- Tail.",
+        "```\n```python\n## Fake\n```\n\n- Tail.",
+        "```\n    ```\n## Fake\n```\n\n- Tail.",
+        "~~~a`b~c\n## Fake\n~~~\n\n- Tail.",
+    ],
+    ids=[
+        "backtick",
+        "tilde",
+        "longer-closer",
+        "longer-tilde-closer",
+        "indented-three",
+        "closer-blanks",
+        "other-character",
+        "closer-info",
+        "indented-four-closer",
+        "tilde-info-backtick",
+    ],
+)
+def test_notes_fenced_headings_never_end_the_section(body: str) -> None:
+    assert section(entry(body), "0.6.1") == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    ```\n- Body.",
+        "\t```\n- Body.",
+        "```a`b\n- Body.",
+        "``\n- Body.",
+    ],
+    ids=["four-spaces", "tab", "backtick-in-info", "two-backticks"],
+)
+def test_notes_non_fences_do_not_hide_the_next_heading(body: str) -> None:
+    assert section(entry(body), "0.6.1") == body
+
+
+def test_notes_fenced_fake_heading_is_not_a_duplicate_or_the_section() -> None:
+    fake = "```md\n## 0.6.1\n\n- Fake.\n```\n"
+    assert section(f"{fake}\n## 0.6.1\n\n- Real.\n", "0.6.1") == "- Real."
+    with pytest.raises(Rejected, match="section missing"):
+        section(f"{fake}\n## 0.6.0\n\n- Old.\n", "0.6.1")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "## 0.6.1\n\n```\n- Body.\n",
+        "## 0.6.1\n\n- Body.\n\n## 0.6.0\n\n```\n- Old.\n",
+        "```\n## 0.6.1\n\n- Body.\n",
+        "````\n```\n\n## 0.6.1\n\n- Body.\n",
+        "## 0.6.1\n\n```\n    ```\n- Body.\n",
+        "## 0.6.1\n\n```\n``` x\n- Body.\n",
+        "## 0.6.1\n\n~~~\n```\n- Body.\n",
+        "## 0.6.0\n\n```\n- Old.\n",
+    ],
+    ids=[
+        "in-section",
+        "older-section",
+        "before-heading",
+        "shorter-closer",
+        "indented-closer",
+        "closer-with-text",
+        "other-character",
+        "version-missing",
+    ],
+)
+def test_notes_unclosed_fence_anywhere_is_rejected_with_its_own_reason(
+    text: str,
+) -> None:
+    with pytest.raises(Rejected, match="release notes fence unclosed"):
+        section(text, "0.6.1")
+
+
+def test_sealer_keeps_fenced_example_in_notes(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "```md\n## 0.6.1\n```\n\n- Example."
+    checkout(tmp_path, entry(body))
+    uploaded(service, monkeypatch)
+    assert seal(service.api, 100, tmp_path).notes == body
+
+
 @pytest.mark.parametrize(
     ("changes", "removed"),
     [
@@ -1314,6 +1441,90 @@ def test_archive_paths_never_escape_or_supply_executable_checkout(
         download(service.api, artifact)
 
 
+def github_free_environment() -> dict[str, str]:
+    kept = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("GITHUB_", "GH_"))
+    }
+    return kept | {"PYTHONPATH": str(ROOT)}
+
+
+@pytest.mark.parametrize(
+    ("changelog", "code", "message"),
+    [
+        (entry("```md\n## 0.6.1\n```\n\n- Example."), 0, ""),
+        ("## 0.6.1\n\n```\n- Body.\n", 1, "release notes fence unclosed"),
+        ("## 0.6.0\n\n- Earlier release.\n", 1, "release notes section missing"),
+    ],
+    ids=["valid", "unclosed", "missing"],
+)
+def test_notes_operation_needs_no_github_environment(
+    tmp_path: Path, changelog: str, code: int, message: str
+) -> None:
+    checkout(tmp_path, changelog)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.delivery", "notes"],
+        cwd=tmp_path,
+        env=github_free_environment(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == code, result.stderr
+    assert result.stdout == ""
+    assert result.stderr.strip() == (f"delivery rejected: {message}" if message else "")
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        ("", ""),
+        ("size", "input byte budget exceeded"),
+        ("encoding", "changelog is not UTF-8"),
+    ],
+)
+def test_notes_operation_keeps_the_seal_input_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+    message: str,
+) -> None:
+    def no_github() -> Transport:
+        raise AssertionError("notes must not reach GitHub")
+
+    monkeypatch.setattr(cli, "Curl", no_github)
+    monkeypatch.chdir(tmp_path)
+    for key in ("GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    checkout(
+        tmp_path, b"## 0.6.1\n\n- Caf\xe9.\n" if fault == "encoding" else CHANGELOG
+    )
+    if fault == "size":
+        monkeypatch.setattr(limits, "CHANGELOG_BYTES", len(CHANGELOG.encode()) - 1)
+    assert invoke(monkeypatch, "notes") == (1 if fault else 0)
+    assert message in capsys.readouterr().err
+
+
+def test_seal_and_notes_share_the_project_version_reader(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkout(tmp_path)
+    assert project_version(tmp_path) == "0.6.1"
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match="project version missing"):
+        seal(service.api, 100, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert invoke(monkeypatch, "notes") == 1
+    assert "delivery rejected: project version missing" in capsys.readouterr().err
+
+
 def test_real_module_cli_help_and_invalid_input() -> None:
     for arguments, expected in (
         (["--help"], 0),
@@ -1329,6 +1540,8 @@ def test_real_module_cli_help_and_invalid_input() -> None:
             check=False,
         )
         assert result.returncode == expected, result.stderr
+        if arguments == ["--help"]:
+            assert "notes" in result.stdout
 
 
 def test_file_hashes_reject_repacked_tampering_with_valid_archive_digest(
@@ -1821,7 +2034,7 @@ def test_http_transport_failures_never_expose_authorization(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "fixture-secret-token")
 
-    script = "import sys; sys.stderr.write('fixture-secret-token'); sys.exit(7)"
+    script = "import sys; sys.stderr.write('fixture-secret-token'); sys.exit(35)"
     processes, _commands = controlled_curl(monkeypatch, script)
     if timeout:
         clock = iter((0.0, 131.0))
@@ -1992,6 +2205,288 @@ def test_curl_rejects_malformed_status_without_partial_response(
     with pytest.raises(Rejected, match="invalid status"):
         Curl().request("GET", "https://delivery.invalid/")
     assert processes[0].returncode == 0
+
+
+OPEN_URL = "https://delivery.invalid/"
+
+
+@dataclass
+class Clock:
+    """Fake monotonic clock whose sleep only advances time."""
+
+    now: float = 1000.0
+    sleeps: list[float] = field(default_factory=list)
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    instance = Clock()
+    monkeypatch.setattr(http.time, "monotonic", instance.monotonic)
+    monkeypatch.setattr(http.time, "sleep", instance.sleep)
+    return instance
+
+
+@dataclass
+class Attempts:
+    """Scripted `Curl.receive` outcomes; each attempt consumes one."""
+
+    outcomes: list[Response | Rejected]
+    commands: list[list[str]] = field(default_factory=list)
+
+    def receive(self, command: list[str], body: bytes | None) -> Response:
+        assert self.outcomes, "unexpected extra attempt"
+        self.commands.append(command)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Rejected):
+            raise outcome
+        return outcome
+
+
+def attempts(
+    monkeypatch: pytest.MonkeyPatch, *outcomes: Response | Rejected
+) -> Attempts:
+    script = Attempts(list(outcomes))
+    monkeypatch.setattr(Curl, "receive", script.receive)
+    return script
+
+
+def transport_failure(code: int) -> CurlFailed:
+    return CurlFailed("HTTP transport failed", code)
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_curl_get_retries_transient_status_and_returns_the_final_response(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, status: int
+) -> None:
+    script = attempts(monkeypatch, Response(status, b"busy"), Response(200, b"ok"))
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert len(script.commands) == 2 and script.commands[0] == script.commands[1]
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+@pytest.mark.parametrize("code", [6, 7, 28, 52, 55, 56])
+def test_curl_get_retries_transient_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, code: int
+) -> None:
+    script = attempts(monkeypatch, transport_failure(code), Response(200, b"ok"))
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert len(script.commands) == 2
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_curl_get_backoff_doubles_to_its_cap_then_returns_the_last_status(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    monkeypatch.setattr(limits, "READ_RETRIES", 4)
+    monkeypatch.setattr(limits, "READ_BACKOFF_SECONDS", 1.5)
+    monkeypatch.setattr(limits, "READ_BACKOFF_MAX_SECONDS", 4.0)
+    script = attempts(monkeypatch, *[Response(503, b"busy")] * 5)
+    assert Curl().request("GET", OPEN_URL) == Response(503, b"busy")
+    assert len(script.commands) == 5
+    assert clock.sleeps == [1.5, 3.0, 4.0, 4.0]
+
+
+def test_curl_get_raises_the_last_transient_exit_after_bounded_attempts(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, *[transport_failure(7)] * (limits.READ_RETRIES + 1))
+    with pytest.raises(Rejected, match="HTTP transport failed"):
+        Curl().request("GET", OPEN_URL)
+    assert len(script.commands) == limits.READ_RETRIES + 1
+    assert len(clock.sleeps) == limits.READ_RETRIES
+
+
+@pytest.mark.parametrize("status", [200, 201, 400, 403, 404, 500, 501])
+def test_curl_get_returns_permanent_statuses_on_the_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, status: int
+) -> None:
+    script = attempts(monkeypatch, Response(status, b"answer"))
+    assert Curl().request("GET", OPEN_URL) == Response(status, b"answer")
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        transport_failure(1),
+        transport_failure(22),
+        transport_failure(35),
+        transport_failure(60),
+        Rejected("HTTP response byte budget exceeded"),
+        Rejected("HTTP transport invalid status"),
+        Rejected("HTTP transport timed out"),
+    ],
+)
+def test_curl_get_fails_permanent_transport_faults_on_the_first_attempt(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, failure: Rejected
+) -> None:
+    script = attempts(monkeypatch, failure)
+    with pytest.raises(Rejected) as rejected:
+        Curl().request("GET", OPEN_URL)
+    assert rejected.value is failure
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
+@pytest.mark.parametrize("outcome", [Response(503, b"busy"), transport_failure(7)])
+def test_curl_never_retries_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: Clock,
+    method: str,
+    outcome: Response | Rejected,
+) -> None:
+    script = attempts(monkeypatch, outcome)
+    if isinstance(outcome, Response):
+        assert Curl().request(method, OPEN_URL, b"{}") == outcome
+    else:
+        with pytest.raises(Rejected):
+            Curl().request(method, OPEN_URL, b"{}")
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+def test_curl_retries_a_transient_exit_from_a_real_child(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    marker = tmp_path / "seen"
+    processes, commands = controlled_curl(
+        monkeypatch,
+        f"import os, sys; m = {str(marker)!r}; first = not os.path.exists(m)\n"
+        "open(m, 'w').close()\n"
+        "if first: sys.exit(56)\n"
+        "sys.stdout.buffer.write(b'ok\\n200')",
+    )
+    assert Curl().request("GET", OPEN_URL) == Response(200, b"ok")
+    assert [process.returncode for process in processes] == [56, 0]
+    assert commands[0] == commands[1]
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_pagination_counts_only_the_accepted_page_after_a_retry(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    page = service.routes[
+        ("GET", BASE_URL + "actions/runs/100/attempts/1/jobs?per_page=100&page=1")
+    ].body
+    monkeypatch.setenv("GH_TOKEN", "fixture-token")
+    monkeypatch.setattr(limits, "PAGINATION_BYTES", len(page))
+    script = attempts(
+        monkeypatch, Response(503, b"x" * (2 * len(page))), Response(200, page)
+    )
+    found = GitHub(Curl(), "owner/repo", 1).pages(
+        "actions/runs/100/attempts/1/jobs", Job, "jobs"
+    )
+    assert found == service.jobs
+    assert len(script.commands) == 2
+
+
+def test_destination_retries_a_transient_pypi_read(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    service.published()
+    page = service.routes[("GET", PYPI)].body
+    script = attempts(monkeypatch, Response(502, b""), Response(200, page))
+    assert destination(GitHub(Curl(), "owner/repo", 1), service.tested) == set()
+    assert len(script.commands) == 2
+
+
+def test_destination_treats_a_pypi_404_as_an_answer_without_retrying(
+    service: Service, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, Response(404, b"{}"))
+    missing = destination(GitHub(Curl(), "owner/repo", 1), service.tested)
+    assert missing == {WHEEL, SDIST}
+    assert len(script.commands) == 1 and clock.sleeps == []
+
+
+def test_curl_attempt_is_shortened_to_the_command_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reads: scope entry, attempt start, budget, then the first select check.
+    readings = iter([1000.0, 1000.0, 1000.0, 1061.0])
+    monkeypatch.setattr(http.time, "monotonic", lambda: next(readings))
+    processes, _commands = controlled_curl(
+        monkeypatch, "import sys; sys.stdout.buffer.write(b'ok\\n200')"
+    )
+    with command_deadline(60), pytest.raises(Rejected, match="transport timed out"):
+        Curl().request("GET", OPEN_URL)
+    assert processes[0].returncode is not None
+
+
+def test_curl_starts_no_process_once_the_command_deadline_has_passed(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    processes, _commands = controlled_curl(monkeypatch, "pass")
+    with command_deadline(10):
+        clock.now += 10
+        with pytest.raises(Rejected, match="delivery deadline exceeded"):
+            Curl().request("GET", OPEN_URL)
+    assert processes == []
+
+
+def test_curl_backoff_that_outlasts_the_command_deadline_is_not_slept(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    script = attempts(monkeypatch, *[Response(503, b"busy")] * 3)
+    with command_deadline(2.5), pytest.raises(Rejected, match="deadline exceeded"):
+        Curl().request("GET", OPEN_URL)
+    assert len(script.commands) == 2
+    assert clock.sleeps == [limits.READ_BACKOFF_SECONDS]
+
+
+def test_confirm_polling_stops_at_the_command_deadline(
+    service: Service, clock: Clock
+) -> None:
+    with command_deadline(12), pytest.raises(Rejected, match="deadline exceeded"):
+        confirm(service.api, 100)
+    assert clock.sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS] * 2
+    assert [call for call in service.calls if call[1] == PYPI] == [
+        ("GET", PYPI, None)
+    ] * 3
+
+
+def test_cli_runs_each_operation_under_one_command_deadline(
+    service: Service,
+    clock: Clock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service.published()
+    seen: list[float | None] = []
+
+    def factory() -> Service:
+        seen.append(remaining())
+        return service
+
+    monkeypatch.setattr(cli, "Curl", factory)
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 0
+    )
+    assert seen == [limits.COMMAND_SECONDS]
+    assert remaining() is None
+
+
+def test_cli_reports_command_deadline_expiry_during_confirmation(
+    service: Service,
+    clock: Clock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(limits, "COMMAND_SECONDS", 12)
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 1
+    )
+    assert "delivery rejected: delivery deadline exceeded" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def tarred(files: dict[str, bytes], *, compressed: bool) -> bytes:

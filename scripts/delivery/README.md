@@ -26,8 +26,14 @@ release or deployment operations locally against the production repository.
    section runs to the next level-2 heading or the end of the file, keeps its
    `###` subheadings, and excludes the heading and surrounding blank lines. Line
    endings are folded to LF. The file is decoded as strict UTF-8, and a missing,
-   empty or duplicated section fails the seal. Code fences are not tracked, so
-   a line starting with `## ` inside a fence ends the section.
+   empty or duplicated section fails the seal. Lines inside top-level fenced code
+   blocks (CommonMark: 0-3 spaces of indent, three or more backticks or tildes,
+   a closer of the same character and at least the same length) are never
+   headings, duplicates or section ends; the fence scan starts at the first
+   line of the file, and an unclosed fence anywhere fails with its own reason.
+   Fences nested in lists or block quotes are not parsed. The same check runs
+   without GitHub access as `python -m scripts.delivery notes`, which the
+   `Validate release notes` job runs on every pull request and push.
 3. `python-publish.yml` runs from the trusted default-branch workflow revision.
    It revalidates the successful same-repository `push` to `main`, workflow ID,
    attempt endpoint and full job set, and queries authoritative associated PRs
@@ -96,7 +102,7 @@ expired artifacts require a new complete tested chain, not a rebuild downstream.
 
 The publisher serializes publication, and Pages serializes deployments, without
 cancelling an in-progress delivery. Confirmation allows up to 60 seconds of
-polling waits, in addition to request time. If visibility takes longer, retry
+polling waits, in addition to request time, all within the command deadline. If visibility takes longer, retry
 after PyPI's inventory exposes successfully uploaded files. No credentials are
 passed to downloaded artifacts, and privileged checkouts always use
 `github.workflow_sha`.
@@ -147,7 +153,7 @@ workflows produce, with headroom:
 
 | Endpoint | Item cap | Requests allowed | Rationale |
 | --- | ---: | ---: | --- |
-| Attempt jobs | 200 | 3 | One producer attempt has 24 jobs (seven fixed checks, the 16-entry component matrix, the seal); the publisher has one. |
+| Attempt jobs | 200 | 3 | One producer attempt has 26 jobs (nine fixed checks, the 16-entry component matrix, the seal); the publisher has one. |
 | Run artifacts | 100 | 2 | Run-scoped across attempts; a producer attempt uploads three and a publisher attempt one, so over 30 full reruns fit. |
 | Releases | 500 | 6 | One release per published version, scanned for an authenticated draft. |
 | Commit pulls | 100 | 2 | A merged-main commit is associated with one merging pull request and rarely more. |
@@ -174,6 +180,15 @@ goes directly to the null device (zero retained bytes). The existing 10-second
 connect, 120-second curl and 130-second supervisor deadlines, HTTPS-only
 redirects and host-scoped authorization remain in effect. Every aborted owned
 curl is killed and reaped.
+
+Transient read faults are retried inside `Curl.request`, never by callers.
+Only `GET` retries, at most three times with 1, 2, then 4 seconds of backoff
+(`limits.py`), on HTTP 429, 502, 503 or 504 or on curl exit 6, 7, 28, 52, 55 or
+56. Writes, protocol and TLS exits, 403, 404, byte-budget and invalid-status
+faults fail on the first attempt; a PyPI 404 is a real answer. Each operation
+also runs under one 900-second monotonic deadline covering every attempt,
+backoff and confirmation poll. A wait that would not finish before it is
+rejected without sleeping, and no curl starts after it passes.
 
 The ZIP digest is checked before any member is trusted. Nested wheel/sdist and
 standalone tar/site checks have independent budgets; an outer ZIP limit is not

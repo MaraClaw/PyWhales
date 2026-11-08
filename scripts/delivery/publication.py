@@ -7,6 +7,7 @@ from typing import Final
 
 from .api import GitHub, require
 from .chain import producer, publisher_identity
+from .deadline import afford
 from .models import PyPIRelease, Receipt, Seal
 
 CONFIRM_RETRIES: Final = 12
@@ -65,7 +66,8 @@ def confirm(api: GitHub, run_id: int) -> Receipt:
     is retried up to CONFIRM_RETRIES times, CONFIRM_RETRY_DELAY_SECONDS apart,
     rechecking the complete destination inventory (kinds, duplicates, hashes)
     on every attempt. A conflicting, invalid, or malformed destination response
-    fails immediately and is never retried.
+    fails immediately and is never retried. Polling shares the command
+    deadline: a wait that would not finish before it is rejected, unslept.
     """
     tested, artifact, _distributions = producer(api, run_id)
     require(
@@ -76,6 +78,7 @@ def confirm(api: GitHub, run_id: int) -> Receipt:
     for _ in range(CONFIRM_RETRIES):
         if not missing:
             break
+        afford(CONFIRM_RETRY_DELAY_SECONDS)
         time.sleep(CONFIRM_RETRY_DELAY_SECONDS)
         missing = destination(api, tested)
     require(not missing, f"destination publication incomplete: {sorted(missing)}")

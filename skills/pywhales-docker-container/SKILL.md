@@ -1,9 +1,10 @@
 ---
-name: pywhales
+name: pywhales-docker-container
 description: >-
   Use the installed pywhales package to automate Docker from Python applications
   and scripts. Use when translating docker run/build/compose commands into Python,
-  managing containers or images with pywhales, pulling/pushing/saving/loading
+  managing containers or images with pywhales, reading hydrated resource listings,
+  pulling/pushing/saving/loading
   images, using Buildx or Compose from Python, isolating CLI child environments,
   enforcing strict environment-only transport for container envs and build args,
   separating workload failures from Docker errors, correlating admission decisions
@@ -27,7 +28,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes source APIs for project version 1.1.7.
+This guidance describes source APIs for project version 1.2.0.
 An installed version string alone isn't proof of support; check actual
 capabilities before use.
 
@@ -43,6 +44,7 @@ are not part of this workflow.
 3. Check installed signatures, return annotations/overloads, and `help()` before
    adding unfamiliar arguments or assuming a closeable stream. For inventory,
    check supported kinds too; for Swarm waits, check the supported service modes.
+   For hydrated listings, check `list(hydrate=True)` on each needed resource group.
    For shared IO, launch-attempt and child-slot budgets, bounded uploads, owner active
    and class/owner queued demand, isolated environments, strict workload errors,
    schema-10 stop attribution, exporter counts and admission correlation,
@@ -66,9 +68,9 @@ are not part of this workflow.
 
 | Read when | Reference |
 | --- | --- |
-| Setting up imports, local/remote clients, CLI prerequisites, isolated child environments, default deadlines, strict environment transport, workload-error classification, or inspect/reload errors | [Client, setup, and errors](references/client-and-errors.md) |
+| Setting up imports, local/remote clients, CLI prerequisites, isolated child environments, default deadlines, strict environment transport, workload-error classification, hydrated listings and snapshot lifetimes, or inspect/reload errors | [Client, setup, and errors](references/client-and-errors.md) |
 | Translating run/exec/ps, passing container environment values, setting startup health intervals directly or through approved profiles, waiting on containers, choosing output modes, mounting files, bounding prune launches, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
-| Pulling, pushing, saving, or loading images and registry archives, including shared IO and upload budgets | [Registry transfers and archives](references/registry-and-archives.md) |
+| Pulling, pushing, saving, or loading images and registry archives, including child-aware transfer fanout, shared IO and upload budgets | [Registry transfers and archives](references/registry-and-archives.md) |
 | Building images, passing build args, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
 | Observing executions and preflight refusals with schema-10 stop reasons and exporter offer counts, measuring admission waits and correlating launches/refusals, or bounding concurrent work, owner active demand and class/owner queued demand with admission | [Telemetry and admission](references/telemetry-and-admission.md) |

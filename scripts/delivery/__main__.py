@@ -11,9 +11,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from . import limits
 from .api import Curl, GitHub, Rejected, require
 from .artifacts import extract, inventory, select, verified
-from .chain import name, receipt, seal
+from .chain import name, project_version, receipt, release_notes, seal
+from .deadline import command_deadline
 from .distributions import smoke
 from .models import Run
 from .pages import verify_pages_tar
@@ -28,6 +30,7 @@ def parser() -> argparse.ArgumentParser:
         "operation",
         choices=(
             "smoke",
+            "notes",
             "seal",
             "prepare",
             "confirm",
@@ -43,11 +46,20 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Run one operation under the single command deadline in `limits.py`."""
+    with command_deadline(limits.COMMAND_SECONDS):
+        return execute()
+
+
+def execute() -> int:
     """Execute a delivery decision, returning nonzero on absent or conflicting proof."""
     arguments = parser().parse_args()
     try:
         if arguments.operation == "smoke":
             smoke(Path.cwd())
+            return 0
+        if arguments.operation == "notes":
+            release_notes(Path.cwd(), project_version(Path.cwd()))
             return 0
         if arguments.operation == "verify-pages":
             require(isinstance(arguments.archive, Path), "Pages archive required")

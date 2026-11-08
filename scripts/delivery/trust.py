@@ -34,6 +34,7 @@ CHECKS: Final = (
     "Compose and Buildx ARM64 smoke tests",
     "build-windows",
     "Build tested distributions",
+    "Validate release notes",
     *(f"build-linux-test-component ({component})" for component in COMPONENTS),
 )
 SEAL_JOB: Final = "Seal tested delivery"

@@ -1,6 +1,6 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-04 for the release 1.1.7 feature contracts through `d9e47ad`; other guidance last checked 2026-11-01.
+**Verified:** 2026-11-08 against current source for the four completed proposals in upcoming 1.2.0; other guidance last checked 2026-11-01.
 
 ## Overview
 
@@ -10,12 +10,15 @@ The public API exports `DockerClient`, resource classes, a shared `docker` clien
 `DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, and `build`.
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.
 The installed `pywhales` console entry point only prints a notice; it isn't a Docker command runner.
+Container, image, network, and volume `list(hydrate=True)` batch-inspect and pin returned snapshots; default listings remain lazy. Ordinary cache expiry uses monotonic time, and copying or unpickling clears freshness and pins.
 
 Bounded observation sits on top of the command groups:
 
 - `observation()` nests explicit limits, deadlines, and cancellation over launches, including shared optional `max_total_launch_attempts` and `max_concurrent_children` reservations. Child slots last until local CLI reap, not output drain or daemon-workload completion. Inventory checks its complete launch plan against remaining attempt allowances without reserving it. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 13 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, builder, and manifest_list.
 - `InspectionPolicy.max_total_io_bytes` adds an optional shared total over actual captured, stream and archive output reads plus managed stdin writes. Nested and copied contexts share atomic accounts; source budgets still apply. See the runtime guide for detection-byte, EOF and input boundaries.
+- Multi-image pull/push fanout fits the observation's remaining child slots, capped at four. Sizing doesn't reserve capacity or change immediate launch refusals; see the image guide.
 - `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Swarm nodes, selected Compose services, or standalone containers. Node readiness uses fixed IDs and an explicit manager subset, not version fencing; `capture_nodes(require_leader=True)` additionally requires exactly one observed designated leader on both clear passes. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit` and `fail_on_unhealthy`; see the convergence guide.
+- Convergence task and container inspections use policy-sized batches with ordered single-ID fallback. Service/node inspection and standalone reference resolution stay scalar; failure classifications and complete-cycle publication are preserved.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
 - Admission `AdmissionOwner(..., owner_demand_capacity=...)` bounds active declared demand across classes for immediate/queued grants and resize growth. Separate `ClassLimit.pending_demand_capacity` and `owner_pending_demand_capacity` bound queued demand; immediate grants bypass those queue-only bounds. See the admission guide for growth guards and `owner_demand_full`.
 - `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 10. Completion/refusal `stop_reason` uses a closed vocabulary, including `total_io`; `BoundedExporter.stop_reason_counts` counts every offer, including dropped records. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
@@ -30,6 +33,7 @@ Bounded observation sits on top of the command groups:
 | `pywhales/_execution_policy.py` | Originating-config carrier and per-launch execution policy |
 | `pywhales/_inspect_validation.py` | Context, plugin, and task batch-response validation |
 | `pywhales/_bulk_reload.py` | Grouped inspection and staged resource-cache publication |
+| `pywhales/components/_hydration.py` | Chunked listing hydration, exact identity matching, vanished-resource re-probes, and handle pin release |
 | `pywhales/inventory.py`, `pywhales/_inventory_*.py` | Inventory kinds and value types, lazy capture engine, kind dispatch, ordered staged inspection |
 | `pywhales/_observation.py` | Context-local limits, deadlines, and cancellation checkpoints |
 | `pywhales/_bounded_capture.py`, `pywhales/_scoped_launch.py`, `pywhales/_launch_limits.py` | Bounded interruptible capture and launch preflight; related helpers are `_capture_pipes.py`, `_readiness.py`, `_archive_deadline.py`, `_stdin_pump.py`, `_environment.py` |
@@ -49,8 +53,8 @@ Bounded observation sits on top of the command groups:
 | `scripts/` | Contributor tooling, not installed APIs: CI provisioning, plugin installation, overhead benchmark |
 | `scripts/fleet_contract/` | Offline fleet contract: strict manifest, support, and result schemas, validators, non-qualifying reports (see its `README.md`) |
 | `scripts/fleet_harness/` | Fake-only offline capacity simulation, including leased retries with fixed or capped exponential delays, and non-authorizing transport decisions; see its guide |
-| `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
-| `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
+| `scripts/delivery/` | Tested CI delivery chain: smoke, seal, publish, release, and Pages helpers; bounded GET retries and one command deadline |
+| `skills/pywhales-docker-container/` | Consumer skill for using the installed library, not a contributor workflow |
 | `.github/workflows/` | Authoritative CI checks, docs/site artifact build, and the delivery chain from package build to release; no Pages deployment workflow is present |
 | `pyproject.toml`, `uv.lock`, `.python-version` | Project/tool configuration, locked dependencies, interpreter pin |
 

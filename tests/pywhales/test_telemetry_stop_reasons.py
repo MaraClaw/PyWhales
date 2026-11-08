@@ -12,6 +12,8 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
+    StreamBufferCategory,
+    StreamBufferLimitError,
 )
 from pywhales.telemetry import (
     AdmissionDecisionRecord,
@@ -34,6 +36,15 @@ from pywhales.utils import run
         (DockerTimeout(["private"], 1), "command_timeout"),
         (ObservationTimeout(), "scope_timeout"),
         (ObservationCancelled(), "cancelled"),
+        (
+            StreamBufferLimitError("private", "output_record"),
+            "buffer_output_record",
+        ),
+        (
+            StreamBufferLimitError("private", "stderr_history"),
+            "buffer_stderr_history",
+        ),
+        (BufferError("private"), None),
         (ValueError("private"), None),
         (GeneratorExit(), None),
     ],
@@ -62,7 +73,14 @@ def test_completion_projects_the_exception_instance(
         reason
         for reason in STOP_REASONS
         if reason
-        not in {"command_timeout", "scope_timeout", "cancelled", "other_limit"}
+        not in {
+            "command_timeout",
+            "scope_timeout",
+            "cancelled",
+            "buffer_output_record",
+            "buffer_stderr_history",
+            "other_limit",
+        }
     ],
 )
 def test_limit_instance_keeps_only_recognized_reason(reason: StopReason) -> None:
@@ -76,6 +94,44 @@ def test_limit_instance_keeps_only_recognized_reason(reason: StopReason) -> None
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert (completed.outcome, completed.stop_reason) == ("limit", reason)
+
+
+@pytest.mark.parametrize("reason", ["buffer_output_record", "buffer_stderr_history"])
+def test_observation_limit_rejects_buffer_reasons(reason: str) -> None:
+    records: list[TelemetryRecord] = []
+    with (
+        pytest.raises(ObservationLimitError),
+        ExecutionTelemetry(records.append, "stream") as telemetry,
+    ):
+        telemetry.start()
+        raise ObservationLimitError(reason, 1, 2)
+    completed = records[1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.stop_reason) == ("limit", "other_limit")
+
+
+@pytest.mark.parametrize(
+    ("category", "reason"),
+    [
+        ("output_record", "buffer_output_record"),
+        ("stderr_history", "buffer_stderr_history"),
+    ],
+)
+def test_buffer_limit_counts_use_their_own_keys(
+    category: StreamBufferCategory, reason: StopReason
+) -> None:
+    exporter = BoundedExporter(
+        lambda record: None, capacity=4, drop_policy="drop_newest"
+    )
+    telemetry = ExecutionTelemetry(exporter, "stream")
+    with (
+        pytest.raises(StreamBufferLimitError),
+        telemetry,
+    ):
+        telemetry.start()
+        raise StreamBufferLimitError("private", category)
+    counts = exporter.stop_reason_counts
+    assert counts[reason] == 1 and sum(counts.values()) == 1
 
 
 @pytest.mark.parametrize("preflight", [False, True])

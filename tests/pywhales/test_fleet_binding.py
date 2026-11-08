@@ -248,7 +248,10 @@ def test_exponential_report_cannot_export_under_changed_declaration() -> None:
         export_result(report, RunnableManifest.model_validate_json(json.dumps(raw)))
 
 
-def test_comparison_rejects_exponential_candidate_with_changed_policy() -> None:
+@pytest.mark.parametrize("change", ["cap", "seed", "fraction"])
+def test_comparison_rejects_exponential_candidate_with_changed_policy(
+    change: str,
+) -> None:
     declaration = overlap_manifest(1, "operation_count", 2)
     reports = [
         run(
@@ -261,6 +264,18 @@ def test_comparison_rejects_exponential_candidate_with_changed_policy() -> None:
                     "queue_retry_exponential": {
                         "initial_seconds": 0.5,
                         "max_seconds": cap,
+                        **(
+                            {
+                                "jitter": {
+                                    "seed": int(cap) if change == "seed" else 7,
+                                    "fraction": cap / 4
+                                    if change == "fraction"
+                                    else 0.5,
+                                }
+                            }
+                            if change != "cap"
+                            else {}
+                        ),
                     }
                 },
             ),

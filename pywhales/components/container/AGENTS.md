@@ -8,7 +8,7 @@
 
 ## Cleanup And Launch
 
-- `Container.__exit__()` reads host config and state, stops only when `running is True`,
+- `Container.__exit__()` releases any listing pin before reading host config and state, forcing a formerly pinned handle to refresh. It stops only when `running is True`,
   then calls `remove(volumes=True)` unless `auto_remove is True`.
   Tolerate `NoSuchContainer` during inspection, stop, or removal; keep `resource_cleanup()`.
 - Both `run()` and `create()` use `ImageCLI(self.client_config)` before launching:
@@ -62,6 +62,8 @@
 
 ## Batch Inspection And Top
 
+- `list(hydrate=True)`, including `docker.ps`, keeps CLI order and pins exact full-ID snapshots through the shared `_hydration.py` helper. Default listings remain lazy; see the parent guide for chunking and disappearance handling.
+- Mutating launches (`execute`, start/stop/kill, pause/unpause, restart, rename, remove, update, and copy into a container) release the targeted handle's pin in `finally`, including failed launches and streamed returns. Other handles stay pinned; the next property read on the released handle inspects again.
 - Batch `inspect()` uses one command and preserves request order and duplicates.
   Validate response count, model data, and reference identity before caching snapshots:
   accept matching ID prefixes or names with an optional leading slash.
@@ -76,7 +78,7 @@
 
 Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
-  eager-log decoding cleanup, and streaming-log ownership; also contains live component tests.
+  eager-log decoding cleanup, streaming-log ownership, and fake-CLI hydrated listings, pin release and cleanup refresh; also contains live component tests.
 - `tests/pywhales/components/test_container_health_interval.py`: fake-CLI whole-second forwarding and
   invalid-value rejection before preflight across create/run modes and root aliases, without Docker.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.

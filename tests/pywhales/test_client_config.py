@@ -1,11 +1,15 @@
+import copy
 import json
+import pickle
 import sys
 import traceback
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import override
 from unittest.mock import patch
 
 import pytest
@@ -13,8 +17,15 @@ from pytest_mock import MockerFixture
 
 from pywhales import Config, DockerClient, Node, Secret, Service, Volume
 from pywhales._execution_policy import get_execution_policy
-from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.client_config import (
+    ClientConfig,
+    ParsingError,
+    ReloadableObject,
+    bulk_reload,
+)
+from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT
+from tests.pywhales.components.hydration_fakes import FakeCli, fake_daemon
 
 
 @pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("nan")])
@@ -170,7 +181,7 @@ def test_swarm_batch_reload_retains_originating_configuration(
         if explicit_reload:
             resource.reload()
         else:
-            resource._last_refreshed_time = datetime.min
+            resource._refreshed_at = None
         refreshed = resource._get_inspect_result()
 
         assert refreshed is not initial
@@ -496,3 +507,197 @@ def test_strict_workload_policy_is_opt_in_and_snapshotted() -> None:
         ).client_config.strict_workload_errors
         is False
     )
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    id: str
+    generation: int
+
+
+class _Handle(ReloadableObject[_Snapshot]):
+    """Handle whose inspect is a counter, so launches are the generation."""
+
+    def __init__(self) -> None:
+        super().__init__(ClientConfig(), "id", "ref", is_immutable_id=True)
+        self.generation = 0
+
+    @override
+    def _fetch_and_parse_inspect_result(self, reference: str) -> _Snapshot:
+        self.generation += 1
+        return _Snapshot(reference, self.generation)
+
+
+def _published_at(clock: float, *, pinned: bool = False) -> _Handle:
+    handle = _Handle()
+    with patch("pywhales.client_config.monotonic", return_value=clock):
+        if pinned:
+            handle._set_pinned_inspect_result(_Snapshot("ref", 0))
+        else:
+            handle._set_inspect_result(_Snapshot("ref", 0))
+    return handle
+
+
+@pytest.mark.parametrize(
+    ("now", "period", "expired"),
+    [
+        (100.0, 10, False),
+        (109.99, 10, False),
+        (110.0, 10, True),
+        (150.0, 10, True),
+        (150.0, 3600, False),
+        (99.0, 3600, True),
+        (-1e9, 3600, True),
+    ],
+)
+def test_expiry_compares_monotonic_age_with_the_current_validity_period(
+    now: float, period: float, expired: bool
+) -> None:
+    handle = _published_at(100.0)
+    with (
+        patch("pywhales.client_config.monotonic", return_value=now),
+        set_cache_validity_period(period),
+    ):
+        assert handle._needs_reload() is expired
+        handle.generation = 0
+        handle._get_inspect_result()
+        assert handle.generation == (1 if expired else 0)
+
+
+def test_unpublished_handle_always_needs_a_reload() -> None:
+    assert _Handle()._needs_reload() is True
+
+
+@pytest.mark.parametrize("wall_clock", [datetime(1970, 1, 1), datetime(2999, 1, 1)])
+def test_wall_clock_steps_neither_expire_nor_extend_a_snapshot(
+    wall_clock: datetime,
+) -> None:
+    handle = _published_at(100.0)
+    with (
+        patch("pywhales.client_config.datetime") as wall,
+        patch("pywhales.client_config.monotonic", return_value=100.5),
+    ):
+        wall.now.return_value = wall_clock
+        with set_cache_validity_period(3600):
+            assert handle._needs_reload() is False
+        with set_cache_validity_period(0.25):
+            assert handle._needs_reload() is True
+
+
+def test_publication_records_wall_clock_for_diagnostics_only() -> None:
+    handle = _Handle()
+    assert handle._last_refreshed_time == datetime.min
+    handle._set_inspect_result(_Snapshot("ref", 0))
+    assert handle._last_refreshed_time > datetime.min
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize(
+    "transport",
+    [lambda handle: pickle.loads(pickle.dumps(handle)), copy.deepcopy, copy.copy],
+    ids=["pickle", "deepcopy", "copy"],
+)
+def test_copied_or_unpickled_handle_resets_freshness_and_pin(
+    pinned: bool, transport: Callable[[_Handle], _Handle]
+) -> None:
+    handle = _published_at(100.0, pinned=pinned)
+    clone = transport(handle)
+    assert clone._inspect_result == _Snapshot("ref", 0)
+    assert clone._last_refreshed_time == datetime.min
+    assert clone._refreshed_at is None
+    assert clone._pinned is False
+    with set_cache_validity_period(3600):
+        assert clone._needs_reload() is True
+        assert clone._get_inspect_result() == _Snapshot("ref", 1)
+        assert clone._needs_reload() is False
+    assert handle._pinned is pinned
+
+
+def test_unpickled_snapshot_expires_even_when_the_new_clock_is_behind() -> None:
+    handle = _published_at(1_000_000.0, pinned=True)
+    payload = pickle.dumps(handle)
+    with (
+        patch("pywhales.client_config.monotonic", return_value=5.0),
+        set_cache_validity_period(3600),
+    ):
+        clone = pickle.loads(payload)
+        assert clone._needs_reload() is True
+        assert clone._get_inspect_result().generation == 1
+        assert clone._get_inspect_result().generation == 1
+
+
+def test_pinned_snapshot_ignores_age_until_reload_or_release() -> None:
+    handle = _published_at(100.0, pinned=True)
+    with (
+        patch("pywhales.client_config.monotonic", return_value=1e9),
+        set_cache_validity_period(0),
+    ):
+        assert handle._get_inspect_result() == _Snapshot("ref", 0)
+        assert handle.generation == 0
+        handle.reload()
+        assert handle._pinned is False
+        assert handle.generation == 1
+        handle._get_inspect_result()
+        assert handle.generation == 2
+
+
+def test_set_inspect_result_stays_unpinned_and_unpins() -> None:
+    handle = _published_at(100.0, pinned=True)
+    handle._set_inspect_result(_Snapshot("ref", 7))
+    assert handle._pinned is False
+    with set_cache_validity_period(0):
+        assert handle._get_inspect_result().generation == 1
+
+
+def test_release_pin_expires_only_a_pinned_snapshot() -> None:
+    unpinned = _published_at(100.0)
+    unpinned._release_pin()
+    assert unpinned._refreshed_at == 100.0
+    pinned = _published_at(100.0, pinned=True)
+    pinned._release_pin()
+    assert pinned._pinned is False
+    with (
+        patch("pywhales.client_config.monotonic", return_value=100.0),
+        set_cache_validity_period(3600),
+    ):
+        assert pinned._needs_reload() is True
+        assert pinned._get_inspect_result().generation == 1
+
+
+def test_failed_reload_leaves_the_pin_and_snapshot() -> None:
+    handle = _published_at(100.0, pinned=True)
+
+    def broken(reference: str) -> _Snapshot:
+        raise ParsingError(reference)
+
+    with (
+        patch.object(handle, "_fetch_and_parse_inspect_result", broken),
+        pytest.raises(ParsingError),
+    ):
+        handle.reload()
+    assert handle._pinned is True
+    assert handle._inspect_result == _Snapshot("ref", 0)
+
+
+def test_bulk_reload_publishes_unpinned_snapshots_and_failure_keeps_pins() -> None:
+    cli = FakeCli("volume", ["alpha", "beta"])
+    with fake_daemon(cli) as client:
+        pinned = client.volume.list(hydrate=True)
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches
+        snapshots = [volume._inspect_result for volume in pinned]
+
+        cli.corrupt = {"beta": "other"}
+        with pytest.raises(ParsingError):
+            bulk_reload(pinned)
+        assert [volume._inspect_result for volume in pinned] == snapshots
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches
+
+        cli.corrupt = {}
+        bulk_reload(pinned)
+        launches = len(cli.launches)
+        assert all(volume.driver for volume in pinned)
+        assert len(cli.launches) == launches + 2

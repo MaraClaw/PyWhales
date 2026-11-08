@@ -460,6 +460,43 @@ def test_real_cli_exited_failure_is_journaled_as_a_closed_reason(
     assert A not in rendered and "cause" not in rendered
 
 
+def test_real_cli_restart_budget_failure_is_journaled_as_a_closed_reason(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, restarts=7)))
+    target = capture_compose(
+        fake_cli,
+        ("web",),
+        max_restarts=3,
+        fail_on_restart_budget=True,
+        policy=policy,
+        timeout=5,
+    )
+    assert isinstance(target, ComposeTarget)
+
+    class CLIEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            return wait(target, policy=policy, timeout=5, poll_interval=1)
+
+    store, endpoint = MemoryJournalStore(), CLIEndpoint()
+    owner = controller(store, endpoint)
+    result = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert result.progress.state is AttemptState.FAILED
+    assert result.progress.convergence == "restart_budget_exceeded"
+    assert result.progress.deadline_detail is None
+    stored = store.read(spec().key)
+    assert stored is not None and stored.progress == result.progress
+    rendered = json.dumps(asdict(stored.progress))
+    assert A not in rendered and "cause" not in rendered
+    assert "credential-payload" not in rendered
+
+
 def test_real_cli_unhealthy_failure_clears_deadline_without_replay(
     fake_cli: DockerClient,
     policy: InspectionPolicy,

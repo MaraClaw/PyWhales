@@ -23,7 +23,7 @@ from pywhales.convergence._types import (
 from pywhales.convergence._wire import (
     ContainerWire,
     StandaloneContainerWire,
-    inspect_standalone,
+    inspect_standalones,
     resolve_container,
 )
 from pywhales.exceptions import NoSuchContainer
@@ -56,6 +56,7 @@ def capture_selected(
                 max_restarts=selection.max_restarts,
                 fail_on_exit=selection.fail_on_exit,
                 fail_on_unhealthy=selection.fail_on_unhealthy,
+                fail_on_restart_budget=selection.fail_on_restart_budget,
             )
     except _INTERRUPTIONS as error:
         return _outcome(error, None)
@@ -66,17 +67,20 @@ def check_containers(target: ContainerTarget) -> DeadlineDetail | Failure:
     if target.client_config.compose_dry_run:
         return Failure(reason="unsupported")
     groups: list[tuple[bool, list[ContainerWire | StandaloneContainerWire]]] = []
-    for identity in target.container_ids:
-        check_observation()
-        try:
-            member = inspect_standalone(target.client_config, identity)
-        except NoSuchContainer:
-            return Failure(reason="superseded")
-        if member.id != identity:
-            return Failure(reason="superseded")
-        groups.append((identity in target.completion, [member]))
+    members = inspect_standalones(target.client_config, target.container_ids)
+    try:
+        for identity, member in zip(target.container_ids, members, strict=True):
+            if member.id != identity:
+                return Failure(reason="superseded")
+            groups.append((identity in target.completion, [member]))
+    except NoSuchContainer:
+        return Failure(reason="superseded")
     return evaluate_groups(
-        groups, target.max_restarts, target.fail_on_exit, target.fail_on_unhealthy
+        groups,
+        target.max_restarts,
+        target.fail_on_exit,
+        target.fail_on_unhealthy,
+        target.fail_on_restart_budget,
     )
 
 

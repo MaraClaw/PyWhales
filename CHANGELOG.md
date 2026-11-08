@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.2.0
+
+### New Features
+
+- Container, image, network, and volume `list(hydrate=True)` return handles with
+  pinned inspection snapshots. Healthy listings use one listing launch plus one
+  inspect per chunk of at most 100 resources, with exact identity matching and
+  affected-chunk re-probes when resources disappear. Hydrated image listings
+  deduplicate in CLI order; default listings keep their existing behavior.
+
+### Behavior Changes And Fixes
+
+- Ordinary resource cache expiry uses monotonic time, treats negative ages as
+  expired, and reads the current cache validity period. Copying or unpickling a
+  handle resets freshness and pins. Successful reload and bulk publication clear
+  pins; targeted mutations also release them, including failed launches.
+  Container context cleanup refreshes pinned state before stopping or removing.
+- Multi-image pull and push size their worker pools to the tightest remaining
+  observation child allowance, capped at four. Blocking calls use the caller's
+  context; lazy streams size at first consumption in their creation context.
+  Sizing reserves no slots, and saturation retains immediate launch refusal.
+- Convergence task and container inspections use policy-sized batches with exact
+  full-ID matching and ordered single-ID fallback. Failure reasons, causes,
+  listing-order precedence, and publication of complete cycles are preserved;
+  service/node inspection and standalone reference resolution remain scalar.
+- Delivery GET requests retry HTTP 429, 502, 503, and 504 and selected transient
+  curl failures up to three times with bounded backoff. Writes and permanent
+  failures never retry. One 900-second monotonic command deadline bounds
+  transport attempts, backoff, and publication confirmation polling.
+
+### Documentation
+
+- Updated contributor guides and the consumer skill for hydrated listings,
+  snapshot lifetimes, observation-aware image transfers, and batched convergence.
+
 ## 1.1.7
 
 ### New Features

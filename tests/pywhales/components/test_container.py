@@ -1,4 +1,5 @@
 import contextlib
+import inspect
 import json
 import signal
 import subprocess
@@ -6,7 +7,7 @@ import sys
 import tempfile
 import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -34,6 +35,11 @@ from pywhales.exceptions import (
 )
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import stream_stdout_and_stderr
+from tests.pywhales.components.hydration_fakes import (
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 @patch("pywhales.components.container.cli_wrapper.run")
@@ -423,7 +429,7 @@ def test_batch_inspect_cache_reload_and_expiration(component: str) -> None:
         refreshed = resource._get_inspect_result()
         assert refreshed is not initial
         assert command.call_count == 2
-        resource._last_refreshed_time = datetime.min
+        resource._refreshed_at = None
         assert resource._get_inspect_result() is not refreshed
         assert command.call_count == 3
         assert command.call_args.args[0] == [
@@ -465,7 +471,7 @@ def test_batch_inspect_container_aliases_and_reload() -> None:
         )
         resources[0].reload()
         assert resources[0].path == "after"
-        resources[0]._last_refreshed_time = datetime.min
+        resources[0]._refreshed_at = None
         assert resources[0].path == "after"
         assert command.call_count == 3
         assert command.call_args.args[0][-1] == "a" * 64
@@ -2170,3 +2176,255 @@ def test_non_unicode_output(ctr_client: DockerClient) -> None:
         "ubuntu", ["bash", "-c", f"echo -n $'{byte_repr}'"], remove=True
     )
     assert output == "�"
+
+
+def _container_ids(count: int) -> list[str]:
+    return [identity_of("container", index) for index in range(count)]
+
+
+def test_hydrated_container_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
+    ids = _container_ids(5)
+    cli = FakeCli("container", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        containers = client.container.list(hydrate=True)
+        assert [container.id for container in containers] == ids
+        launches = len(cli.launches)
+        assert [container.name for container in containers] == [
+            f"c-{identity[:6]}" for identity in ids
+        ]
+        assert all(
+            container.state is not None and container.state.running is False
+            for container in containers
+        )
+    assert launches == 4
+    assert cli.lists() == [["docker-test", "container", "list", "-q", "--no-trunc"]]
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+    assert len(cli.launches) == launches
+
+
+def test_hydrated_container_list_keeps_filters_and_alias() -> None:
+    ids = _container_ids(2)
+    cli = FakeCli("container", ids)
+    with fake_daemon(cli) as client:
+        containers = client.ps(True, [("status", "exited")], hydrate=True)
+        assert [container.id for container in containers] == ids
+        hydrate = inspect.signature(client.container.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.lists()[0] == [
+        "docker-test",
+        "container",
+        "list",
+        "-q",
+        "--no-trunc",
+        "--all",
+        "--filter",
+        "status=exited",
+    ]
+
+
+def test_default_container_list_stays_lazy_and_expiring() -> None:
+    ids = _container_ids(3)
+    cli = FakeCli("container", ids)
+    with fake_daemon(cli) as client:
+        containers = client.container.list()
+        assert [container.id for container in containers] == ids
+        assert cli.inspects() == []
+        assert containers[0].state is not None
+        assert containers[0].state is not None
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+
+
+def test_hydrated_container_list_without_containers_launches_no_inspect() -> None:
+    cli = FakeCli("container", [])
+    with fake_daemon(cli) as client:
+        assert client.container.list(hydrate=True) == []
+    assert cli.inspects() == []
+    assert len(cli.launches) == 1
+
+
+def test_vanished_container_reprobes_only_the_affected_chunk() -> None:
+    ids = _container_ids(6)
+    cli = FakeCli("container", ids)
+    cli.vanish_on_list = {ids[4]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        containers = client.container.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [container.id for container in containers] == [
+            identity for identity in ids if identity != ids[4]
+        ]
+        assert all(container.state is not None for container in containers)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [
+        ids[:3],
+        ids[3:],
+        [ids[3]],
+        ids[4:],
+        [ids[4]],
+        [ids[5]],
+    ]
+
+
+def test_hydrated_container_list_is_empty_when_every_container_vanished() -> None:
+    ids = _container_ids(3)
+    cli = FakeCli("container", ids)
+    cli.vanish_on_list = set(ids)
+    with fake_daemon(cli) as client:
+        assert client.container.list(hydrate=True) == []
+    assert [len(batch) for batch in cli.inspects()] == [3, 1, 2, 1, 1]
+
+
+def test_hydrated_container_list_does_not_hide_other_inspect_failures() -> None:
+    ids = _container_ids(4)
+    cli = FakeCli("container", ids)
+
+    def fail_inspect(argv: list[str], *args: object, **kwargs: object) -> object:
+        if argv[1:3] == ["container", "inspect"]:
+            return CompletedProcess(argv, 1, b"", b"Error response from daemon: boom")
+        return cli(argv, *args, **kwargs)
+
+    with (
+        fake_daemon(cli) as client,
+        patch("subprocess.run", side_effect=fail_inspect),
+        pytest.raises(DockerException) as caught,
+    ):
+        client.container.list(hydrate=True)
+    assert type(caught.value) is DockerException
+    assert len(cli.launches) == 1
+
+
+def test_hydrated_container_list_matches_results_by_exact_identity() -> None:
+    ids = _container_ids(3)
+    cli = FakeCli("container", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        containers = client.container.list(hydrate=True)
+        for container in containers:
+            assert container._inspect_result is not None
+            assert container._inspect_result.id == container.id
+        cli.corrupt = {ids[1]: identity_of("container", 99)}
+        with pytest.raises(ParsingError):
+            client.container.list(hydrate=True)
+
+
+def test_reload_ends_the_pin_of_a_hydrated_container() -> None:
+    ids = _container_ids(2)
+    cli = FakeCli("container", ids)
+    with fake_daemon(cli) as client:
+        first, second = client.container.list(hydrate=True)
+        before = len(cli.launches)
+        assert first.state is not None
+        assert len(cli.launches) == before
+        first.reload()
+        assert len(cli.launches) == before + 1
+        assert first.state is not None
+        assert len(cli.launches) == before + 2
+        assert second.state is not None
+        assert len(cli.launches) == before + 2
+
+
+_MUTATIONS: dict[str, Callable[[DockerClient, pywhales.Container], object]] = {
+    "handle-stop": lambda client, container: container.stop(),
+    "handle-kill": lambda client, container: container.kill(),
+    "handle-pause": lambda client, container: container.pause(),
+    "handle-unpause": lambda client, container: container.unpause(),
+    "handle-restart": lambda client, container: container.restart(),
+    "handle-rename": lambda client, container: container.rename("other"),
+    "handle-start": lambda client, container: container.start(),
+    "handle-start-attached": lambda client, container: container.start(attach=True),
+    "handle-execute": lambda client, container: container.execute(["true"]),
+    "handle-execute-detached": lambda client, container: container.execute(
+        ["true"], detach=True
+    ),
+    "handle-execute-stream": lambda client, container: container.execute(
+        ["true"], stream=True
+    ).close(),
+    "handle-copy-to": lambda client, container: container.copy_to("source", "/target"),
+    "cli-copy-to": lambda client, container: client.container.copy(
+        "source", (container, "/target")
+    ),
+    "root-execute": lambda client, container: client.execute(container, ["true"]),
+    "cli-stop": lambda client, container: client.container.stop([container]),
+    "cli-start": lambda client, container: client.container.start(container),
+    "cli-update": lambda client, container: client.container.update(
+        container, memory=1
+    ),
+    "root-restart": lambda client, container: client.restart(container),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_MUTATIONS))
+def test_mutating_call_releases_only_that_handles_pin(mutation: str) -> None:
+    ids = _container_ids(2)
+    cli = FakeCli("container", ids)
+    with (
+        fake_daemon(cli) as client,
+        patch("pywhales.components.container.cli_wrapper.stream_stdout_and_stderr"),
+    ):
+        mutated, untouched = client.container.list(hydrate=True)
+        _MUTATIONS[mutation](client, mutated)
+        before = len(cli.inspects())
+        assert untouched.state is not None
+        assert len(cli.inspects()) == before
+        assert mutated.state is not None
+        assert len(cli.inspects()) == before + 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["handle-stop", "handle-execute", "handle-execute-detached", "handle-copy-to"],
+)
+def test_failed_mutation_still_releases_the_pin(mutation: str) -> None:
+    ids = _container_ids(1)
+    cli = FakeCli("container", ids)
+
+    def fail_mutation(argv: list[str], *args: object, **kwargs: object) -> object:
+        if argv[1] == "exec" or argv[1:3] in [
+            ["container", "stop"],
+            ["container", "cp"],
+        ]:
+            return CompletedProcess(argv, 1, b"", b"Error: No such container: gone")
+        return cli(argv, *args, **kwargs)
+
+    with fake_daemon(cli) as client:
+        (container,) = client.container.list(hydrate=True)
+        with (
+            patch("subprocess.run", side_effect=fail_mutation),
+            pytest.raises(NoSuchContainer),
+        ):
+            _MUTATIONS[mutation](client, container)
+        before = len(cli.inspects())
+        assert container.state is not None
+    assert len(cli.inspects()) == before + 1
+
+
+def test_removed_hydrated_container_no_longer_reads_from_its_listing() -> None:
+    ids = _container_ids(1)
+    cli = FakeCli("container", ids)
+    with fake_daemon(cli) as client:
+        (container,) = client.container.list(hydrate=True)
+        container.remove()
+        with pytest.raises(NoSuchContainer):
+            _ = container.state
+
+
+@pytest.mark.parametrize(
+    ("listed_running", "daemon_running"), [(False, True), (True, False)]
+)
+def test_context_exit_refreshes_a_pinned_snapshot_before_choosing_stop(
+    listed_running: bool, daemon_running: bool
+) -> None:
+    (identity,) = _container_ids(1)
+    cli = FakeCli("container", [identity])
+    cli.running(identity, listed_running)
+    with fake_daemon(cli, validity=3600) as client:
+        (container,) = client.container.list(hydrate=True)
+        assert container.state is not None
+        assert container.state.running is listed_running
+        cli.running(identity, daemon_running)
+        launched = len(cli.launches)
+        with container:
+            pass
+    verbs = [launch[2] for launch in cli.launches[launched:]]
+    assert verbs == ["inspect", *(["stop"] if daemon_running else []), "rm"]
+    assert identity not in cli.present

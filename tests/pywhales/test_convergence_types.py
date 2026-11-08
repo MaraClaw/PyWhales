@@ -37,6 +37,7 @@ def _check_compose_contract(
         max_restarts=3,
         fail_on_exit=True,
         fail_on_unhealthy=True,
+        fail_on_restart_budget=True,
         policy=policy,
         timeout=1.0,
     )
@@ -45,6 +46,7 @@ def _check_compose_contract(
         assert_type(budgeted.max_restarts, int | None)
         assert_type(budgeted.fail_on_exit, bool)
         assert_type(budgeted.fail_on_unhealthy, bool)
+        assert_type(budgeted.fail_on_restart_budget, bool)
     assert_type(DeadlineDetail(1).restart_budget_exceeded_containers, int)
     if isinstance(captured, ComposeTarget):
         assert_type(captured.services, tuple[ComposeService, ...])
@@ -77,6 +79,7 @@ def _check_completion_contract(
                 "superseded",
                 "update_failed",
                 "completion_failed",
+                "restart_budget_exceeded",
                 "exited",
                 "unhealthy",
                 "observation",
@@ -105,6 +108,7 @@ def _check_container_contract(client: DockerClient, policy: InspectionPolicy) ->
         max_restarts=1,
         fail_on_exit=True,
         fail_on_unhealthy=True,
+        fail_on_restart_budget=True,
         policy=policy,
         timeout=1.0,
     )
@@ -115,6 +119,7 @@ def _check_container_contract(client: DockerClient, policy: InspectionPolicy) ->
         assert_type(captured.max_restarts, int | None)
         assert_type(captured.fail_on_exit, bool)
         assert_type(captured.fail_on_unhealthy, bool)
+        assert_type(captured.fail_on_restart_budget, bool)
         assert_type(
             wait(captured, policy=policy, timeout=1.0, poll_interval=0.1), Outcome
         )

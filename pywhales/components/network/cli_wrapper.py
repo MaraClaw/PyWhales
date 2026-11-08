@@ -24,6 +24,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components.network._create_options import create_options
 from pywhales.components.network.models import (
     NetworkContainer,
@@ -196,7 +197,10 @@ class NetworkCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--ip6", ip6)
         full_cmd.add_args_iterable_or_single("--link", links)
         full_cmd += [network, container]
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins([network])
 
     def create(
         self,
@@ -274,7 +278,10 @@ class NetworkCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "network", "disconnect"])
         full_cmd.add_flag("--force", force)
         full_cmd += [network, container]
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins([network])
 
     def exists(
         self,
@@ -341,14 +348,26 @@ class NetworkCLI(DockerCLICaller):
             networks.append(network)
         return networks
 
-    def list(self, filters: Iterable[NetworkListFilter] = ()) -> builtins.list[Network]:
+    def list(
+        self, filters: Iterable[NetworkListFilter] = (), *, hydrate: bool = False
+    ) -> builtins.list[Network]:
         """List all the networks available.
 
         Args:
             filters: Docker filter pairs; the default selects all networks.
+            hydrate: If `True`, inspect the listed full IDs in bounded batches,
+                so a listing costs one launch plus one per chunk and reading
+                properties costs none. Snapshots stay pinned until `reload()`
+                or a mutating call on the handle, and networks that vanish
+                before their inspect are omitted. If `False`, each handle
+                inspects lazily on first property access.
 
         Returns:
             Network handles in CLI output order.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -357,8 +376,17 @@ class NetworkCLI(DockerCLICaller):
             "--filter", (f"{key}={value}" for key, value in filters)
         )
 
-        ids = run(full_cmd).splitlines()
-        return [Network(self.client_config, id_, is_immutable_id=True) for id_ in ids]
+        networks = [
+            Network(self.client_config, id_, is_immutable_id=True)
+            for id_ in run(full_cmd).splitlines()
+        ]
+        if not hydrate:
+            return networks
+        return hydrate_handles(
+            networks,
+            lambda ids: run([*self.docker_cmd, "network", "inspect", *ids]),
+            NoSuchNetwork,
+        )
 
     def prune(
         self, filters: Iterable[NetworkListFilter] = (), *, timeout: float | None = None
@@ -392,4 +420,7 @@ class NetworkCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "network", "remove"])
         full_cmd += selected
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(selected)
