@@ -27,7 +27,7 @@ from pywhales.convergence._types import (
 from pywhales.convergence._wire import (
     ContainerWire,
     StandaloneContainerWire,
-    inspect_container,
+    inspect_containers,
     list_compose_ids,
 )
 from pywhales.exceptions import (
@@ -116,13 +116,8 @@ def list_members(
     config: ClientConfig, services: tuple[str, ...]
 ) -> list[ContainerWire]:
     """List and inspect the selected services' containers, leaving out one-offs."""
-    members: list[ContainerWire] = []
-    for identity in list_compose_ids(config, services):
-        check_observation()
-        container = inspect_container(config, identity)
-        if container.config.labels.oneoff != "True":
-            members.append(container)
-    return members
+    containers = inspect_containers(config, list_compose_ids(config, services))
+    return [item for item in containers if item.config.labels.oneoff != "True"]
 
 
 def _restarts(container: ContainerWire | StandaloneContainerWire) -> int:

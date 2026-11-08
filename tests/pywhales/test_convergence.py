@@ -5,7 +5,7 @@ import select
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import FrozenInstanceError, asdict, dataclass, field, fields, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -88,17 +88,30 @@ elif args[:2] == ["service", "ps"]:
         threading.Event().wait()
     print("\\n".join(task["ID"] for task in tasks if task["ServiceID"] == args[-1]))
 elif args[:3] == ["inspect", "--type", "task"]:
-    override = data.get("task_inspect_overrides", {}).get(args[3])
-    print(json.dumps([override] if override is not None else [task for task in tasks if task["ID"] == args[3]]))
-elif args[:3] == ["inspect", "--type", "container"] and "standalone" in data:
-    reference = args[3]
-    entries = data["standalone"].get(reference, [])
-    count = calls.count(args)
-    result = entries[min(count - 1, len(entries) - 1)] if entries else None
-    if result is None:
-        sys.stderr.write("Error: No such container: " + reference + "\\n")
+    overrides = data.get("task_inspect_overrides", {})
+    vanished = data.get("vanished_tasks", [])
+    found = []
+    for identity in args[3:]:
+        found += [overrides[identity]] if identity in overrides else [item for item in tasks if item["ID"] == identity and identity not in vanished]
+    print(json.dumps(found))
+    if len(args) > 4 and len(found) < len(args) - 3:
+        sys.stderr.write("Error: No such task\\n")
         sys.exit(1)
-    print(json.dumps(result))
+elif args[:3] == ["inspect", "--type", "container"] and "standalone" in data:
+    found, absent = [], False
+    for reference in args[3:]:
+        entries = data["standalone"].get(reference, [])
+        count = sum(call[:3] == args[:3] and reference in call[3:] for call in calls)
+        result = entries[min(count, len(entries)) - 1] if entries else None
+        if result is None:
+            absent = True
+            sys.stderr.write("Error: No such container: " + reference + "\\n")
+        else:
+            found += result
+    if found or len(args) > 4:
+        print(json.dumps(found))
+    if absent:
+        sys.exit(1)
 elif args[0] == "compose" or args[:3] == ["inspect", "--type", "container"]:
     snapshots = data["compose"]
     cycle = sum(call[0] == "compose" for call in calls)
@@ -111,13 +124,15 @@ elif args[0] == "compose" or args[:3] == ["inspect", "--type", "container"]:
             identity for identity in snapshot["listing"]
             if identity not in members or not selected or members[identity]["Config"]["Labels"][label] in selected
         ))
-    elif args[3] in snapshot.get("raw", {}):
-        print(snapshot["raw"][args[3]])
-    elif args[3] in members:
-        print(json.dumps([members[args[3]]]))
+    elif any(ref in snapshot.get("raw", {}) for ref in args[3:]):
+        print(next(snapshot["raw"][ref] for ref in args[3:] if ref in snapshot["raw"]))
     else:
-        sys.stderr.write("Error: No such container: " + args[3] + "\\n")
-        sys.exit(1)
+        found = [members[ref] for ref in args[3:] if ref in members]
+        if found:
+            print(json.dumps(found))
+        if len(found) < len(args) - 3:
+            sys.stderr.write("Error: No such container: " + next(ref for ref in args[3:] if ref not in members) + "\\n")
+            sys.exit(1)
 elif args[:2] in (["stack", "deploy"], ["service", "update"]):
     pass
 else:
@@ -2860,20 +2875,21 @@ def test_standalone_deadline_discards_partial_later_cycle(
     store_standalone(tmp_path, {A: [[first]], B: [[second]]})
     target = capture_containers(fake_cli, (A, B), policy=policy, timeout=5)
     assert isinstance(target, ContainerTarget)
-    inspect = container_module.inspect_standalone
+    inspect = container_module.inspect_standalones
     inspections = 0
 
     def expire_during_second_cycle(
-        config: ClientConfig, identity: str
-    ) -> StandaloneContainerWire:
+        config: ClientConfig, identities: Sequence[str]
+    ) -> Iterator[StandaloneContainerWire]:
         nonlocal inspections
-        inspections += 1
-        if inspections == 4:
-            raise ObservationTimeout()
-        return inspect(config, identity)
+        for member in inspect(config, identities):
+            inspections += 1
+            if inspections == 4:
+                raise ObservationTimeout()
+            yield member
 
     monkeypatch.setattr(
-        container_module, "inspect_standalone", expire_during_second_cycle
+        container_module, "inspect_standalones", expire_during_second_cycle
     )
     monkeypatch.setattr(compose_module, "_pause", lambda state, interval: None)
     assert wait(target, policy=policy, timeout=5, poll_interval=1) == Deadline(
@@ -4197,3 +4213,425 @@ def test_nodes_hung_child_is_reaped_and_partial_cycle_not_published(
         )
     ]
     assert_reaped(processes)
+
+
+TASK = ["inspect", "--type", "task"]
+CONTAINER = ["inspect", "--type", "container"]
+
+
+def many(count: int) -> list[str]:
+    return [format(index, "x").rjust(64, "0") for index in range(1, count + 1)]
+
+
+def batched(policy: InspectionPolicy, size: int, **limits: int) -> InspectionPolicy:
+    return replace(policy, max_references=size, **limits)
+
+
+def launches(path: Path, prefix: list[str]) -> list[list[str]]:
+    return [call for call in calls_of(path) if call[: len(prefix)] == prefix]
+
+
+def outcome_shape(result: object) -> tuple[object, ...]:
+    assert isinstance(result, Failure)
+    cause = result.cause
+    return (
+        result.reason,
+        result.service_id,
+        None if cause is None else type(cause),
+        None if cause is None else str(cause),
+    )
+
+
+def swarm_history(running: int, history: int) -> list[dict[str, Any]]:
+    tasks = [task(f"task-{index}", slot=index + 1) for index in range(running)]
+    for index in range(history):
+        old = task(f"old-{index}", slot=1)
+        old["DesiredState"], old["Status"]["State"] = "shutdown", "shutdown"
+        tasks.append(old)
+    return tasks
+
+
+def test_swarm_wait_inspects_listed_tasks_in_chunks(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    tasks = swarm_history(3, 4)
+    identities = [item["ID"] for item in tasks]
+    store(tmp_path, [service(replicas=3)], tasks)
+    target = capture(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    result = wait(target, policy=batched(policy, 3), timeout=5, poll_interval=0.01)
+    assert result == Success()
+    assert launches(tmp_path, TASK) == [
+        [*TASK, *identities[0:3]],
+        [*TASK, *identities[3:6]],
+        [*TASK, *identities[6:]],
+    ]
+
+
+def test_batching_fits_a_launch_attempt_budget_that_single_probes_exhaust(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    from pywhales.exceptions import ObservationLimitError
+
+    store(tmp_path, [service(replicas=3)], swarm_history(3, 4))
+    target = capture(fake_cli, policy)
+    budget = {"max_total_launch_attempts": 8}
+    packed = wait(
+        target, policy=batched(policy, 3, **budget), timeout=5, poll_interval=0.01
+    )
+    singles = wait(
+        target, policy=batched(policy, 1, **budget), timeout=5, poll_interval=0.01
+    )
+    assert packed == Success()
+    assert isinstance(singles, Failure) and singles.reason == "observation"
+    assert isinstance(singles.cause, ObservationLimitError)
+
+
+def failed_job(identity: str) -> dict[str, Any]:
+    return job_task(identity, 0, 1, "failed")
+
+
+def broken_job(identity: str) -> dict[str, Any]:
+    current = job_task(identity, 1, 1)
+    del current["Status"]
+    return current
+
+
+SWARM_FALLBACKS = [
+    pytest.param(
+        [failed_job("a"), broken_job("b"), job_task("c", 1, 1)],
+        {},
+        4,
+        1,
+        id="failed-then-malformed",
+    ),
+    pytest.param(
+        [failed_job("a"), job_task("b", 1, 1)],
+        {"vanished_tasks": ["b"]},
+        4,
+        2,
+        id="failed-then-missing",
+    ),
+    pytest.param(
+        [broken_job("a"), failed_job("b")], {}, 4, 2, id="malformed-then-failed"
+    ),
+    pytest.param(
+        [job_task("a", 0, 1), failed_job("b")],
+        {"vanished_tasks": ["a"]},
+        4,
+        2,
+        id="missing-then-failed",
+    ),
+    pytest.param(
+        [job_task("a", 0, 1), job_task("b", 1, 1), failed_job("c")],
+        {"task_inspect_overrides": {"b": {**job_task("b", 1, 1), "ServiceID": "x"}}},
+        4,
+        1,
+        id="foreign-service-then-failed",
+    ),
+    pytest.param(
+        [job_task("a", 0, 1), job_task("b", 1, 1), failed_job("c")],
+        {"task_inspect_overrides": {"b": {**job_task("b", 1, 1), "ID": "wrong"}}},
+        4,
+        3,
+        id="wrong-id-in-batch",
+    ),
+    pytest.param(
+        [
+            failed_job("a"),
+            job_task("b", 1, 1),
+            job_task("c", 0, 1),
+            job_task("d", 1, 1),
+        ],
+        {"vanished_tasks": ["c"]},
+        2,
+        1,
+        id="later-chunk-never-launches",
+    ),
+]
+
+
+@pytest.mark.parametrize("tasks,extras,size,expected", SWARM_FALLBACKS)
+def test_swarm_batch_failures_match_single_probes_in_listing_order(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    tasks: list[dict[str, Any]],
+    extras: dict[str, Any],
+    size: int,
+    expected: int,
+) -> None:
+    snapshot_ = job_service()
+    snapshot_["Spec"]["TaskTemplate"]["RestartPolicy"] = {"Condition": "none"}
+    store(tmp_path, [snapshot_], tasks)
+    data = json.loads((tmp_path / "data.json").read_text())
+    (tmp_path / "data.json").write_text(json.dumps({**data, **extras}))
+    target = capture(fake_cli, policy)
+    shapes: list[tuple[object, ...]] = []
+    counts: list[int] = []
+    for limit in (1, size):
+        (tmp_path / "calls").unlink()
+        result = wait(target, policy=batched(policy, limit), timeout=5, poll_interval=1)
+        shapes.append(outcome_shape(result))
+        counts.append(len(launches(tmp_path, TASK)))
+    assert shapes[0] == shapes[1]
+    assert counts[1] == expected
+
+
+def container_set(identities: Sequence[str]) -> dict[str, Any]:
+    return snapshot(*(container(identity) for identity in identities))
+
+
+def test_compose_inspects_containers_in_chunks_each_pass(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    ids = many(5)
+    store_compose(tmp_path, container_set(many(5)))
+    chunks = [[*CONTAINER, *ids[0:2]], [*CONTAINER, *ids[2:4]], [*CONTAINER, ids[4]]]
+    target = compose_target(fake_cli, batched(policy, 2))
+    assert launches(tmp_path, CONTAINER) == chunks
+    (tmp_path / "calls").unlink()
+    result = wait(target, policy=batched(policy, 2), timeout=5, poll_interval=0.01)
+    assert result == Success()
+    assert listings(tmp_path) == 2
+    assert launches(tmp_path, CONTAINER) == chunks * 2
+
+
+def mismatched_id(bad: dict[str, Any]) -> None:
+    bad["containers"][B]["Id"] = "z" * 64
+
+
+def vanished_last(bad: dict[str, Any]) -> None:
+    del bad["containers"][C]
+
+
+def corrupt_middle(bad: dict[str, Any]) -> None:
+    del bad["containers"][B]["State"]
+
+
+def junk_reply(bad: dict[str, Any]) -> None:
+    bad["raw"] = {B: "not json"}
+
+
+def vanished_then_corrupt(bad: dict[str, Any]) -> None:
+    del bad["containers"][A]
+    corrupt_middle(bad)
+
+
+def corrupt_then_vanished(bad: dict[str, Any]) -> None:
+    corrupt_middle(bad)
+    vanished_last(bad)
+
+
+COMPOSE_FALLBACKS = [
+    pytest.param(mismatched_id, 3, id="identity-mismatch"),
+    pytest.param(vanished_last, 4, id="vanished"),
+    pytest.param(corrupt_middle, 2, id="corrupt-item"),
+    pytest.param(junk_reply, 3, id="junk-reply"),
+    pytest.param(vanished_then_corrupt, 2, id="vanished-then-corrupt"),
+    pytest.param(corrupt_then_vanished, 3, id="corrupt-then-vanished"),
+]
+
+
+@pytest.mark.parametrize("stage", ["capture", "wait"])
+@pytest.mark.parametrize("mutate,expected", COMPOSE_FALLBACKS)
+def test_compose_batch_failures_match_single_probes_in_listing_order(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    mutate: Callable[[dict[str, Any]], None],
+    expected: int,
+    stage: str,
+) -> None:
+    shapes: list[tuple[object, ...]] = []
+    counts: list[int] = []
+    for limit in (1, 3):
+        bad = container_set([A, B, C])
+        mutate(bad)
+        if stage == "capture":
+            store_compose(tmp_path, bad)
+            result = capture_compose(
+                fake_cli, ("web",), policy=batched(policy, limit), timeout=5
+            )
+        else:
+            store_compose(tmp_path, container_set([A, B, C]))
+            target = compose_target(fake_cli, policy)
+            store_compose(tmp_path, bad)
+            result = wait(
+                target, policy=batched(policy, limit), timeout=5, poll_interval=0.01
+            )
+        shapes.append(outcome_shape(result))
+        counts.append(len(launches(tmp_path, CONTAINER)))
+    assert shapes[0] == shapes[1]
+    assert counts[1] == expected
+    if stage == "wait":
+        assert shapes[0][0] in {"malformed", "superseded"} and shapes[0][2] is None
+    else:
+        assert shapes[0][0] in {"malformed", "observation"}
+
+
+def test_compose_response_over_the_limit_falls_back_to_single_probes(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    ids = many(3)
+    store_compose(tmp_path, container_set(ids))
+    target = compose_target(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    one = len(json.dumps([container(ids[0])])) + 1
+    tight = batched(policy, 3, max_response_bytes=one + 40)
+    assert wait(target, policy=tight, timeout=5, poll_interval=0.01) == Success()
+    assert launches(tmp_path, CONTAINER)[:4] == [
+        [*CONTAINER, *ids],
+        *([*CONTAINER, identity] for identity in ids),
+    ]
+    assert len(launches(tmp_path, CONTAINER)) == 8
+
+
+def test_every_chunk_launch_is_preceded_by_an_observation_checkpoint(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._wire as wire_module
+
+    store_compose(tmp_path, container_set(many(5)))
+    target = compose_target(fake_cli, batched(policy, 2))
+    events: list[str] = []
+    launch, check = wire_module.run, wire_module.check_observation
+
+    def spy_run(args: Sequence[object]) -> str:
+        events.append("inspect" if "--type" in args else "other")
+        return launch(args)
+
+    def spy_check() -> None:
+        events.append("check")
+        check()
+
+    monkeypatch.setattr(wire_module, "run", spy_run)
+    monkeypatch.setattr(wire_module, "check_observation", spy_check)
+    result = wait(target, policy=batched(policy, 2), timeout=5, poll_interval=0.01)
+    assert result == Success()
+    inspections = [index for index, event in enumerate(events) if event == "inspect"]
+    assert len(inspections) == 6
+    assert all(events[index - 1] == "check" for index in inspections)
+
+
+@pytest.mark.parametrize(
+    "health,occurrence,expected",
+    [
+        ("healthy", 2, None),
+        ("starting", 3, DeadlineDetail(1, unhealthy_containers=1)),
+    ],
+    ids=["first-pass", "second-cycle"],
+)
+def test_deadline_reaps_a_hung_batch_and_keeps_the_last_complete_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    health: str,
+    occurrence: int,
+    expected: DeadlineDetail | None,
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, health=health), container(B)))
+    target = compose_target(fake_cli, batched(policy, 2))
+    chunk = [*CONTAINER, A, B]
+    hang_at(tmp_path, chunk, occurrence)
+    processes = track_processes(monkeypatch)
+    result = wait(target, policy=batched(policy, 2), timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(expected)
+    assert_reaped(processes)
+    assert calls_of(tmp_path)[-1] == chunk
+    assert calls_of(tmp_path).count(chunk) == occurrence
+
+
+def test_cancellation_reaps_a_hung_batch_without_reprobing(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_compose(tmp_path, snapshot(container(A), container(B)))
+    size_two = batched(policy, 2)
+    target = compose_target(fake_cli, size_two)
+    chunk = [*CONTAINER, A, B]
+    hang_at(tmp_path, chunk, 2)
+    processes = track_processes(monkeypatch)
+    cancel = Event()
+    results: list[object] = []
+    worker = Thread(
+        target=lambda: results.append(
+            wait(target, policy=size_two, timeout=30, poll_interval=1, cancel=cancel)
+        )
+    )
+    worker.start()
+    end = time.monotonic() + 10
+    while not (tmp_path / "started").exists() and time.monotonic() < end:
+        Event().wait(0.01)
+    assert (tmp_path / "started").exists()
+    cancel.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results == [Cancelled()]
+    assert_reaped(processes)
+    assert calls_of(tmp_path)[-1] == chunk and calls_of(tmp_path).count(chunk) == 2
+
+
+def test_standalone_checks_fixed_ids_in_chunks_but_resolves_references_singly(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    ids = many(5)
+    named = standalone(ids[0])
+    named["Name"] = "/db"
+    entries = {identity: [[standalone(identity)]] for identity in ids}
+    store_standalone(tmp_path, {**entries, "db": [[named]]})
+    size_two = batched(policy, 2)
+    references = ("db", *ids[1:])
+    target = capture_containers(fake_cli, references, policy=size_two, timeout=5)
+    assert isinstance(target, ContainerTarget) and target.container_ids == tuple(ids)
+    assert launches(tmp_path, CONTAINER) == [[*CONTAINER, item] for item in references]
+    (tmp_path / "calls").unlink()
+    assert wait(target, policy=size_two, timeout=5, poll_interval=0.01) == Success()
+    chunks = [[*CONTAINER, *ids[0:2]], [*CONTAINER, *ids[2:4]], [*CONTAINER, ids[4]]]
+    assert launches(tmp_path, CONTAINER) == chunks * 2
+
+
+def corrupt_standalone(identity: str) -> dict[str, Any]:
+    wire = standalone(identity)
+    del wire["State"]
+    return wire
+
+
+STANDALONE_FALLBACKS = [
+    pytest.param(None, 3, id="vanished"),
+    pytest.param([standalone(C)], 3, id="recreated-as-another-id"),
+    pytest.param([corrupt_standalone(B)], 2, id="corrupt-item"),
+]
+
+
+@pytest.mark.parametrize("later,expected", STANDALONE_FALLBACKS)
+def test_standalone_batch_failures_match_single_probes_in_target_order(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    later: list[dict[str, Any]] | None,
+    expected: int,
+) -> None:
+    entries: dict[str, list[Any]] = {
+        identity: [[standalone(identity)]] for identity in (A, B, C)
+    }
+    entries[B] = [[standalone(B)], later]
+    shapes: list[tuple[object, ...]] = []
+    counts: list[int] = []
+    for limit in (1, 3):
+        store_standalone(tmp_path, entries)
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, limit)
+        target = capture_containers(fake_cli, (A, B, C), policy=run_policy, timeout=5)
+        assert isinstance(target, ContainerTarget)
+        result = wait(target, policy=run_policy, timeout=5, poll_interval=0.01)
+        shapes.append(outcome_shape(result))
+        counts.append(len(launches(tmp_path, CONTAINER)) - 3)
+    assert shapes[0] == shapes[1]
+    assert counts[1] == expected

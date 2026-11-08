@@ -3,13 +3,12 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from pywhales._observation import check_observation
 from pywhales.client_config import ParsingError
 from pywhales.convergence._types import DeadlineDetail, Failure, ServiceTarget
 from pywhales.convergence._wire import (
     canonical,
     inspect_service,
-    inspect_task,
+    inspect_tasks,
     same_generation,
 )
 from pywhales.enums import TaskState
@@ -116,9 +115,7 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
     seen_nodes: set[str] = set()
     duplicate_nodes = missing_assignment = outside_nodes = False
     duplicate = stale = non_running = invalid = False
-    for task_id in ids:
-        check_observation()
-        task = inspect_task(target.client_config, task_id)
+    for task in inspect_tasks(target.client_config, ids):
         if task.service_id != target.service_id:
             raise ParsingError("Task service identity mismatch")
         if is_job:

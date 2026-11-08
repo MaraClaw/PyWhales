@@ -1,6 +1,8 @@
 """Preserve complete wire templates while validating required observation fields."""
 
 import hashlib
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import (
@@ -9,13 +11,19 @@ from pydantic import (
     Field,
     JsonValue,
     TypeAdapter,
+    ValidationError,
     field_validator,
 )
 
 from pywhales._json import dumps_compat, loads_compat
+from pywhales._observation import check_observation, get_observation
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.convergence._types import Failure, ServiceTarget
-from pywhales.exceptions import DockerException
+from pywhales.exceptions import (
+    DockerException,
+    ObservationCancelled,
+    ObservationTimeout,
+)
 from pywhales.utils import run
 
 
@@ -278,6 +286,148 @@ def inspect_standalone(config: ClientConfig, reference: str) -> StandaloneContai
     if len(results) != 1:
         raise ParsingError("Container inspect identity mismatch")
     return results[0]
+
+
+@dataclass(frozen=True, slots=True)
+class _Kind[Wire: BaseModel]:
+    """One batchable inspection: its command, wire model, ID key and single probe."""
+
+    command: tuple[str, ...]
+    model: type[Wire]
+    key: str
+    single: Callable[[ClientConfig, str], Wire]
+
+
+_TASKS = _Kind(("inspect", "--type", "task"), TaskWire, "ID", inspect_task)
+_CONTAINERS = _Kind(
+    ("inspect", "--type", "container"), ContainerWire, "Id", inspect_container
+)
+_STANDALONES = _Kind(
+    ("inspect", "--type", "container"),
+    StandaloneContainerWire,
+    "Id",
+    inspect_standalone,
+)
+
+
+def _batch_items[Wire: BaseModel](
+    config: ClientConfig, kind: _Kind[Wire], chunk: Sequence[str]
+) -> list[dict[str, JsonValue]]:
+    """Inspect a chunk in one launch and return raw items in request order.
+
+    Items are mapped by their ``kind.key`` value, never by position, and that set
+    must equal the requested IDs exactly.
+
+    Raises:
+        ParsingError: If the reply's IDs are not exactly the requested IDs.
+    """
+    payload = run([*config.docker_cmd, *kind.command, *chunk])
+    by_id: dict[str, dict[str, JsonValue]] = {}
+    for item in TypeAdapter(list[dict[str, JsonValue]]).validate_json(payload):
+        identity = item.get(kind.key)
+        if type(identity) is not str or identity in by_id:
+            raise ParsingError("Batch inspect identity mismatch")
+        by_id[identity] = item
+    if by_id.keys() != set(chunk) or len(by_id) != len(chunk):
+        raise ParsingError("Batch inspect identity mismatch")
+    return [by_id[identity] for identity in chunk]
+
+
+def _batch_prefix[Wire: BaseModel](
+    config: ClientConfig, kind: _Kind[Wire], chunk: Sequence[str]
+) -> Iterator[Wire]:
+    """Yield one batch's validated items in request order, stopping at any failure.
+
+    A failed launch or reply yields nothing. A malformed item ends the iteration
+    before itself, so earlier items are still delivered and the caller re-probes the
+    rest singly. Cancellation and deadline propagate; they would recur on re-probe.
+    """
+    try:
+        items = _batch_items(config, kind, chunk)
+    except ObservationCancelled, ObservationTimeout:
+        raise
+    except Exception:
+        return
+    for item in items:
+        try:
+            wire = kind.model.model_validate(item)
+        except ValidationError:
+            return
+        yield wire
+
+
+def _inspect_many[Wire: BaseModel](
+    config: ClientConfig, kind: _Kind[Wire], identities: Sequence[str]
+) -> Iterator[Wire]:
+    """Inspect exact IDs in policy-sized chunks, yielding wires in request order.
+
+    A chunk is one multi-ID launch, sized by the active policy's ``max_references``
+    (one outside an observation) and preceded by an observation checkpoint. The
+    batch never explains its own failure: whatever the batch does not deliver,
+    including everything after a failure, is re-probed one ID at a time in order,
+    so the first failure, its type and its cause match a purely single-ID walk.
+    Nothing launches before iteration, and unread chunks never launch.
+    """
+    state = get_observation()
+    size = 1 if state is None else state.policy.max_references
+    for start in range(0, len(identities), size):
+        chunk = identities[start : start + size]
+        delivered = 0
+        if len(chunk) > 1:
+            check_observation()
+            for wire in _batch_prefix(config, kind, chunk):
+                delivered += 1
+                yield wire
+        for identity in chunk[delivered:]:
+            check_observation()
+            yield kind.single(config, identity)
+
+
+def inspect_tasks(config: ClientConfig, task_ids: Sequence[str]) -> Iterator[TaskWire]:
+    """Return a lazy iterator over exact task IDs, inspected in chunks.
+
+    Args:
+        config: Client settings for the manager.
+        task_ids: Distinct full task IDs, in listing order.
+
+    Returns:
+        An iterator yielding each task in ``task_ids`` order. Launches happen as it
+        is consumed, and it raises what single-ID inspection would raise.
+    """
+    return _inspect_many(config, _TASKS, task_ids)
+
+
+def inspect_containers(
+    config: ClientConfig, container_ids: Sequence[str]
+) -> Iterator[ContainerWire]:
+    """Return a lazy iterator over exact Compose container IDs, inspected in chunks.
+
+    Args:
+        config: Client settings for the Docker daemon.
+        container_ids: Distinct full container IDs, in listing order.
+
+    Returns:
+        An iterator yielding each container in ``container_ids`` order, raising what
+        single-ID inspection would raise.
+    """
+    return _inspect_many(config, _CONTAINERS, container_ids)
+
+
+def inspect_standalones(
+    config: ClientConfig, container_ids: Sequence[str]
+) -> Iterator[StandaloneContainerWire]:
+    """Return a lazy iterator over fixed standalone container IDs, in chunks.
+
+    Args:
+        config: Client settings for the Docker daemon.
+        container_ids: Distinct full container IDs, in target order.
+
+    Returns:
+        An iterator yielding each container in ``container_ids`` order, raising what
+        single-ID inspection would raise. A single probe may return a different
+        ID, which the caller must compare.
+    """
+    return _inspect_many(config, _STANDALONES, container_ids)
 
 
 def resolve_container(config: ClientConfig, reference: str) -> StandaloneContainerWire:
