@@ -28,7 +28,7 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.1.7.
+The guidance describes source APIs for project version 1.2.0.
 An installed version string alone isn't proof of support. Check environment
 inheritance, node and standalone targets, completion/restart/failure keywords, strict workload
 errors, schema-10 stop attribution and exporter counts, refusal/admission correlation,
@@ -153,6 +153,11 @@ methods = [
     )
 ]
 methods += [
+    docker.ps,
+    docker.container.list,
+    docker.image.list,
+    docker.network.list,
+    docker.volume.list,
     docker.create,
     docker.run,
     docker.container.create,
@@ -170,6 +175,11 @@ for method in methods:
     for overload in get_overloads(method):
         print(signature(overload, annotation_format=Format.STRING))
 ```
+
+Look for keyword-only `hydrate: bool = False` on the four resource `list`
+methods and the `docker.ps` alias. A signature proves argument support, not
+snapshot or fanout behavior: follow the linked lifecycle and observation
+contracts, then validate the smallest authorized runtime scenario.
 
 Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
 `ProcessStream` in matching streaming overloads. Also look for:

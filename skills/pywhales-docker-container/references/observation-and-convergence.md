@@ -16,6 +16,10 @@ calls automatically.
 
 ## Bounding Batch Inspection
 
+For pinned container, image, network or volume tables, see
+[Hydrated listings and snapshot lifetimes](client-and-errors.md#hydrated-listings-and-snapshot-lifetimes).
+These listing snapshots differ from detached inventory records below.
+
 ```python
 from threading import Event
 from time import monotonic
@@ -643,6 +647,17 @@ budget. After an all-clear, `Success` requires a second complete all-clear pass
 over the same IDs. It proves only the captured conditions at that moment.
 
 ### Outcomes And Budgets
+
+Swarm task, Compose container and fixed standalone-container inspections batch
+up to the active policy's `max_references` per launch. Each chunk checks the
+observation before launch and maps exact full IDs in target order. Failed or
+malformed batches fall back to ordered single-ID probes; cancellation and scope
+deadline expiry stop immediately. This preserves failure reasons, causes and
+earlier-task precedence, but fallback may consume extra launch attempts. Service
+and node inspections and standalone name/prefix resolution remain scalar.
+The confirming all-clear pass still runs in full, and interrupted cycles publish
+no partial detail. Size response and launch budgets for the selected resources;
+batching doesn't remove those limits.
 
 These rules apply to every target. `timeout` on capture and wait is a positive
 finite total budget for that call, unlike a per-launch CLI timeout; cleanup
