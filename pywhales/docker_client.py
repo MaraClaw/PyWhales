@@ -6,7 +6,7 @@ operations require their corresponding external CLI support when invoked.
 """
 
 import base64
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Annotated
 
 import pydantic
@@ -160,6 +160,7 @@ class DockerClient(DockerCLICaller):
         strict_env_transport: bool = False,
         inherit_environment: bool = True,
         strict_workload_errors: bool = False,
+        inherited_environment_names: Collection[str] | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -226,12 +227,18 @@ class DockerClient(DockerCLICaller):
                 on Windows, before applying the explicit overlay.
             strict_workload_errors: Raise plain DockerException for attached
                 workload failures instead of classifying their stderr. Defaults off.
+            inherited_environment_names: Copied names selecting exactly which ambient
+                variables reach children, overriding inherit_environment. An empty
+                collection selects none; None preserves the legacy inheritance mode.
+                Explicit client and operation overlays still apply. Executable lookup,
+                configuration files and credential helpers are not confined by this.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
-                timeout, or environment entry.
+                timeout, environment entry, or inherited environment name.
             TypeError: If a newly created config's environment is not a mapping
-                of string keys to string values.
+                of string keys to string values, or inherited_environment_names is
+                not a collection of strings (a bare string is rejected).
         """
         if client_config is None:
             client_config = ClientConfig(
@@ -265,6 +272,7 @@ class DockerClient(DockerCLICaller):
                 strict_env_transport=strict_env_transport,
                 inherit_environment=inherit_environment,
                 strict_workload_errors=strict_workload_errors,
+                inherited_environment_names=inherited_environment_names,
             )
         super().__init__(client_config)
 

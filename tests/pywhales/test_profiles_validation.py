@@ -39,6 +39,27 @@ def test_cached_endpoint_override_rejects_before_pull(
     image.assert_not_called()
 
 
+def test_changed_inherited_names_reject_before_preparation_and_pull(
+    client: DockerClient, profile: SecurityProfile, create_request: CreateRequest
+) -> None:
+    plan = plan_create(profile, replace(create_request, pull="always"), client)
+    client.client_config.inherited_environment_names = frozenset({"APP_APPROVED"})
+    with (
+        patch.object(EndpointBinding, "_prepare") as prepare,
+        patch("shutil.which") as lookup,
+        patch("pywhales.components.image.cli_wrapper.ImageCLI") as image,
+        patch("subprocess.run") as launch,
+        pytest.raises(PolicyError) as caught,
+    ):
+        create_from_plan(client, plan)
+    assert caught.value.field == "endpoint.binding"
+    assert caught.value.reason == PolicyReason.CONFLICT
+    prepare.assert_not_called()
+    lookup.assert_not_called()
+    image.assert_not_called()
+    launch.assert_not_called()
+
+
 @pytest.mark.parametrize("field", ["resources", "logging", "endpoint", "mounts"])
 def test_missing_required_component_is_typed_error(
     field: str, create_request: CreateRequest

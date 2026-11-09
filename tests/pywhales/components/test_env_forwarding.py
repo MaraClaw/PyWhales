@@ -1,8 +1,9 @@
 import json
 import os
 import sys
+from collections.abc import Collection
 from pathlib import Path
-from typing import Literal
+from typing import Literal, override
 
 import pytest
 
@@ -188,11 +189,17 @@ def test_client_and_ambient_collisions_stay_literal() -> None:
     ) == ([f"{ambient}=container", "CLIENT_ONLY=container"], {})
 
 
+@pytest.mark.parametrize("names", [None, (), ("OTHER_APP",)])
 def test_isolated_strict_transport_ignores_ambient_collision(
     monkeypatch: pytest.MonkeyPatch,
+    names: Collection[str] | None,
 ) -> None:
     monkeypatch.setenv("APP_COLLISION", "ambient")
-    config = ClientConfig(inherit_environment=False, strict_env_transport=True)
+    config = ClientConfig(
+        inherit_environment=False,
+        inherited_environment_names=names,
+        strict_env_transport=True,
+    )
     args, overrides = container_environment({"APP_COLLISION": "container"}, config)
     assert args == ["APP_COLLISION"]
     assert resolve_environment(None, overrides)["APP_COLLISION"] == "container"
@@ -251,6 +258,70 @@ def test_collision_snapshot_is_the_launch_environment() -> None:
     effective = resolve_environment(config.environment, overrides)
     assert effective["CLIENT_SNAPSHOT"] == "before"
     assert effective["APP_VALUE"] == "container"
+
+
+@pytest.mark.parametrize("mutation", ["valid", "names", "overlay"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_assignment_conversion_cannot_change_selected_collision_snapshot(
+    env_client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    stream: bool,
+) -> None:
+    monkeypatch.setenv("APP_SELECTED", "before")
+    monkeypatch.setenv("APP_COLLISION", "excluded")
+    config = env_client.client_config
+    config.inherited_environment_names = frozenset({"APP_SELECTED"})
+    config.strict_env_transport = True
+
+    class MutatingValue(str):
+        @override
+        def __str__(self) -> str:
+            monkeypatch.setenv("APP_SELECTED", "after")
+            config.inherited_environment_names = {"APP_COLLISION"}
+            config.environment = {"APP_COLLISION": "after"}
+            if mutation == "names":
+                config.inherited_environment_names = {"bad=secret"}
+            elif mutation == "overlay":
+                config.environment = {"APP_CLIENT": "private\0value"}
+            return super().__str__()
+
+    envs = {"APP_COLLISION": MutatingValue("forwarded")}
+    if stream:
+        with env_client.execute("container", ["cmd"], envs=envs, stream=True) as result:
+            list(result)
+    else:
+        env_client.execute("container", ["cmd"], envs=envs)
+    launches = [
+        json.loads(line)
+        for line in (tmp_path / "launches.jsonl").read_text().splitlines()
+    ]
+    launch = next(item for item in launches if "--env" in item["argv"])
+    assert launch["environment"]["APP_SELECTED"] == "before"
+    assert launch["environment"]["APP_COLLISION"] == "forwarded"
+    assert "HOME" not in launch["environment"]
+    assert "APP_COLLISION" in launch["argv"]
+    assert "APP_COLLISION=forwarded" not in launch["argv"]
+    if mutation != "valid":
+        with pytest.raises(ValueError) as error:
+            env_client.execute("container", ["cmd"], envs={"APP_FRESH": "value"})
+        assert "secret" not in str(error.value)
+        assert "private" not in str(error.value)
+
+
+def test_windows_selected_ambient_collision_rejects_strict_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pywhales._environment._WINDOWS", True)
+    monkeypatch.setattr(os, "environ", {"App_Value": "ambient"})
+    with pytest.raises(ValueError):
+        container_environment(
+            {"app_value": "private"},
+            ClientConfig(
+                inherited_environment_names={"APP_VALUE"}, strict_env_transport=True
+            ),
+        )
 
 
 @pytest.mark.parametrize(

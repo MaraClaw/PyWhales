@@ -4,7 +4,7 @@ import struct
 import subprocess
 import sys
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC
 from pathlib import Path
@@ -297,12 +297,19 @@ def test_inventory_reuses_upfront_full_environment_after_mutation(
     ]
 
 
+@pytest.mark.parametrize("names", [None, (), ("PYWHALES_TEST_INHERITED",)])
 def test_inventory_snapshots_environment_before_argument_conversion(
-    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path
+    fake_cli: ClientConfig,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    names: Collection[str] | None,
 ) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_INHERITED", "before")
     config = ClientConfig(
         client_call=list(fake_cli.client_call),
         environment={"PYWHALES_TEST_CLIENT": "before"},
+        inherited_environment_names=names,
     )
     assert isinstance(config.environment, dict)
     environment = config.environment
@@ -311,6 +318,8 @@ def test_inventory_snapshots_environment_before_argument_conversion(
         @override
         def __str__(self) -> str:
             environment["PYWHALES_TEST_CLIENT"] = "after"
+            monkeypatch.setenv("PYWHALES_TEST_INHERITED", "after")
+            config.inherited_environment_names = ()
             return super().__str__()
 
     config.client_call[1] = MutatingPath(config.client_call[1])
@@ -324,17 +333,20 @@ def test_inventory_snapshots_environment_before_argument_conversion(
         json.loads(line)
         for line in (tmp_path / "sentinels.jsonl").read_text().splitlines()
     ]
-    assert sentinels[0][1] == "before"
+    assert sentinels == [[None if names == () else "before", "before"]]
 
 
+@pytest.mark.parametrize("names", [None, (), ("PYWHALES_TEST_INHERITED",)])
 def test_inventory_isolates_and_freezes_child_environment(
     fake_cli: ClientConfig,
     policy: InspectionPolicy,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    names: Collection[str] | None,
 ) -> None:
     monkeypatch.setenv("PYWHALES_TEST_INHERITED", "ambient")
     fake_cli.inherit_environment = False
+    fake_cli.inherited_environment_names = names
     fake_cli.environment = {"PYWHALES_TEST_CLIENT": "explicit"}
     from pywhales import _inventory_staging
 
@@ -345,7 +357,9 @@ def test_inventory_isolates_and_freezes_child_environment(
     ) -> Sequence[InventoryResource]:
         result = inspect(resources)
         fake_cli.inherit_environment = True
+        fake_cli.inherited_environment_names = None
         fake_cli.environment = {"PYWHALES_TEST_CLIENT": "changed"}
+        monkeypatch.setenv("PYWHALES_TEST_INHERITED", "changed")
         return result
 
     monkeypatch.setattr(_inventory_staging, "inspect_group", mutate_after_inspect)
@@ -357,7 +371,10 @@ def test_inventory_isolates_and_freezes_child_environment(
     assert [
         json.loads(line)
         for line in (tmp_path / "sentinels.jsonl").read_text().splitlines()
-    ] == [[None, "explicit"], [None, "explicit"]]
+    ] == [
+        ["ambient" if bool(names) else None, "explicit"],
+        ["ambient" if bool(names) else None, "explicit"],
+    ]
 
 
 @pytest.mark.parametrize("entry", [("BAD=KEY", "value"), ("VALID", "bad\0value")])
