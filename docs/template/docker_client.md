@@ -38,6 +38,19 @@ archive transfers and inventory capture. Assignment collision checks use the sam
 effective child environment, so a name present only in the parent no longer
 forces a literal assignment fallback.
 
+For an exact ambient selection, use
+`DockerClient(inherited_environment_names={"PATH", "SSH_AUTH_SOCK"})`. A supplied
+collection replaces the ambient selection regardless of `inherit_environment`;
+an empty collection inherits nothing, including no `HOME`. `None` preserves the
+legacy behavior described above. Names are validated and copied, and Windows
+names match case-insensitively. Explicit client and operation overlays still
+apply, followed by mandatory Buildx settings. Each launch freezes the selected
+values before argument conversion; lazy saves select them at first iteration.
+
+This controls inherited environment variables only. Executable lookup still
+uses the process `PATH`, and excluding `HOME` does not confine Docker configuration
+files, plugins, credential helpers, or Compose interpolation.
+
 ## Assignment values and argv
 
 Container `envs` and Buildx/Compose `build_args` use name-only `--env KEY` or
@@ -301,6 +314,25 @@ and reap any owned child before returning its slot. A concurrency-only scope
 stays attached to streams and archives without introducing a post-launch timer.
 Lazy save still reserves its archive slot at first iteration; eager inspection
 is a separate launch with its own attempt and child-slot charge.
+
+`max_total_archive_stderr_bytes` optionally bounds actual stderr reads for direct
+byte/iterator image loads and streamed image saves. It accepts a positive exact
+`int`, rejecting booleans; `None` preserves the existing transfer behavior.
+Enabled transfers drain load output during upload and save stderr independently
+of archive consumption, including while a save consumer is paused. Binary
+archive payloads retain their existing stdout and stdin accounting.
+
+Nested observations and copied contexts share the diagnostic allowance, and a
+launched transfer retains it after scope exit. Reads after local child exit still
+count. Exact-limit EOF succeeds; at most one detection byte per exhausted account
+can be read before `ObservationLimitError("total_archive_stderr")` stops further
+diagnostic reads. Overflow takes precedence over classifying incomplete stderr;
+below the allowance, ordinary save failure classification and raw stderr remain
+available. Telemetry projects this reason to the existing `other_limit` value.
+This diagnostic budget does not change aggregate-I/O exclusions or bound total
+process memory. Cancellation, deadlines and closure clean up owned local pipes,
+children and workers; arbitrary caller iterator code cannot be interrupted, and
+local cleanup does not roll back daemon operations.
 
 Before any inventory or bounded bulk-reload inspection starts, its complete
 group-and-chunk plan must fit every enclosing account's remaining allowance.
