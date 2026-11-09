@@ -40,10 +40,11 @@ Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
 Environment files are applied in order, with later files overriding earlier ones.
 
-`environment={"KEY": "value"}` overlays the child's base environment for every
-launch from that client. By default, `inherit_environment=True` copies the
-process environment; `environment=None` adds no overlay. This does not affect
-executable lookup or the parent Python process's own environment.
+`environment={"KEY": "value"}` overlays the child's selected base environment for
+every launch from that client. By default, `inherited_environment_names=None`
+and `inherit_environment=True` copy the process environment;
+`environment=None` adds no overlay. This does not affect executable lookup or
+the parent Python process's own environment.
 
 Keep this CLI configuration distinct from container `envs={...}`. Eligible
 `envs` values use a per-launch child environment with `--env KEY`; CLI-control
@@ -53,7 +54,8 @@ Neither path is a secret vault. See
 including the Compose interpolation caveat.
 
 If passing an existing `client_config=...`, configure that object directly,
-`inherit_environment`, `strict_env_transport`, and `strict_workload_errors` included: the constructor retains it unchanged and
+`inherited_environment_names`, `inherit_environment`, `strict_env_transport`, and
+`strict_workload_errors` included: the constructor retains it unchanged and
 ignores the other constructor options.
 
 ## Isolate The CLI Environment
@@ -67,8 +69,9 @@ client = DockerClient(
 )
 ```
 
-Select an existing authorized context in place of `ci`. With inheritance off,
-the child retains only the available `PATH` and `HOME` entries from the parent,
+Select an existing authorized context in place of `ci`. With inherited names
+left at `None` and inheritance off, the child retains only the available `PATH`
+and `HOME` entries from the parent,
 plus `USERPROFILE` and `SYSTEMROOT` on Windows; Windows names match
 case-insensitively. The explicit client overlay and per-launch overrides are
 applied on top. Ambient `DOCKER_*`, `SSH_AUTH_SOCK`, tokens, and proxy variables
@@ -77,13 +80,46 @@ Executable lookup still uses the Python process's `PATH`, not the overlay.
 Retained home paths can still select Docker configuration and credential helpers;
 this flag controls environment inheritance, not all credential or filesystem access.
 
-The setting covers captured calls, streams, image load/save, and inventory
-capture. Each launch keeps its selected environment; staged inventory reuses its
-frozen group snapshot. Environment-only container/build forwarding checks that
-same effective environment: an ordinary name found only in excluded ambient
-state no longer collides. Reserved CLI names still require literal fallback or
-fail in strict mode. Keep the config stable when using endpoint-bound policy
-objects; changing this compared setting invalidates an existing endpoint binding.
+To select exact ambient names instead, supply a collection:
+
+```python
+client = DockerClient(
+    inherited_environment_names={"PATH", "HOME", "SSH_AUTH_SOCK"},
+    environment={"DOCKER_CONTEXT": "ci"},
+)
+```
+
+This replaces the base selected by either value of `inherit_environment`.
+Only names actually present are inherited; no wildcard or prefix matching is
+performed. `inherited_environment_names=()` inherits no ambient variables, even
+`PATH` or `HOME`. `None` preserves the legacy modes above. Explicit client
+overlays still apply, followed by operation overrides, then mandatory Buildx
+`DOCKER_CLI_EXPERIMENTAL=enabled`, even with empty inheritance.
+
+Construction validates and copies the collection to a `frozenset`, so later
+changes to the original list or set don't change the client. A bare string or
+bytes, a non-collection, or a non-string member raises `TypeError`; empty names
+or names containing `=` or NUL raise `ValueError`. Errors disclose neither
+names nor values. Repeated names select once, and Windows matches selection,
+overlay replacement and collisions case-insensitively. These are environment
+names, not shell patterns or a filesystem access policy.
+
+The settings cover captured calls, streams, image load/save, and inventory
+capture. Selected inheritance is frozen before argv conversion; lazy save does
+this at first iteration, separately from its eager inspection. Staged inventory
+reuses its measured group snapshot across chunks. Container/build forwarding
+checks that same effective environment: an ordinary name found only in excluded
+ambient state no longer collides, but selected names and client-overlay entries
+still do. Reserved CLI names still require literal fallback or fail in strict
+mode. A forwarding decision already bound to a frozen snapshot survives later
+config mutation, including newly invalid settings; independent launches validate
+their current settings. Keep the config stable when using endpoint-bound policy
+objects: changing inherited-name selection invalidates an existing binding.
+
+Executable resolution still uses the Python process's `PATH`, including its
+cached executable prefix. Omitting home or configuration variables doesn't
+confine Docker configuration files, filesystem access, plugins or credential
+helpers. Choose their access separately in the application's runtime.
 
 ## Strict Environment Transport
 
@@ -291,7 +327,7 @@ For one shared allowance over managed pipe reads and stdin writes, set
 `InspectionPolicy.max_total_io_bytes` inside `observation()`, not on the client.
 This adds to separate response/stream/stdin limits and doesn't bound file contents
 transferred by CLI filename arguments. For closed stop attribution and exporter
-offer counts, inspect schema-10 telemetry support as described in
+offer counts, inspect schema-11 telemetry support as described in
 [Usage validation](validation.md).
 
 Application policy APIs also require explicit imports from `pywhales.profiles`,

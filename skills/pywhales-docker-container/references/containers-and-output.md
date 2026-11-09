@@ -123,9 +123,13 @@ order, instead of being rejected:
 - Names colliding with the effective child environment or an active
   frozen environment snapshot, compared case-insensitively on Windows.
 
-With `inherit_environment=False`, ordinary names present only in excluded
-ambient state don't collide; explicit client-overlay entries still do. Reserved
-names remain reserved. See [CLI environment isolation](client-and-errors.md#isolate-the-cli-environment).
+With `inherited_environment_names` supplied, or legacy `inherit_environment=False`
+when names are unset, ordinary names present only in excluded ambient state
+don't collide. Selected ambient names and explicit client-overlay entries still
+do, and Windows compares names case-insensitively. The forwarding decision keeps
+its frozen environment through launch even if config changes during argument
+conversion. Reserved names remain reserved. See
+[CLI environment isolation](client-and-errors.md#isolate-the-cli-environment).
 
 `DockerClient(strict_env_transport=True)` turns every entry above into a
 `ValueError` with a fixed message that discloses no name or value; one ineligible
