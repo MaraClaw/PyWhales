@@ -62,6 +62,11 @@ class _IoAccount(_ResponseAccount):
 
 
 @dataclass(slots=True)
+class _ArchiveStderrAccount(_ResponseAccount):
+    """Track actual direct-archive diagnostic reads, including after child reap."""
+
+
+@dataclass(slots=True)
 class _LaunchAccount:
     """Accumulate accepted launch reservations shared by copied contexts."""
 
@@ -127,6 +132,7 @@ class ObservationState:
     io_accounts: tuple[_IoAccount, ...] = ()
     launch_accounts: tuple[_LaunchAccount, ...] = ()
     child_accounts: tuple[_LaunchAccount, ...] = ()
+    archive_stderr_accounts: tuple[_ArchiveStderrAccount, ...] = ()
 
     def reserve_child(self) -> _ChildReservation:
         """Atomically debit attempts and child slots after ordinary preflight.
@@ -214,6 +220,7 @@ class ObservationState:
             or bool(self.stdin_accounts)
             or bool(self.io_accounts)
             or bool(self.child_accounts)
+            or bool(self.archive_stderr_accounts)
         )
 
     def response_allowance(self, command_remaining: int) -> int:
@@ -369,6 +376,35 @@ class ObservationState:
                 account.consumed += written
         return written
 
+    def read_archive_stderr(
+        self, request: int, read: Callable[[int], bytes]
+    ) -> tuple[bytes, ObservationLimitError | None]:
+        """Read diagnostics atomically, permitting one shared detection byte.
+
+        Lock enclosing accounts outermost first across one nonblocking read.
+        Exact-limit EOF succeeds; an already overflowed account refuses before
+        any pipe operation or debit. These accounts are independent of stream
+        and aggregate I/O accounts, including post-exit and cleanup exclusions.
+        """
+        accounts = self.archive_stderr_accounts
+        with ExitStack() as locked:
+            for account in accounts:
+                locked.enter_context(account.lock)
+            for account in accounts:
+                if account.consumed > account.limit:
+                    raise ObservationLimitError(
+                        "total_archive_stderr", account.limit, account.consumed
+                    )
+            chunk = read(min((request, *(a.limit - a.consumed + 1 for a in accounts))))
+            overflow: ObservationLimitError | None = None
+            for account in accounts:
+                account.consumed += len(chunk)
+                if overflow is None and account.consumed > account.limit:
+                    overflow = ObservationLimitError(
+                        "total_archive_stderr", account.limit, account.consumed
+                    )
+        return chunk, overflow
+
 
 _current_observation: ContextVar[ObservationState | None] = ContextVar(
     "pywhales_observation", default=None
@@ -427,6 +463,7 @@ def observation(
     io_limit = policy.max_total_io_bytes
     launch_limit = policy.max_total_launch_attempts
     child_limit = policy.max_concurrent_children
+    archive_stderr_limit = policy.max_total_archive_stderr_bytes
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
@@ -456,6 +493,10 @@ def observation(
             max_concurrent_children=_minimum_optional(
                 parent.policy.max_concurrent_children, policy.max_concurrent_children
             ),
+            max_total_archive_stderr_bytes=_minimum_optional(
+                parent.policy.max_total_archive_stderr_bytes,
+                policy.max_total_archive_stderr_bytes,
+            ),
         )
     deadlines = tuple(
         value
@@ -469,6 +510,9 @@ def observation(
     io_accounts = parent.io_accounts if parent is not None else ()
     launch_accounts = parent.launch_accounts if parent is not None else ()
     child_accounts = parent.child_accounts if parent is not None else ()
+    archive_stderr_accounts = (
+        parent.archive_stderr_accounts if parent is not None else ()
+    )
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
@@ -502,6 +546,11 @@ def observation(
             (*child_accounts, _LaunchAccount(child_limit))
             if child_limit is not None
             else child_accounts
+        ),
+        archive_stderr_accounts=(
+            (*archive_stderr_accounts, _ArchiveStderrAccount(archive_stderr_limit))
+            if archive_stderr_limit is not None
+            else archive_stderr_accounts
         ),
     )
     token = _current_observation.set(state)

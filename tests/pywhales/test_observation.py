@@ -1059,3 +1059,89 @@ def test_child_allowance_is_unbounded_without_a_child_limit() -> None:
         assert state.child_allowance() is None
         check_scoped_launch(["cli"], {}, state)
         assert state.child_allowance() is None
+
+
+def archive_stderr_policy(limit: int | None) -> InspectionPolicy:
+    return replace(policy(1, 65536, 1024), max_total_archive_stderr_bytes=limit)
+
+
+def test_nested_archive_diagnostics_intersect_and_retain_only_explicit_accounts() -> (
+    None
+):
+    with observation(archive_stderr_policy(10)) as outer:
+        assert outer.binds_launches
+        with observation(archive_stderr_policy(25)) as wider:
+            assert wider.policy.max_total_archive_stderr_bytes == 10
+            assert [a.limit for a in wider.archive_stderr_accounts] == [10, 25]
+        with observation(archive_stderr_policy(None)) as inherited:
+            assert inherited.policy.max_total_archive_stderr_bytes == 10
+            assert inherited.archive_stderr_accounts == outer.archive_stderr_accounts
+        with observation(archive_stderr_policy(4)) as inner:
+            assert inner.policy.max_total_archive_stderr_bytes == 4
+            assert inner.read_archive_stderr(65536, fill)[0] == b"x" * 5
+            assert [a.consumed for a in inner.archive_stderr_accounts] == [5, 5]
+            with pytest.raises(ObservationLimitError) as failure:
+                inner.read_archive_stderr(1, fill)
+            assert (
+                failure.value.reason,
+                failure.value.limit,
+                failure.value.measured,
+            ) == ("total_archive_stderr", 4, 5)
+            assert [a.consumed for a in inner.archive_stderr_accounts] == [5, 5]
+    with observation(archive_stderr_policy(None)) as unset:
+        assert unset.archive_stderr_accounts == () and not unset.binds_launches
+
+
+def test_archive_diagnostic_reads_charge_actual_bytes_and_allow_exact_eof() -> None:
+    def blocked(allowed: int) -> bytes:
+        assert all(a.lock.locked() for a in state.archive_stderr_accounts)
+        raise BlockingIOError
+
+    with observation(archive_stderr_policy(4)) as state:
+        with pytest.raises(BlockingIOError):
+            state.read_archive_stderr(65536, blocked)
+        assert state.archive_stderr_accounts[0].consumed == 0
+        assert state.read_archive_stderr(65536, lambda size: b"xxxx") == (b"xxxx", None)
+        asked: list[int] = []
+
+        def eof(size: int) -> bytes:
+            asked.append(size)
+            return b""
+
+        assert state.read_archive_stderr(65536, eof) == (b"", None)
+        assert asked == [1]
+        assert state.archive_stderr_accounts[0].consumed == 4
+        assert not state.archive_stderr_accounts[0].lock.locked()
+
+
+def test_copied_archive_diagnostic_accounts_share_one_detection_byte() -> None:
+    start = Barrier(8)
+    reads = [0] * 8
+    overflows = [0] * 8
+
+    def compete(index: int) -> None:
+        state = get_observation()
+        assert state is not None
+        start.wait(timeout=3)
+        for _ in range(100):
+            try:
+                chunk, overflow = state.read_archive_stderr(16, fill)
+                reads[index] += len(chunk)
+                overflows[index] += int(overflow is not None)
+            except ObservationLimitError as failure:
+                assert failure.reason == "total_archive_stderr"
+
+    with (
+        observation(archive_stderr_policy(100)),
+        observation(archive_stderr_policy(100)) as state,
+    ):
+        workers = [
+            Thread(target=copy_context().run, args=(compete, i)) for i in range(8)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+        assert sum(reads) == 101 and sum(overflows) == 1
+        assert [a.consumed for a in state.archive_stderr_accounts] == [101, 101]
