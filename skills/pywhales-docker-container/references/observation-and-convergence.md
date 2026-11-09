@@ -11,6 +11,7 @@ calls automatically.
 - [Sharing one IO budget](#sharing-one-io-budget)
 - [Manifest lists](#manifest-lists)
 - [Bounding streams and uploads](#bounding-streams-and-uploads)
+- [Bounding archive diagnostics](#bounding-archive-diagnostics)
 - [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Swarm nodes](#swarm-node-readiness), [Swarm jobs](#swarm-jobs), [Compose](#compose-project), [standalone containers](#standalone-containers), [outcomes](#outcomes-and-budgets)
 - [Optional application reconciliation](#optional-application-reconciliation)
 
@@ -57,7 +58,8 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
 `max_total_references`, `max_total_response_bytes`, `max_total_stream_bytes`,
-`max_total_stdin_bytes`, `max_total_io_bytes`, `max_total_launch_attempts`, and `max_concurrent_children`
+`max_total_stdin_bytes`, `max_total_io_bytes`, `max_total_launch_attempts`,
+`max_concurrent_children`, and `max_total_archive_stderr_bytes`
 default to `None`. An unset source-specific output total leaves that account
 unbounded; shared IO can still cap those reads. Unset stdin still refuses
 captured input inside an
@@ -210,8 +212,11 @@ IO does not replace any of them. Captured input still requires an explicit
 `max_total_stdin_bytes` in the active or an enclosing scope: IO alone doesn't
 enable it.
 
-Archive cleanup/watchdog drains and post-exit stderr reads used to classify a
-Docker failure are excluded from IO spending. Direct or inherited stream stdin
+Legacy archive cleanup/watchdog drains and post-exit stderr reads used to classify
+a Docker failure are excluded from IO spending. With an archive diagnostic
+allowance, direct-archive stderr instead spends its separate accounts, while
+concurrently drained load stdout still spends stream and IO budgets.
+Direct or inherited stream stdin
 and archive file contents read/written by the CLI through filename arguments
 are also excluded; any captured or streamed progress output still counts.
 This is managed local pipe accounting, not daemon network traffic or a total
@@ -236,9 +241,11 @@ bytes as pipe readers pull them, including buffered read-ahead. Each enclosing
 scope with this field set owns a separate account; each read charges all of them,
 even after the launching scope exits. Captured output never consumes this budget.
 Overflow stops and reaps the local CLI and delivers `ObservationLimitError` with
-reason `total_stream` once. Archive watchdog drains and the stderr read that
-selects a Docker exception are uncharged. Leaving the field unset changes no
-stream or archive accounting.
+reason `total_stream` once. Legacy archive watchdog drains and post-exit
+classification stderr are uncharged. With the diagnostic allowance below,
+direct-archive stderr spends only that allowance; concurrently drained load
+stdout still spends the stream total. Leaving the stream field unset doesn't
+enable a new output reader or diagnostic allowance.
 
 Set `max_total_stdin_bytes` to a strictly positive integer to bound uploads across
 the captured execution helper's `run(input=...)` calls and archive loads. This
@@ -259,6 +266,27 @@ for an in-flight iteration before joining the writer.
 
 Aggregate response budgets apply within observation scopes and the bounded
 inventory call. Snapshots aren't daemon transactions or total memory caps.
+
+### Bounding Archive Diagnostics
+
+Set `max_total_archive_stderr_bytes` to a positive exact integer to bound actual
+direct-archive stderr reads, including after child reap. `None` keeps legacy
+behavior unless an outer scope sets it. Nested scopes and copied contexts share
+outer diagnostic accounts, and launched transfers retain them after scope exit;
+lazy save selects them at first iteration. Exact EOF succeeds; one shared
+detection byte triggers `ObservationLimitError(reason="total_archive_stderr")`,
+after which no further diagnostic read spends the account.
+
+The allowance enables load stdout/stderr draining during upload and save stderr
+draining independently of paused archive consumption. Diagnostic reads don't
+spend stream/IO totals; load stdout and managed stdin retain their separate
+accounting. Overflow stops and reaps the local child and joins owned workers
+before delivery, without interrupting caller iterator code or undoing daemon
+work. Below the allowance, raw failure stderr and save `NoSuchImage` selection
+remain available; overflow wins before truncated stderr classification. It
+doesn't bound archive payload or total memory, and telemetry projects the limit
+to existing `other_limit`. See the example and lifecycle details in
+[Bound archive diagnostics](registry-and-archives.md#bound-archive-diagnostics).
 
 ## Waiting For Convergence
 
