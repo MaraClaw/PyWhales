@@ -135,7 +135,10 @@ def test_buffer_limit_counts_use_their_own_keys(
 
 
 @pytest.mark.parametrize("preflight", [False, True])
-def test_unknown_limit_reason_never_enters_payload(preflight: bool) -> None:
+@pytest.mark.parametrize("reason", ["private-unknown-reason", "total_archive_stderr"])
+def test_unknown_limit_reason_never_enters_payload(
+    preflight: bool, reason: str
+) -> None:
     records: list[TelemetryRecord] = []
     telemetry = ExecutionTelemetry(records.append, "captured")
     with (
@@ -144,7 +147,7 @@ def test_unknown_limit_reason_never_enters_payload(preflight: bool) -> None:
     ):
         if not preflight:
             telemetry.start()
-        raise ObservationLimitError("private-unknown-reason", 1, 2)
+        raise ObservationLimitError(reason, 1, 2)
     record = records[-1]
     assert isinstance(record, CompletionRecord | RefusalRecord)
     assert record.stop_reason == "other_limit"

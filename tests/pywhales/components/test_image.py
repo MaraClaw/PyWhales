@@ -599,7 +599,45 @@ def test_archive_deadline_preserves_binary_payload_on_success() -> None:
         assert b"".join(client.image.save("sample")) == payload
 
 
-def test_archive_deadline_preserves_natural_failure_classification() -> None:
+@pytest.mark.parametrize("chunked", [False, True], ids=["bytes", "iterator"])
+def test_archive_diagnostics_load_drains_output_before_upload(chunked: bool) -> None:
+    size = 2 * 1024 * 1024
+    code = (
+        "import sys; "
+        f"sys.stdout.buffer.write(b'x'*{size}+b'\\n'); sys.stdout.buffer.flush(); "
+        "sys.stderr.buffer.write(b'e'*131072); sys.stderr.buffer.flush(); "
+        f"assert sys.stdin.buffer.read() == b'a'*{size}; "
+        "print('Loaded image: sample')"
+    )
+    client = DockerClient(client_call=[sys.executable, "-c", code])
+    bounds = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_archive_stderr_bytes=131072,
+        max_total_stdin_bytes=size,
+        max_total_stream_bytes=size + 22,
+        max_total_io_bytes=2 * size + 22,
+    )
+    payload = b"a" * size
+    with observation(bounds) as state:
+        assert client.image.load(
+            iter([payload[:1000], payload[1000:]]) if chunked else payload,
+            timeout=3,
+        ) == ["sample"]
+
+    assert state.archive_stderr_accounts[0].consumed == 131072
+    assert state.stdin_accounts[0].consumed == size
+    assert state.stream_accounts[0].consumed == size + 22
+    assert state.io_accounts[0].consumed == 2 * size + 22
+
+
+@pytest.mark.parametrize("diagnostics", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+def test_archive_deadline_preserves_natural_failure_classification(
+    diagnostics: bool,
+    raw: bool,
+) -> None:
     client = DockerClient(
         client_call=[
             sys.executable,
@@ -607,18 +645,33 @@ def test_archive_deadline_preserves_natural_failure_classification() -> None:
             "import os; os.write(2, b'No such image: sample'); os._exit(7)",
         ],
         default_timeout=3,
+        raw_diagnostics=raw,
     )
     with (
         patch.object(client.image, "inspect", return_value=[]),
+        observation(
+            InspectionPolicy(
+                max_references=1,
+                max_argv_bytes=65536,
+                max_response_bytes=1024,
+                max_total_archive_stderr_bytes=len("No such image: sample")
+                if diagnostics
+                else None,
+            )
+        ),
         pytest.raises(NoSuchImage) as failure,
     ):
         list(client.image.save("sample"))
     assert failure.value.return_code == 7
     assert failure.value.stderr == "No such image: sample"
+    assert ("No such image: sample" in str(failure.value)) is raw
 
 
 @pytest.mark.parametrize("raw", [False, True])
-def test_archive_save_timeout_retains_stderr(raw: bool) -> None:
+@pytest.mark.parametrize("diagnostics", [None, 128])
+def test_archive_save_timeout_retains_stderr(
+    raw: bool, diagnostics: int | None
+) -> None:
     client = DockerClient(
         client_call=[
             sys.executable,
@@ -629,7 +682,17 @@ def test_archive_save_timeout_retains_stderr(raw: bool) -> None:
         default_timeout=0.3,
         raw_diagnostics=raw,
     )
-    with patch.object(client.image, "inspect", return_value=[]):
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        observation(
+            InspectionPolicy(
+                max_references=1,
+                max_argv_bytes=65536,
+                max_response_bytes=1024,
+                max_total_archive_stderr_bytes=diagnostics,
+            )
+        ),
+    ):
         archive = client.image.save("sample")
         assert next(archive) == b"ready"
         with pytest.raises(DockerTimeout) as failure:

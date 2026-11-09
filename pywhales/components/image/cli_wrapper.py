@@ -10,7 +10,7 @@ import builtins
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from subprocess import PIPE, Popen
@@ -708,7 +708,13 @@ class ImageCLI(DockerCLICaller):
                 None if selected_timeout is None else monotonic() + selected_timeout
             )
             with _launch_archive(
-                command, environment, observation, stdin=PIPE
+                command,
+                environment,
+                observation,
+                stdin=PIPE,
+                stderr=PIPE
+                if observation and observation.archive_stderr_accounts
+                else None,
             ) as process:
                 assert process.stdin is not None
                 assert process.stdout is not None
@@ -725,26 +731,28 @@ class ImageCLI(DockerCLICaller):
                         owner.write(process.stdin, buffer_bytes)
                     owner.check()
                     process.stdin.close()
-                    chunks = []
-                    while chunk := owner.read(process.stdout):
-                        chunks.append(chunk)
-                    stdout = b"".join(chunks)
+                    if owner.concurrent:
+                        stdout = owner.output()
+                    else:
+                        chunks = []
+                        while chunk := owner.read(process.stdout):
+                            chunks.append(chunk)
+                        stdout = b"".join(chunks)
                     owner.check()
                     exit_code = process.wait()
                     owner.check()
                 finally:
-                    if process.poll() is None:
-                        with suppress(ProcessLookupError):
-                            process.kill()
-                    process.wait()
-                    owner.thread.join()
+                    owner.close()
                     telemetry.return_code = process.returncode
                     telemetry.stdin_bytes = owner.stdin_bytes
                     telemetry.stdout_bytes = owner.stdout_bytes
                     telemetry.stderr_bytes = owner.stderr_bytes
             if exit_code != 0:
                 raise DockerException(
-                    command, exit_code, raw_diagnostics=policy.raw_diagnostics
+                    command,
+                    exit_code,
+                    stderr=owner.stderr if owner.concurrent else None,
+                    raw_diagnostics=policy.raw_diagnostics,
                 )
             return stdout.decode().splitlines()
 
@@ -1557,11 +1565,13 @@ class ImageCLI(DockerCLICaller):
                         owner.check()
                         exit_code = process.wait()
                         owner.check()
+                    stderr = owner.diagnostics() if owner.concurrent else b""
                     if exit_code != 0:
-                        with owner.lock:
-                            os.set_blocking(process.stderr.fileno(), True)
-                            stderr = process.stderr.read()
-                            owner.record_read(process.stderr, stderr)
+                        if not owner.concurrent:
+                            with owner.lock:
+                                os.set_blocking(process.stderr.fileno(), True)
+                                stderr = process.stderr.read()
+                                owner.record_read(process.stderr, stderr)
                         if "No such image" in stderr.decode():
                             raise NoSuchImage(
                                 command,
@@ -1575,12 +1585,13 @@ class ImageCLI(DockerCLICaller):
                             stderr=stderr,
                             raw_diagnostics=policy.raw_diagnostics,
                         )
+                except GeneratorExit:
+                    if owner.concurrent:
+                        owner.close()
+                        owner.check()
+                    raise
                 finally:
-                    if process.poll() is None:
-                        with suppress(ProcessLookupError):
-                            process.kill()
-                    process.wait()
-                    owner.thread.join()
+                    owner.close()
                     telemetry.return_code = process.returncode
                     telemetry.stdin_bytes = owner.stdin_bytes
                     telemetry.stdout_bytes = owner.stdout_bytes
