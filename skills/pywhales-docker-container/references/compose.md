@@ -156,8 +156,12 @@ Reserved or colliding names stay literal `KEY=VALUE` arguments by default. With
 instead; see [Strict environment transport](client-and-errors.md#strict-environment-transport).
 Every `build` branch (blocking and `stream_logs=True`) and every `execute` branch
 (detached, TTY, captured) forwards the same child environment.
-The client's [environment inheritance setting](client-and-errors.md#isolate-the-cli-environment)
-also applies to these launches and their collision checks.
+The client's [inherited environment selection](client-and-errors.md#isolate-the-cli-environment)
+also applies to these launches and their frozen collision checks. With
+`inherited_environment_names` supplied, excluded ordinary ambient names don't
+collide, but selected names and explicit client overlays still do. Reserved names
+stay reserved, and an allowlist doesn't restrict Compose file access or prevent
+explicitly forwarded values from affecting interpolation.
 
 `build(services=[])` is a validated no-op: it checks `timeout` and the
 `quiet`/`stream_logs` conflict, then returns `None` without a launch. It never
