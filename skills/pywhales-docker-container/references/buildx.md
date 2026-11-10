@@ -53,6 +53,13 @@ duplicate names, and names colliding with the effective environment. With
 `ValueError` instead. The check runs before executable lookup or builder
 inspection, so no launch happens for that call.
 
+Collision checks use the frozen child base selected by
+`inherited_environment_names`, or legacy `inherit_environment` when names are
+unset. Excluded ordinary ambient names don't collide; selected names and explicit
+client overlays still do, and reserved names remain reserved. Mandatory Buildx
+`DOCKER_CLI_EXPERIMENTAL=enabled` applies after overlays even with empty inherited
+names. See [CLI environment isolation](client-and-errors.md#isolate-the-cli-environment).
+
 `PYTHON_VERSION` is reserved on purpose, because the `PYTHON` prefix is treated
 as CLI-controlling. A Dockerfile `ARG PYTHON_VERSION` therefore works only in
 the default literal mode; under strict mode rename the `ARG`, for example to

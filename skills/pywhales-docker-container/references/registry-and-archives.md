@@ -165,6 +165,7 @@ policy = InspectionPolicy(
     max_response_bytes=1_048_576,
     max_total_stdin_bytes=64 * 1024 * 1024,
     max_total_io_bytes=80 * 1024 * 1024,
+    max_total_archive_stderr_bytes=64 * 1024,
 )
 with open("alpine.tar", "rb") as archive, observation(policy):
     tags = docker.load(iter(lambda: archive.read(65_536), b""), timeout=60)
@@ -177,21 +178,23 @@ leaves archive uploads unbounded unless an enclosing scope supplies a limit.
 Further nonempty input raises `ObservationLimitError` with `reason="total_stdin"`
 after local CLI cleanup, without sending bytes beyond the budget. Uploads retain
 their launch-time accounts after scope exit. Output is accounted separately:
-direct archive reads use `max_total_stream_bytes`, not the captured-response
+direct archive stdout reads use `max_total_stream_bytes`, not the captured-response
 total. Path-based `load("alpine.tar")` lets the CLI read the file itself, so it
 doesn't charge an upload stdin budget.
 
 The example also sets `max_total_io_bytes`, an optional positive exact integer
-shared by upload writes, caller-thread archive stdout/stderr reads, and other
-captured/stream reads or managed stdin writes in the same observation. Every
+shared by upload writes, archive stdout reads, and other captured/stream reads
+or managed stdin writes in the same observation. Every
 enclosing account is charged atomically, including across copied contexts, and
 launched transfers retain it after scope exit. It adds to the separate stdin,
 stream, and response caps. Exact-budget EOF succeeds; an output read may take one
 detection byte before `ObservationLimitError(reason="total_io")`, after which no
 further spending is allowed. Writes never send beyond either allowance, and
-source-specific limits win ties. Cleanup/watchdog drains and post-exit stderr
-used for Docker-error classification don't spend IO. Filename-based archive
-contents and direct/inherited stream stdin are excluded, while their managed
+source-specific limits win ties. With the diagnostic allowance enabled, load
+stdout is read during upload and still spends stream and IO budgets; stderr
+spends its separate diagnostic budget below. Legacy cleanup/watchdog drains and
+post-exit stderr used for Docker-error classification don't spend IO.
+Filename-based archive contents and direct/inherited stream stdin are excluded, while their managed
 progress output still counts. IO alone does not enable captured input: that
 still needs `max_total_stdin_bytes`. See
 [Sharing one IO budget](observation-and-convergence.md#sharing-one-io-budget).
@@ -200,6 +203,42 @@ Use cooperative chunk producers: deadlines and cancellation can reap the local
 CLI but cannot interrupt arbitrary Python code inside the input iterator. For
 nested limits and observation exceptions, see
 [Observation budgets and convergence](observation-and-convergence.md).
+
+## Bound Archive Diagnostics
+
+The example's `max_total_archive_stderr_bytes` separately bounds actual stderr
+read by direct byte/iterator `load()` and lazy byte `save()`, including reads
+after the local child is reaped. It is `None` by default or a positive exact
+integer, never a bool. `None` keeps legacy behavior unless an enclosing
+observation supplies a bound. This is an `InspectionPolicy` field, not a client
+or `load`/`save` keyword and not the `raw_diagnostics` rendering switch.
+
+Opting in captures load stderr and drains both load output pipes concurrently
+with upload, so noisy output doesn't block stdin progress. Save drains stderr
+independently while the caller pauses archive stdout consumption. Every enclosing
+diagnostic account is checked and charged atomically; nested scopes and copied
+contexts share outer consumption. A lazy save binds at first iteration, and
+started transfers keep their accounts after scope exit. Filename-based transfers
+keep their ordinary captured/stream budgets and aren't direct archives.
+
+Exact-limit stderr EOF succeeds. At most one shared detection byte beyond the
+tightest allowance is read, then `ObservationLimitError` with
+`reason="total_archive_stderr"` stops the transfer. No later diagnostic read
+spends that overflowed account, and retained stderr excludes the detection byte.
+The local CLI is killed/reaped as needed, pipes close, and owned workers join
+before the error is delivered. This doesn't interrupt arbitrary caller iterator
+code or roll back daemon work. Resume or close a paused save generator to
+receive a recorded error, and keep upload producers cooperative.
+
+When stderr fits, failed load retains raw stderr on `DockerException`; save
+preserves its existing `NoSuchImage` classification and raw stderr. Overflow wins
+before truncated stderr can select a Docker exception. Direct-archive stderr
+uses this separate allowance, including post-reap diagnostics, rather than
+stream or aggregate IO budgets. Unset allowances keep legacy inherited load
+stderr and post-exit save classification outside those totals. Archive payload
+and retained load stdout need their own limits; this isn't a total-memory cap.
+Telemetry reports outcome `limit` and existing reason `other_limit`, without
+adding a schema field or a `total_archive_stderr` counter key.
 
 ## Telemetry Families
 
@@ -210,7 +249,7 @@ pull/push progress streams report under the regular `captured`/`stream`
 families instead. See
 [Telemetry and admission](telemetry-and-admission.md) for the full schema.
 
-Schema-10 observation preflight refusals use those same families, emit no
+Schema-11 observation preflight refusals use those same families, emit no
 launch/completion pair, and preserve the original exception without starting a
 child or reading upload input. A lazy save checks and can emit its refusal at
 first iteration, not construction; eager inspection is a separate captured

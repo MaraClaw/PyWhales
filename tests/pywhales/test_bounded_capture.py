@@ -1529,7 +1529,9 @@ def test_the_aggregate_counts_only_input_a_partial_pipe_accepted() -> None:
     assert state.io_accounts[0].consumed == accepted + len("done\n")
 
 
-def recording_owner(owners: list[ArchiveDeadline]) -> type[ArchiveDeadline]:
+def recording_owner(
+    owners: list[ArchiveDeadline], *, reaped: bool = False
+) -> type[ArchiveDeadline]:
     class RecordingOwner(ArchiveDeadline):
         def __init__(
             self,
@@ -1541,6 +1543,8 @@ def recording_owner(owners: list[ArchiveDeadline]) -> type[ArchiveDeadline]:
             observation: ObservationState | None = None,
             reservation: _ChildReservation | None = None,
         ) -> None:
+            if reaped:
+                process.wait(timeout=3)
             super().__init__(
                 process,
                 command,
@@ -1679,7 +1683,10 @@ def test_archive_save_overflow_reaps_the_child_and_never_charges_its_drain() -> 
 
 
 @pytest.mark.usefixtures("owned_threads_end")
-def test_archive_stream_budget_wins_a_same_read_tie_with_the_aggregate() -> None:
+@pytest.mark.parametrize("diagnostics", [None, 4])
+def test_archive_stream_budget_wins_a_same_read_tie_with_the_aggregate(
+    diagnostics: int | None,
+) -> None:
     client = DockerClient(
         client_call=[
             sys.executable,
@@ -1687,7 +1694,12 @@ def test_archive_stream_budget_wins_a_same_read_tie_with_the_aggregate() -> None
             "import os,threading; os.write(1,b'x'*100); threading.Event().wait()",
         ]
     )
-    bounds = replace(policy(), max_total_stream_bytes=5, max_total_io_bytes=5)
+    bounds = replace(
+        policy(),
+        max_total_stream_bytes=5,
+        max_total_io_bytes=5,
+        max_total_archive_stderr_bytes=diagnostics,
+    )
     with (
         patch.object(client.image, "inspect", return_value=[]),
         observation(bounds) as state,
@@ -1858,3 +1870,263 @@ def test_readiness_waits_hold_no_aggregate_account_lock(
     assert holders == [False]
     for child in children:
         assert_released(child)
+
+
+def diagnostic_policy(limit: int) -> InspectionPolicy:
+    return replace(policy(), max_total_archive_stderr_bytes=limit)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize("operation", ["load", "save"])
+@pytest.mark.parametrize(("size", "fits"), [(4, True), (5, False)])
+def test_archive_diagnostics_exact_eof_or_one_detection_byte_after_exit(
+    operation: str, size: int, fits: bool, children: list[subprocess.Popen[bytes]]
+) -> None:
+    owners: list[ArchiveDeadline] = []
+    code = f"import os; os.write(2,b'e'*{size}); os._exit(0)"
+    client = DockerClient(client_call=[sys.executable, "-c", code])
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            recording_owner(owners, reaped=True),
+        ),
+        observation(diagnostic_policy(4)) as state,
+    ):
+
+        def transfer() -> object:
+            return (
+                client.image.load(b"")
+                if operation == "load"
+                else list(client.image.save("sample"))
+            )
+
+        if fits:
+            assert transfer() == []
+        else:
+            with pytest.raises(ObservationLimitError) as failure:
+                transfer()
+            assert (
+                failure.value.reason,
+                failure.value.limit,
+                failure.value.measured,
+            ) == ("total_archive_stderr", 4, 5)
+    (owner,) = owners
+    assert state.archive_stderr_accounts[0].consumed == size
+    assert owner.stderr_bytes == size
+    assert owner.stderr == b"e" * 4
+    assert not owner.thread.is_alive() and all(not t.is_alive() for t in owner._readers)
+    assert_released(children[0])
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_competing_archive_loads_share_one_physical_detection_byte(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    start = Barrier(2)
+    failures: list[ObservationLimitError] = []
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import os; os.write(2,b'e'*100)"]
+    )
+    owners: list[ArchiveDeadline] = []
+
+    def load() -> None:
+        start.wait(timeout=3)
+        try:
+            client.image.load(b"")
+        except ObservationLimitError as failure:
+            failures.append(failure)
+
+    with (
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            recording_owner(owners),
+        ),
+        observation(diagnostic_policy(17)),
+        observation(diagnostic_policy(17)) as state,
+    ):
+        workers = [Thread(target=copy_context().run, args=(load,)) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+
+    assert len(failures) == 2
+    assert {e.reason for e in failures} == {"total_archive_stderr"}
+    assert [a.consumed for a in state.archive_stderr_accounts] == [18, 18]
+    assert sum(owner.stderr_bytes or 0 for owner in owners) == 18
+    assert sum(len(owner.stderr or b"") for owner in owners) == 17
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+def test_archive_loads_with_independent_diagnostic_accounts_keep_progressing(
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    start = Barrier(2)
+    outcomes: dict[int, list[str] | ObservationLimitError] = {}
+    code = "import os; os.write(2,b'e'*100); os.write(1,b'Loaded image: sample\\n')"
+    client = DockerClient(client_call=[sys.executable, "-c", code])
+
+    def load(limit: int) -> None:
+        with observation(diagnostic_policy(limit)) as state:
+            start.wait(timeout=3)
+            try:
+                outcomes[limit] = client.image.load(b"")
+            except ObservationLimitError as error:
+                outcomes[limit] = error
+            assert state.archive_stderr_accounts[0].consumed == (
+                5 if limit == 4 else 100
+            )
+
+    workers = [Thread(target=load, args=(limit,)) for limit in (4, 100)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+    assert isinstance(outcomes[4], ObservationLimitError)
+    assert outcomes[100] == ["sample"]
+    for child in children:
+        assert_released(child)
+
+
+@pytest.mark.usefixtures("owned_threads_end")
+@pytest.mark.parametrize(
+    ("operation", "fail_at"),
+    [
+        ("load", 0),
+        ("load", 1),
+        ("load", 2),
+        ("load", 3),
+        ("load", 4),
+        ("save", 0),
+        ("save", 1),
+        ("save", 2),
+        ("save", 3),
+    ],
+)
+def test_archive_diagnostics_partial_setup_unwinds_every_started_worker(
+    operation: str,
+    fail_at: int,
+    children: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = 0
+    start = Thread.start
+    error = RuntimeError("diagnostic setup")
+
+    def failing_start(self: Thread) -> None:
+        nonlocal started
+        started += 1
+        if started == fail_at:
+            raise error
+        start(self)
+
+    def failing_pipe(fd: int, blocking: bool) -> None:
+        raise error
+
+    client = DockerClient(client_call=[sys.executable, "-c", NEVER_READS_STDIN])
+    bounds = replace(
+        diagnostic_policy(10), max_concurrent_children=1, max_total_launch_attempts=1
+    )
+    with observation(bounds) as state:
+        with monkeypatch.context() as setup:
+            setup.setattr(Thread, "start", failing_start)
+            if fail_at == 0:
+                setup.setattr(os, "set_blocking", failing_pipe)
+            with (
+                patch.object(client.image, "inspect", return_value=[]),
+                pytest.raises(RuntimeError) as failure,
+            ):
+                if operation == "load":
+                    client.image.load(b"")
+                else:
+                    next(client.image.save("sample"))
+        assert failure.value is error
+        assert state.child_accounts[0].consumed == 0
+        assert state.launch_accounts[0].consumed == 1
+    assert len(children) == 1
+    assert_released(children[0])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX inherited descriptors")
+@pytest.mark.usefixtures("owned_threads_end")
+def test_archive_diagnostics_cancel_inherited_pipes_after_reap(
+    children: list[subprocess.Popen[bytes]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    launch = subprocess.Popen
+    owners: list[ArchiveDeadline] = []
+    cancel = Event()
+    code = _CAPTURE_HOLDER + "os.write(1,b'first')\nos._exit(0)\n"
+    client = DockerClient(
+        client_call=[sys.executable, "-c", code, str(release_read), str(status_write)]
+    )
+
+    def inherited_launch(
+        command: list[str],
+        environment: Mapping[str, str],
+        observation: ObservationState | None,
+        *,
+        stdin: int | None = None,
+        stderr: int | None = None,
+    ) -> subprocess.Popen[bytes]:
+        return launch(
+            command,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            env=environment,
+            pass_fds=(release_read, status_write),
+            bufsize=0,
+        )
+
+    monkeypatch.setattr(
+        "pywhales.components.image.cli_wrapper._launch_archive", inherited_launch
+    )
+    try:
+        with (
+            patch.object(client.image, "inspect", return_value=[]),
+            patch(
+                "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+                recording_owner(owners),
+            ),
+        ):
+            archive = client.image.save("sample")
+            assert isinstance(archive, Generator)
+            try:
+                with observation(
+                    replace(diagnostic_policy(10), max_concurrent_children=1),
+                    cancel=cancel,
+                ) as state:
+                    assert next(archive) == b"first"
+                (owner,) = owners
+                assert owner._exited.wait(timeout=3)
+                assert state.child_accounts[0].consumed == 0
+                assert select.select([status_read], [], [], 3)[0]
+                assert os.read(status_read, 1) == b"R"
+                assert not owner.released.is_set()
+                reservation = state.reserve_child()
+                try:
+                    assert state.child_accounts[0].consumed == 1
+                    cancel.set()
+                    assert owner.released.wait(timeout=3)
+                    with pytest.raises(ObservationCancelled):
+                        next(archive)
+                    assert list(archive) == []
+                    assert state.child_accounts[0].consumed == 1
+                finally:
+                    reservation.release()
+                assert state.child_accounts[0].consumed == 0
+            finally:
+                archive.close()
+    finally:
+        for descriptor in (release_read, release_write, status_write):
+            os.close(descriptor)
+        assert os.read(status_read, 1) == b""
+        os.close(status_read)
+    assert_released(children[0])

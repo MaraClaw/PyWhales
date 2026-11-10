@@ -225,12 +225,15 @@ _FIRST_THEN_BLOCK = (
 )
 
 
-def scope_policy(argv: int = 65536, stream: int | None = None) -> InspectionPolicy:
+def scope_policy(
+    argv: int = 65536, stream: int | None = None, *, diagnostics: int | None = None
+) -> InspectionPolicy:
     return InspectionPolicy(
         max_references=1,
         max_argv_bytes=argv,
         max_response_bytes=1024,
         max_total_stream_bytes=stream,
+        max_total_archive_stderr_bytes=diagnostics,
     )
 
 
@@ -274,7 +277,10 @@ def assert_owner_released(owner: ArchiveDeadline) -> None:
     )
 
 
-def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it() -> None:
+@pytest.mark.parametrize("diagnostics", [None, 4])
+def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it(
+    diagnostics: int | None,
+) -> None:
     records: list[TelemetryRecord] = []
     owners: list[ArchiveDeadline] = []
     cancel = Event()
@@ -288,7 +294,7 @@ def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it() ->
     ):
         # Given a save created outside any scope and first iterated inside one.
         archive = client.image.save("sample")
-        with observation(scope_policy(), cancel=cancel):
+        with observation(scope_policy(diagnostics=diagnostics), cancel=cancel):
             assert next(archive) == b"first\n"
         (owner,) = owners
         assert len(records) == 1
@@ -308,7 +314,10 @@ def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it() ->
     assert (completed.outcome, completed.stdout_bytes) == ("cancelled", 6)
 
 
-def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation() -> None:
+@pytest.mark.parametrize("diagnostics", [None, 4])
+def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation(
+    diagnostics: int | None,
+) -> None:
     records: list[TelemetryRecord] = []
     owners: list[ArchiveDeadline] = []
     cancel = Event()
@@ -322,7 +331,7 @@ def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation() -> None:
             capture_owners(owners),
         ),
     ):
-        with observation(scope_policy(), cancel=cancel):
+        with observation(scope_policy(diagnostics=diagnostics), cancel=cancel):
             archive = client.image.save("sample")
         cancel.set()
 
@@ -419,7 +428,7 @@ def test_scope_stop_reaps_a_paused_save_and_finishes_telemetry_once(
     )
 
 
-@pytest.mark.parametrize("stop", ["deadline", "cancel", "budget"])
+@pytest.mark.parametrize("stop", ["deadline", "cancel", "budget", "diagnostics"])
 def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) -> None:
     records: list[TelemetryRecord] = []
     owners: list[ArchiveDeadline] = []
@@ -434,9 +443,12 @@ def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) ->
         archive = client.image.save("sample")
         assert isinstance(archive, GeneratorType)
         with observation(
-            scope_policy(stream=1024 if stop == "budget" else None),
+            scope_policy(
+                stream=1024 if stop == "budget" else None,
+                diagnostics=1024 if stop == "diagnostics" else None,
+            ),
             deadline=monotonic() + 30 if stop == "deadline" else None,
-            cancel=None if stop == "budget" else Event(),
+            cancel=Event() if stop in {"deadline", "cancel"} else None,
         ):
             assert next(archive) == b"first\n"
             archive.close()
@@ -452,8 +464,10 @@ def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) ->
 
 
 @pytest.mark.parametrize("scope_first", [True, False])
+@pytest.mark.parametrize("diagnostics", [None, 4])
 def test_save_command_timeout_precedes_only_a_later_scope_deadline(
     scope_first: bool,
+    diagnostics: int | None,
 ) -> None:
     owners: list[ArchiveDeadline] = []
     client = archive_client([])
@@ -466,7 +480,8 @@ def test_save_command_timeout_precedes_only_a_later_scope_deadline(
     ):
         archive = client.image.save("sample", timeout=30 if scope_first else 0.4)
         with observation(
-            scope_policy(), deadline=monotonic() + (0.4 if scope_first else 30)
+            scope_policy(diagnostics=diagnostics),
+            deadline=monotonic() + (0.4 if scope_first else 30),
         ):
             assert next(archive) == b"first\n"
         (owner,) = owners
@@ -478,7 +493,10 @@ def test_save_command_timeout_precedes_only_a_later_scope_deadline(
     assert_owner_released(owner)
 
 
-def test_scope_cancel_reaps_a_load_while_its_producer_is_stalled() -> None:
+@pytest.mark.parametrize("diagnostics", [None, 4])
+def test_scope_cancel_reaps_a_load_while_its_producer_is_stalled(
+    diagnostics: int | None,
+) -> None:
     records: list[TelemetryRecord] = []
     owners: list[ArchiveDeadline] = []
     cancel = Event()
@@ -497,7 +515,7 @@ def test_scope_cancel_reaps_a_load_while_its_producer_is_stalled() -> None:
             capture_owners(owners),
         ),
         pytest.raises(ObservationCancelled),
-        observation(scope_policy(), cancel=cancel),
+        observation(scope_policy(diagnostics=diagnostics), cancel=cancel),
     ):
         client.image.load(chunks())
 
@@ -714,3 +732,149 @@ def test_archive_native_argv_rejection_after_start_reports_limit(
     completed = records[-1]
     assert isinstance(completed, CompletionRecord)
     assert (completed.outcome, completed.return_code) == ("limit", None)
+
+
+@pytest.mark.parametrize("delivery", ["next", "close"])
+def test_paused_archive_diagnostic_overflow_is_delivered_once_after_scope_exit(
+    delivery: str,
+    tmp_path: Path,
+) -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    go = tmp_path / "go"
+    code = (
+        "import os,time,threading; os.write(1,b'first')\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.001)\n"
+        "os.write(2,b'No such image: private' * 10000); threading.Event().wait()"
+    )
+    client = archive_client(records, code)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        archive = client.image.save("sample")
+        assert isinstance(archive, GeneratorType)
+        with observation(scope_policy(diagnostics=4)) as state:
+            assert next(archive) == b"first"
+        (owner,) = owners
+        go.touch()
+        assert owner.released.wait(timeout=3)
+        assert len(records) == 1
+        assert owner.stderr_bytes == 5 and owner.stderr == b"No s"
+        assert state.archive_stderr_accounts[0].consumed == 5
+        assert owner._scope is state and owner._remaining() is None
+        with pytest.raises(ObservationLimitError) as failure:
+            if delivery == "next":
+                next(archive)
+            else:
+                archive.close()
+        archive.close()
+        assert list(archive) == []
+
+    assert (failure.value.reason, failure.value.limit, failure.value.measured) == (
+        "total_archive_stderr",
+        4,
+        5,
+    )
+    assert_owner_released(owner)
+    assert all(not reader.is_alive() for reader in owner._readers)
+    assert owner._wake is not None and owner._wake.fileno() is None
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.stop_reason, completed.stderr_bytes) == (
+        "limit",
+        "other_limit",
+        5,
+    )
+    assert "private" not in repr(records)
+
+
+def test_paused_save_drains_exact_diagnostic_allowance_before_stdout_closes(
+    tmp_path: Path,
+) -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    go = tmp_path / "go"
+    code = (
+        "import os,time; os.write(1,b'\\x00\\xfffirst')\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.001)\n"
+        "os.write(2,b'e'*131072); os.write(1,b'second'); os._exit(0)"
+    )
+    client = archive_client(records, code)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+        observation(scope_policy(diagnostics=131072)) as state,
+    ):
+        archive = client.image.save("sample")
+        assert isinstance(archive, GeneratorType)
+        try:
+            assert next(archive) == b"\x00\xfffirst"
+            (owner,) = owners
+            go.touch()
+            assert owner._exited.wait(timeout=3)
+            assert b"".join(archive) == b"second"
+        finally:
+            archive.close()
+
+    assert state.archive_stderr_accounts[0].consumed == 131072
+    assert owner.stderr == b"e" * 131072
+    assert_owner_released(owner)
+    assert all(not reader.is_alive() for reader in owner._readers)
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (len(records), completed.outcome, completed.stderr_bytes) == (
+        2,
+        "success",
+        131072,
+    )
+
+
+def test_archive_diagnostic_cleanup_preserves_a_stalled_producers_original_error(
+    tmp_path: Path,
+) -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    go = tmp_path / "go"
+    code = (
+        "import os,time,threading\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.001)\n"
+        "os.write(2,b'overflow'); threading.Event().wait()"
+    )
+    error = RuntimeError("original producer error")
+    client = archive_client(records, code)
+
+    def chunks() -> Generator[bytes]:
+        yield b"input"
+        go.touch()
+        assert owners[0].released.wait(timeout=3)
+        raise error
+
+    with (
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+        observation(scope_policy(diagnostics=4)),
+        pytest.raises(RuntimeError) as failure,
+    ):
+        client.image.load(chunks())
+
+    assert failure.value is error
+    (owner,) = owners
+    assert_owner_released(owner)
+    assert all(not reader.is_alive() for reader in owner._readers)
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (len(records), completed.outcome, completed.stop_reason) == (
+        2,
+        "failure",
+        None,
+    )

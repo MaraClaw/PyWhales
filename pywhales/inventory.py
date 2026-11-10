@@ -114,7 +114,10 @@ class InspectionPolicy:
     launches are not refunded. ``max_concurrent_children`` caps owned local CLI
     children until reap, independently of output draining or daemon workloads. A
     failed spawn returns its child slot, not its attempt. ``None`` leaves an
-    optional limit unset.
+    optional limit unset. ``max_total_archive_stderr_bytes`` separately bounds
+    actual stderr reads by direct archive transfers, including after child reap.
+    Enabling it drains load output during upload and save diagnostics while the
+    consumer is paused; retained diagnostics are bounded by the same allowance.
     """
 
     max_references: int
@@ -127,6 +130,7 @@ class InspectionPolicy:
     max_total_io_bytes: int | None = None
     max_total_launch_attempts: int | None = None
     max_concurrent_children: int | None = None
+    max_total_archive_stderr_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Reject non-integer, boolean, and nonpositive limits."""
@@ -145,6 +149,7 @@ class InspectionPolicy:
             self.max_total_io_bytes,
             self.max_total_launch_attempts,
             self.max_concurrent_children,
+            self.max_total_archive_stderr_bytes,
         ):
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("Inspection limits must be positive integers")

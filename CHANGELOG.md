@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.1
+
+### New Features
+
+- `DockerClient` and `ClientConfig` accept `inherited_environment_names` to select
+  the exact ambient variables inherited by CLI children. Empty collections inherit
+  none; `None` preserves legacy inheritance. Explicit overlays and mandatory
+  Buildx settings still apply, with one frozen selection for launch and assignment
+  collision decisions across captured commands, streams, archives and inventory.
+- `InspectionPolicy.max_total_archive_stderr_bytes` optionally shares a diagnostic
+  allowance across direct image archive transfers, nested observations and copied
+  contexts. Enabled uploads drain output concurrently and saves drain stderr while
+  consumers pause. Actual stderr reads, including after child exit, count toward
+  the allowance; overflow raises `total_archive_stderr` and telemetry uses
+  `other_limit`. Unset behavior and aggregate-I/O exclusions remain unchanged.
+
+### Documentation
+
+- Updated relevant contributor guides and the consumer skill for exact inherited
+  environment selection and bounded concurrent archive diagnostics.
+
 ## 1.2.0
 
 ### New Features

@@ -9,7 +9,7 @@ policy.
 import os
 import shutil
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from json import JSONDecodeError
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, override
 import pydantic
 
 from . import utils
-from ._environment import copy_environment
+from ._environment import copy_environment, copy_environment_names
 from ._execution_policy import PolicyExecutable
 from ._json import dumps_compat, loads_compat
 from ._types import JsonObject
@@ -170,6 +170,10 @@ class ClientConfig:
         inherit_environment: Inherit the parent environment for child launches;
             false retains only the platform base and explicit overlay.
         strict_workload_errors: Keep marked workload failures as DockerException.
+        inherited_environment_names: Copied immutable ambient names, included in
+            equality. A supplied collection replaces inherit_environment selection;
+            empty inherits nothing and None preserves legacy inheritance. Explicit
+            overlays still apply. This does not confine configuration-file access.
     """
 
     config: ValidPath | None = None
@@ -204,17 +208,23 @@ class ClientConfig:
     strict_env_transport: bool = False
     inherit_environment: bool = True
     strict_workload_errors: bool = False
+    inherited_environment_names: Collection[str] | None = None
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.
 
         Raises:
             ValueError: If a budget or default timeout is invalid, including
-                boolean values, or an environment entry is invalid.
-            TypeError: If the environment is not a mapping of string keys and values.
+                boolean values, or an environment entry or inherited name is invalid.
+            TypeError: If the environment is not a mapping of string keys and values,
+                or inherited names are not a collection of strings.
         """
         if self.environment is not None:
             self.environment = copy_environment(self.environment)
+        if self.inherited_environment_names is not None:
+            self.inherited_environment_names = copy_environment_names(
+                self.inherited_environment_names
+            )
         utils.validate_timeout(self.default_timeout)
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),

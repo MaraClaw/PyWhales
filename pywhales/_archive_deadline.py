@@ -12,6 +12,7 @@ from typing import IO, TYPE_CHECKING, Literal, override
 
 from pywhales._readiness import (
     CANCEL_CHECK,
+    WakeLatch,
     bounded_wait,
     reap,
     unwind_launch,
@@ -76,6 +77,13 @@ class ArchiveDeadline:
     account afterwards. The watchdog's drains and the post-exit stderr
     ``record_read`` stay outside it, and the readiness waits hold no account lock.
     A scope with only that budget is retained, with a reaper, but adds no timer.
+
+    An archive stderr allowance enables independent output readers for uploads
+    and a diagnostic reader for saves. Per-pipe locks protect readiness waits;
+    the accounting lock covers only nonblocking operations. The enabled watcher
+    survives child reap until output EOF or closure, so inherited pipes remain
+    cancellable. Diagnostic reads use their separate shared accounts even after
+    reap, and retain at most the effective allowance, excluding the detection byte.
     """
 
     def __init__(
@@ -111,8 +119,24 @@ class ArchiveDeadline:
         self.released = Event()
         self.lock = Lock()
         self._exited = Event()
+        self.concurrent = bool(self._scope and self._scope.archive_stderr_accounts)
+        self._wake: WakeLatch | None = None
+        self._changed = Event()
+        self._stdout_done = Event()
+        self._stderr_done = Event()
+        self._readers: list[Thread] = []
+        self._worker_error: BaseException | None = None
+        self._diagnostics = bytearray()
+        self._load_output = bytearray()
+        self._pipe_locks = {
+            pipe: Lock()
+            for pipe in (process.stdin, process.stdout, process.stderr)
+            if pipe is not None
+        }
         started: list[Thread] = []
         try:
+            if self.concurrent:
+                self._wake = WakeLatch()
             for pipe in (process.stdin, process.stdout, process.stderr):
                 if pipe is not None and (
                     self.bounded or (pipe is process.stdin and os.name != "nt")
@@ -120,7 +144,8 @@ class ArchiveDeadline:
                     os.set_blocking(pipe.fileno(), False)
             self._reaper = (
                 Thread(target=reap, args=(process, self._publish_exit), daemon=True)
-                if deadline is not None
+                if self.concurrent
+                or deadline is not None
                 or (
                     self._scope is not None
                     and (
@@ -133,14 +158,27 @@ class ArchiveDeadline:
                 )
                 else None
             )
-            self.thread = Thread(target=self._watch, daemon=True)
+            self.thread = Thread(
+                target=self._watch_concurrent if self.concurrent else self._watch,
+                daemon=True,
+            )
             if self._reaper is not None:
                 self._reaper.start()
                 started.append(self._reaper)
+            if self.concurrent:
+                for pipe in (process.stderr, process.stdout if process.stdin else None):
+                    if pipe is not None:
+                        reader = Thread(target=self._collect, args=(pipe,), daemon=True)
+                        reader.start()
+                        self._readers.append(reader)
+                        started.append(reader)
             self.thread.start()
             started.append(self.thread)
         except BaseException:
-            unwind_launch(process, None, started)
+            if self._wake is not None:
+                self._wake.set()
+            self._changed.set()
+            unwind_launch(process, self._wake, started)
             if reservation is not None:
                 reservation.release()
             raise
@@ -150,6 +188,160 @@ class ArchiveDeadline:
         if self._reservation is not None:
             self._reservation.release()
         self._exited.set()
+        self._changed.set()
+
+    def _collect(self, pipe: IO[bytes]) -> None:
+        """Drain an enabled output pipe without running caller iterator code."""
+        try:
+            while chunk := self._read_concurrent(pipe, 65536):
+                if pipe is self.process.stdout:
+                    self._load_output.extend(chunk)
+        except BaseException as error:
+            with self._stop_lock:
+                if self._worker_error is None:
+                    self._worker_error = error.with_traceback(None)
+            assert self._wake is not None
+            self._wake.set()
+        finally:
+            if pipe is self.process.stdout:
+                self.stdout = bytes(self._load_output)
+                self._stdout_done.set()
+            else:
+                self.stderr = bytes(self._diagnostics)
+                self._stderr_done.set()
+            self._changed.set()
+
+    def _watch_concurrent(self) -> None:
+        """Enforce stops through pipe EOF, independently of local child reap."""
+        assert self._wake is not None
+        try:
+            while not self._wake.is_set():
+                running = not self._exited.is_set()
+                reason = self._stop_reason(running=running)
+                if reason is not None:
+                    self._claim(reason)
+                    self.expired = True
+                    self._wake.set()
+                    break
+                if (
+                    not running
+                    and self._stdout_done.is_set()
+                    and self._stderr_done.is_set()
+                ):
+                    break
+                self._changed.wait(self._remaining(running=running))
+                self._changed.clear()
+            if self._wake.is_set():
+                with suppress(ProcessLookupError):
+                    self.process.kill()
+                self.process.wait()
+            for reader in self._readers:
+                reader.join()
+            if self._wake.is_set():
+                self._close_concurrent_pipes()
+        finally:
+            assert self._reaper is not None
+            self._reaper.join()
+            self.released.set()
+
+    def _close_concurrent_pipes(self) -> None:
+        """Close only after each pipe's nonblocking operation or wait has ended."""
+        for pipe, lock in self._pipe_locks.items():
+            with lock:
+                if not pipe.closed:
+                    with suppress(BrokenPipeError):
+                        pipe.close()
+
+    def close(self) -> None:
+        """Reap and join owned workers without replacing an active caller error."""
+        if self.concurrent:
+            assert self._wake is not None
+            self._wake.set()
+            self._changed.set()
+            self.thread.join()
+            self._close_concurrent_pipes()
+            self._wake.close()
+        else:
+            if self.process.poll() is None:
+                with suppress(ProcessLookupError):
+                    self.process.kill()
+            self.process.wait()
+            self.thread.join()
+
+    def output(self) -> bytes:
+        """Finish enabled upload output and surface any recorded stop after cleanup."""
+        for reader in self._readers:
+            reader.join()
+        self.check()
+        return bytes(self._load_output)
+
+    def diagnostics(self) -> bytes:
+        """Wait for complete enabled diagnostics before classifying a CLI failure."""
+        self._stderr_done.wait()
+        self.check()
+        return bytes(self._diagnostics)
+
+    def _read_concurrent(self, pipe: IO[bytes], size: int) -> bytes:
+        """Read with independent pipe ownership and no account lock during waits."""
+        assert self._wake is not None
+        with self._pipe_locks[pipe]:
+            while not self._wake.is_set():
+                with self.lock:
+                    try:
+                        if pipe is self.process.stderr:
+                            assert self._scope is not None
+                            chunk, overflow = self._scope.read_archive_stderr(
+                                size, partial(self._read, pipe)
+                            )
+                            limit = self._scope.policy.max_total_archive_stderr_bytes
+                            assert limit is not None
+                            retained = chunk if overflow is None else chunk[:-1]
+                            self._diagnostics.extend(
+                                retained[: max(0, limit - len(self._diagnostics))]
+                            )
+                            if overflow is not None:
+                                self._exceed(overflow)
+                                return b""
+                        else:
+                            chunk, overflow = self._read_charged(pipe, size)
+                            if self._charge(chunk, overflow):
+                                return b""
+                    except BlockingIOError:
+                        pass
+                    except ObservationLimitError as error:
+                        self._exceed(error)
+                        return b""
+                    else:
+                        if not chunk and pipe is self.process.stdout:
+                            self._stdout_done.set()
+                            self._changed.set()
+                        return chunk
+                self._wait(pipe, writable=False)
+        return b""
+
+    def _write_concurrent(self, pipe: IO[bytes], data: bytes) -> None:
+        """Send input while the output workers make independent pipe progress."""
+        assert self._wake is not None
+        offset = 0
+        view = memoryview(data)
+        with self._pipe_locks[pipe]:
+            while offset < len(data) and not self._wake.is_set():
+                blocked = False
+                with self.lock:
+                    try:
+                        end = offset + 4096 if os.name == "nt" else len(view)
+                        written = self._send(pipe, view[offset:end])
+                    except BlockingIOError:
+                        blocked = True
+                    except ObservationLimitError as error:
+                        self._exceed(error)
+                        return
+                    else:
+                        assert self.stdin_bytes is not None
+                        self.stdin_bytes += written
+                        offset += written
+                if blocked:
+                    self._wait(pipe, writable=True)
 
     def _stop_reason(self, *, running: bool) -> _Stop | None:
         """Return why the transfer must stop now, in the captured path's precedence.
@@ -243,6 +435,14 @@ class ArchiveDeadline:
             between expiry and a natural exit; the caller then releases the
             lock and waits for that decision.
         """
+        if self.concurrent:
+            wait_ready(
+                pipe.fileno(),
+                writable=writable,
+                latch=self._wake,
+                timeout=self._remaining(running=not self._exited.is_set()),
+            )
+            return True
         running = not self.released.is_set()
         timeout = self._remaining(running=running)
         if timeout is not None and timeout <= 0:
@@ -329,6 +529,9 @@ class ArchiveDeadline:
                 self.stderr,
                 raw_diagnostics=self.raw,
             )
+        if self._worker_error is not None:
+            self.released.wait()
+            raise self._worker_error
         if released and self._scope is not None:
             stop = self._stop_reason(running=False)
             if stop == "cancelled":
@@ -344,9 +547,16 @@ class ArchiveDeadline:
         cancellation does. The watchdog is woken by the child's exit, so a budget
         needs no timer.
         """
-        self._limit = error.with_traceback(None)
-        self._claim("limit")
+        with self._stop_lock:
+            if self._stop is None:
+                self._limit = error.with_traceback(None)
+                self._stop = (
+                    self._stop_reason(running=not self._exited.is_set()) or "limit"
+                )
         self.expired = True
+        if self._wake is not None:
+            self._wake.set()
+            self._changed.set()
         with suppress(ProcessLookupError):
             self.process.kill()
 
@@ -380,6 +590,11 @@ class ArchiveDeadline:
         )
 
     def read(self, pipe: IO[bytes], size: int = 65536) -> bytes:
+        if self.concurrent:
+            self.check()
+            chunk = self._read_concurrent(pipe, size)
+            self.check()
+            return chunk
         while True:
             self.check()
             settle = False
@@ -405,6 +620,14 @@ class ArchiveDeadline:
 
     def write(self, pipe: IO[bytes], data: bytes) -> None:
         self.check()
+        if self.concurrent:
+            try:
+                self._write_concurrent(pipe, data)
+            except BrokenPipeError:
+                self.check()
+                raise
+            self.check()
+            return
         offset = 0
         view = memoryview(data)
         while offset < len(data):

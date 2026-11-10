@@ -4,7 +4,7 @@ Resolve policy before converting command arguments to plain strings so later
 config mutations affect new launches without altering an existing snapshot.
 """
 
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Collection, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Final, Protocol, Self
 
 from pywhales._environment import (
+    EnvironmentFailure,
     consume_frozen_environment,
     copy_environment,
     resolve_environment,
@@ -31,6 +32,11 @@ class ExecutionPolicySource(Protocol):
     @property
     def inherit_environment(self) -> bool:
         """Return whether launches inherit the complete parent environment."""
+        ...
+
+    @property
+    def inherited_environment_names(self) -> Collection[str] | None:
+        """Return exact ambient names, or None for legacy inheritance selection."""
         ...
 
     @property
@@ -76,7 +82,8 @@ class ExecutionPolicy:
             command, environment, and captured-output values.
         telemetry_observer: Optional payload-free observer snapshotted by reference.
         environment: Immutable client overlay captured at policy selection.
-        frozen_environment: Optional preselected full environment for this launch.
+        frozen_environment: Preselected full environment or its validation failure;
+            a bound container environment supersedes either during resolution.
         default_timeout: Default local CLI deadline in seconds, or None.
         strict_workload_errors: Whether marked workload failures remain generic.
     """
@@ -87,7 +94,9 @@ class ExecutionPolicy:
     environment: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({}), repr=False
     )
-    frozen_environment: Mapping[str, str] | None = field(default=None, repr=False)
+    frozen_environment: Mapping[str, str] | EnvironmentFailure | None = field(
+        default=None, repr=False
+    )
     default_timeout: float | None = None
     strict_workload_errors: bool = False
 
@@ -186,23 +195,38 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
         command: Command arguments whose first item may be a PolicyExecutable.
 
     Returns:
-        Current source settings, or safe diagnostics and an unbounded stream
-        budget when the command has no policy carrier.
+        Current source settings, retaining environment validation failures for
+        resolution after any bound container snapshot is applied. Without a policy
+        carrier, use safe diagnostics and an unbounded stream budget.
     """
     if command and isinstance(command[0], PolicyExecutable):
         source = command[0].policy_source
-        frozen = consume_frozen_environment(source)
-        environment = source.environment if frozen is None else None
-        if frozen is None and not source.inherit_environment:
-            frozen = MappingProxyType(resolve_environment(environment, inherit=False))
-            environment = None
+        frozen: Mapping[str, str] | EnvironmentFailure | None = (
+            consume_frozen_environment(source)
+        )
+        environment: Mapping[str, str] = MappingProxyType({})
+        try:
+            current = source.environment if frozen is None else None
+            if frozen is None and (
+                not source.inherit_environment
+                or source.inherited_environment_names is not None
+            ):
+                frozen = MappingProxyType(
+                    resolve_environment(
+                        current,
+                        inherit=source.inherit_environment,
+                        inherited_names=source.inherited_environment_names,
+                    )
+                )
+            elif current is not None:
+                environment = MappingProxyType(copy_environment(current))
+        except (TypeError, ValueError) as error:
+            frozen = EnvironmentFailure(error)
         return ExecutionPolicy(
             source.stream_buffer_bytes,
             source.raw_diagnostics,
             source.telemetry_observer,
-            MappingProxyType(copy_environment(environment))
-            if environment is not None
-            else MappingProxyType({}),
+            environment,
             frozen,
             _scoped_timeout(source),
             source.strict_workload_errors,

@@ -1,8 +1,10 @@
 """Verify container assignments at the real child boundary, without Docker."""
 
 import sys
+from collections.abc import Collection
 from pathlib import Path
 from typing import Literal, assert_never
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -299,11 +301,16 @@ def test_strict_build_rejection_precedes_lookup(
 
 
 @pytest.mark.parametrize("operation", ["execute", "compose_build"])
+@pytest.mark.parametrize("names", [None, (), ("APP_APPROVED",)])
 def test_isolated_forwarding_reaches_real_child(
-    operation: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    operation: str,
+    names: Collection[str] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APP_COLLISION", "ambient")
     monkeypatch.setenv("DOCKER_HOST", "ambient-endpoint")
+    monkeypatch.setenv("APP_APPROVED", "selected")
     driver = tmp_path / "driver.py"
     record = tmp_path / "record.json"
     driver.write_text(
@@ -314,6 +321,7 @@ def test_isolated_forwarding_reaches_real_child(
     client = DockerClient(
         client_call=[sys.executable, str(driver), str(record)],
         inherit_environment=False,
+        inherited_environment_names=names,
         strict_env_transport=True,
     )
     if operation == "execute":
@@ -325,3 +333,34 @@ def test_isolated_forwarding_reaches_real_child(
     assert "DOCKER_HOST" not in launch.environment
     assert "APP_COLLISION" in launch.argv
     assert "APP_COLLISION=forwarded" not in launch.argv
+    assert launch.environment.get("APP_APPROVED") == (
+        "selected" if bool(names) else None
+    )
+    if names is not None:
+        assert "HOME" not in launch.environment
+        assert "PATH" not in launch.environment
+
+
+@pytest.mark.parametrize("operation", ["compose_build", "build"])
+@pytest.mark.parametrize("selected", [False, True], ids=["overlay", "ambient"])
+def test_selected_collision_rejects_before_lookup_or_image_preflight(
+    operation: str, selected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APP_COLLISION", "ambient")
+    client = DockerClient(
+        inherited_environment_names={"APP_COLLISION"} if selected else (),
+        environment=None if selected else {"APP_COLLISION": "client"},
+        strict_env_transport=True,
+    )
+    with (
+        patch("shutil.which") as lookup,
+        patch("pywhales.components.image.cli_wrapper.ImageCLI") as image,
+        pytest.raises(ValueError) as caught,
+    ):
+        if operation == "compose_build":
+            client.compose.build(build_args={"APP_COLLISION": "private"})
+        else:
+            client.build(".", build_args={"APP_COLLISION": "private"})
+    assert "private" not in str(caught.value)
+    lookup.assert_not_called()
+    image.assert_not_called()
