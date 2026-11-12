@@ -1168,7 +1168,7 @@ def owned_stream(result: object) -> ProcessStream | MappedProcessStream[object]:
 def owned_process(result: object) -> ProcessStream:
     """Return the process stream beneath a launched stream, asserting ownership."""
     assert isinstance(result, (ProcessStream, MappedProcessStream))
-    return result._stream if isinstance(result, MappedProcessStream) else result
+    return result._core._stream if isinstance(result, MappedProcessStream) else result
 
 
 def launches_of(tmp_path: Path) -> list[list[str]]:

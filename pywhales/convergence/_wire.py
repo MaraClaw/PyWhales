@@ -3,6 +3,7 @@
 import hashlib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Literal
 
 from pydantic import (
@@ -308,6 +309,8 @@ _STANDALONES = _Kind(
     "Id",
     inspect_standalone,
 )
+_SERVICES = _Kind(("service", "inspect"), ServiceWire, "ID", inspect_service)
+_NODES = _Kind(("node", "inspect"), NodeWire, "ID", inspect_node)
 
 
 def _batch_items[Wire: BaseModel](
@@ -428,6 +431,44 @@ def inspect_standalones(
         ID, which the caller must compare.
     """
     return _inspect_many(config, _STANDALONES, container_ids)
+
+
+def inspect_services(targets: Sequence[ServiceTarget]) -> Iterator[ServiceWire]:
+    """Inspect each captured service in chunks, yielding wires in target order.
+
+    A chunk never spans two ``client_config`` objects, compared by identity: a run of
+    consecutive targets sharing one object is chunked together, so order is kept even
+    when a stack mixes configs. Nothing launches before iteration, and a failed batch
+    re-probes singly as ``inspect_tasks`` does.
+
+    Args:
+        targets: Captured services with distinct IDs, in evaluation order.
+
+    Yields:
+        Each target's current service, raising what single-ID inspection would raise.
+    """
+    for _, run_ in groupby(targets, key=lambda target: id(target.client_config)):
+        members = list(run_)
+        yield from _inspect_many(
+            members[0].client_config,
+            _SERVICES,
+            [member.service_id for member in members],
+        )
+
+
+def inspect_nodes(config: ClientConfig, node_ids: Sequence[str]) -> Iterator[NodeWire]:
+    """Return a lazy iterator over fixed node IDs, inspected in chunks.
+
+    Args:
+        config: Client settings for the manager.
+        node_ids: Distinct exact node IDs, in target order.
+
+    Returns:
+        An iterator yielding each node in ``node_ids`` order. It raises what
+        single-ID inspection would raise, so ``NodeMissing`` comes only from a
+        single probe's exact missing-node response, never from a batch.
+    """
+    return _inspect_many(config, _NODES, node_ids)
 
 
 def resolve_container(config: ClientConfig, reference: str) -> StandaloneContainerWire:

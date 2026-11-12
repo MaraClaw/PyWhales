@@ -1168,7 +1168,7 @@ def test_process_stream_close_wins_pending_natural_failure_delivery(
     stream = stream_stdout_and_stderr([sys.executable, "-c", "raise SystemExit(7)"])
     reaped = Event()
     resume = Event()
-    original_raise = stream._raise_error
+    original_raise = stream._core._raise_error
     errors: list[DockerException] = []
 
     def pause_after_reap() -> None:
@@ -1182,7 +1182,7 @@ def test_process_stream_close_wins_pending_natural_failure_delivery(
         except DockerException as error:
             errors.append(error)
 
-    monkeypatch.setattr(stream, "_raise_error", pause_after_reap)
+    monkeypatch.setattr(stream._core, "_raise_error", pause_after_reap)
     consumer = Thread(target=consume, daemon=True)
     consumer.start()
     try:
@@ -1206,7 +1206,7 @@ def test_process_stream_close_after_deadline_records_expiry() -> None:
         [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=60
     )
     with stream._queue.condition:
-        stream._deadline = monotonic() - 1
+        stream._core._deadline = monotonic() - 1
 
     stream.close()
 
@@ -1224,14 +1224,14 @@ def test_process_stream_close_wins_before_owner_failure_is_recorded(
     observed = Event()
     resume = Event()
     errors: list[OSError | BufferError | DockerException] = []
-    fail = stream._fail
+    fail = stream._core._fail
 
     def pause_before_failure(error: OSError | BufferError | DockerException) -> None:
         observed.set()
         assert resume.wait(timeout=3)
         fail(error)
 
-    monkeypatch.setattr(stream, "_fail", pause_before_failure)
+    monkeypatch.setattr(stream._core, "_fail", pause_before_failure)
     stream._on_failure(errors.append)
     closer = Thread(target=stream.close, daemon=True)
     try:
@@ -1298,21 +1298,21 @@ def test_process_stream_timeout_preserves_read_scratch(
     )
     read = Event()
     resume = Event()
-    check_size = stream._check_size
+    check_size = stream._core._check_size
 
     def pause_after_read(size: int, category: StreamBufferCategory) -> None:
         check_size(size, category)
         read.set()
         assert resume.wait(timeout=3)
 
-    monkeypatch.setattr(stream, "_check_size", pause_after_read)
+    monkeypatch.setattr(stream._core, "_check_size", pause_after_read)
     try:
         assert stream.stdin is not None
         stream.stdin.write(b"read\n")
         stream.stdin.flush()
         assert read.wait(timeout=3)
         with stream._queue.condition:
-            stream._deadline = monotonic() - 1
+            stream._core._deadline = monotonic() - 1
             stream._expire()
 
         resume.set()
@@ -2150,7 +2150,7 @@ def test_cancel_token_wins_over_command_and_scope_deadlines() -> None:
     try:
         assert next(stream) == ("stdout", b"ready\n")
         # Make every stop reason true at once; close() evaluates them together.
-        stream._deadline = monotonic() - 1
+        stream._core._deadline = monotonic() - 1
         cancel.set()
 
         stream.close()

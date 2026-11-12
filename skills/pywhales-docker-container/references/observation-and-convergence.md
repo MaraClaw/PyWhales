@@ -676,13 +676,17 @@ over the same IDs. It proves only the captured conditions at that moment.
 
 ### Outcomes And Budgets
 
-Swarm task, Compose container and fixed standalone-container inspections batch
-up to the active policy's `max_references` per launch. Each chunk checks the
-observation before launch and maps exact full IDs in target order. Failed or
-malformed batches fall back to ordered single-ID probes; cancellation and scope
-deadline expiry stop immediately. This preserves failure reasons, causes and
-earlier-task precedence, but fallback may consume extra launch attempts. Service
-and node inspections and standalone name/prefix resolution remain scalar.
+Swarm task, stack service, selected node, Compose container and fixed
+standalone-container inspections batch up to the active policy's
+`max_references` per launch; outside an observation each launch still inspects
+one ID. Each chunk checks the observation before launch and maps exact full IDs
+in target order. Stack services batch only with consecutive members that use the
+same client configuration object, and the ready-time recheck is a fresh batch.
+Failed or malformed batches fall back to ordered single-ID probes; cancellation
+and scope deadline expiry stop immediately. This preserves failure reasons,
+causes, node removal as `superseded`, and earlier-task precedence, but a failed
+batch costs one extra launch attempt. Scalar `capture_service` and standalone
+name/prefix resolution stay single-call.
 The confirming all-clear pass still runs in full, and interrupted cycles publish
 no partial detail. Size response and launch budgets for the selected resources;
 batching doesn't remove those limits.
@@ -748,6 +752,16 @@ Leases don't fence Docker itself; there is no exactly-once guarantee or built-in
 reset/retry/delete workflow. Check installed signatures and the application's
 ownership/recovery design before opting in; don't replace failed mutating calls
 with blind retries.
+A custom `JournalStore` must implement `renew(expected, request)`: an exact
+version/generation match, the same worker and an unexpired lease on the store
+clock; it sets expiry to store time plus the TTL and bumps only `version`.
+A convergence adapter whose observation can outlast the lease TTL calls
+`context.renew_lease(ttl)` between short `convergence.wait` slices, bounding the
+total itself. The controller commits and releases with the renewed entry. Inventory
+and mutation contexts raise `RuntimeError` instead. `StoreConflict` or
+`StoreUnavailable` from renewal means stop acting: the pass halts without an
+outcome commit, and a failed renewal may still have committed. Nothing renews in
+the background, so a wedged observer loses its lease to the next claimer.
 The journal's convergence failure vocabulary also accepts `completion_failed`,
 `exited`, and `unhealthy`. An adapter observing a target captured with
 `fail_on_unhealthy=True` can return that failure; reconciliation projects it to

@@ -32,8 +32,7 @@ from pywhales.reconciliation import (
     Transition,
 )
 from tests.pywhales.test_admission_calls import _spawn
-from tests.pywhales.test_reconciliation import Endpoint, controller, spec
-from tests.pywhales.test_reconciliation_store import Clock
+from tests.pywhales.test_reconciliation import Clock, Endpoint, controller, spec
 
 
 class FaultStore(MemoryJournalStore):
@@ -42,12 +41,23 @@ class FaultStore(MemoryJournalStore):
         self.outage = False
         self.fail_write = False
         self.commit_then_fail = False
+        self.fail_renew = False
+        self.renew_then_fail = False
 
     @override
     def verify(self, expected: JournalEntry) -> None:
         if self.outage:
             raise StoreUnavailable()
         return super().verify(expected)
+
+    @override
+    def renew(self, expected: JournalEntry, request: LeaseRequest) -> JournalEntry:
+        if self.fail_renew:
+            raise StoreUnavailable()
+        renewed = super().renew(expected, request)
+        if self.renew_then_fail:
+            raise StoreUnavailable()
+        return renewed
 
     @override
     def compare_and_swap(
@@ -332,3 +342,88 @@ def test_failed_clearing_write_stops_before_further_observation(
         owner.reconcile(claimed)
     assert endpoint.trace == ["inventory"]
     assert store.read(spec().key) == claimed
+
+
+@pytest.mark.parametrize("swallowed", [False, True])
+@pytest.mark.parametrize("commit_then_fail", [False, True])
+def test_renewal_outage_halts_without_outcome_commit_and_recovers_without_replay(
+    commit_then_fail: bool, swallowed: bool
+) -> None:
+    clock = Clock()
+    store = FaultStore(clock)
+
+    class OutageEndpoint(Endpoint):
+        fail = True
+        seen: JournalEntry | None = None
+
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            if self.fail:
+                self.seen = store.read(context.spec.key)
+                store.fail_renew = not commit_then_fail
+                store.renew_then_fail = commit_then_fail
+                try:
+                    context.renew_lease(30)
+                except StoreUnavailable:
+                    if not swallowed:
+                        raise
+            context.check_current()
+            self.trace.append("further-action")
+            return self.outcome
+
+    endpoint = OutageEndpoint()
+    owner = controller(store, endpoint)
+    with pytest.raises(StoreUnavailable):
+        owner.reconcile(owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30)))
+    current, seen = store.read(spec().key), endpoint.seen
+    assert current is not None and seen is not None
+    assert endpoint.trace == ["inventory", "mutate", "inventory", "observe"]
+    assert current.progress == seen.progress
+    assert current.progress.state is AttemptState.OBSERVING
+    assert current.lease is not None
+    assert current.version == seen.version + int(commit_then_fail)
+    endpoint.fail = store.fail_renew = store.renew_then_fail = False
+    clock.now += 30
+    endpoint.trace.clear()
+    recovered = owner.reconcile(owner.claim(current, LeaseRequest("worker-b", 30)))
+    assert recovered.progress.state is AttemptState.SUCCEEDED
+    assert recovered.progress.attempts == 1
+    assert endpoint.trace == ["inventory", "observe", "further-action"]
+
+
+@pytest.mark.parametrize("late_renewal", [False, True])
+def test_observer_that_stops_renewing_loses_its_lease_to_a_later_claimer(
+    late_renewal: bool,
+) -> None:
+    clock = Clock()
+    store = MemoryJournalStore(clock)
+
+    class WedgedEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            clock.now += 3
+            context.renew_lease(5)
+            clock.now += 6
+            current = store.read(context.spec.key)
+            assert current is not None
+            store.claim(current, LeaseRequest("worker-b", 5))
+            if late_renewal:
+                context.renew_lease(5)
+            return self.outcome
+
+    endpoint = WedgedEndpoint()
+    owner = controller(store, endpoint)
+    with pytest.raises(StoreConflict):
+        owner.reconcile(owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 5)))
+    current = store.read(spec().key)
+    assert current is not None and current.lease is not None
+    assert current.generation == 2 and current.lease.worker == "worker-b"
+    assert current.progress.state is AttemptState.OBSERVING
+    assert current.progress.convergence is None
+    assert endpoint.trace == ["inventory", "mutate", "inventory", "observe"]

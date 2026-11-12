@@ -35,6 +35,7 @@
   Each worker enters a fresh copy of that context, so children keep the creator's
   observation scope even if iteration starts after its `with` block.
 - Both fanouts use `ObservationState.child_allowance()`, including occupied outer accounts. Unobserved or child-unbounded scopes keep four workers; one slot serializes transfers. Zero allowance starts one worker so normal preflight refuses without consuming an attempt. Sizing reserves nothing; later sibling contention still refuses immediately rather than waiting.
+- Group workers are daemon threads the group starts and joins itself, not a `ThreadPoolExecutor`, so an unclosed group never delays interpreter exit. A dropped group is closed by the shared reclaimer ([runtime guide](../../AGENTS.md#observation-and-subprocesses)); `tests/pywhales/components/test_image_reclaim.py` covers both, including a subprocess exit check.
 - A single unique reference uses an eager `MappedProcessStream`, including duplicate-only input.
 - Records are `(image_reference, bytes)`; don't promise global ordering across images or pipes.
 - The first worker error, a child's `DockerTimeout` included, stops sibling work and queued transfers without

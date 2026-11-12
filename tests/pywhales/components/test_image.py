@@ -11,7 +11,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from pathlib import Path
 from queue import Queue
@@ -320,14 +320,16 @@ def test_image_fallback_budget_backpressures_slow_consumer_and_closes_children(
     image_commands.stderr = b""
     stream = image_commands.stream(operation, ["one", "two"])
     saturated = Event()
-    wait = stream._queue.condition.wait
+    wait = stream._core._queue.condition.wait
 
     def wait_and_signal(timeout: float | None = None) -> bool:
         saturated.set()
         return wait(timeout)
 
     try:
-        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+        with patch.object(
+            stream._core._queue.condition, "wait", side_effect=wait_and_signal
+        ):
             stream._start()
             assert saturated.wait(timeout=3)
             for _ in range(2):
@@ -1176,7 +1178,7 @@ def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
     stream = MultiImageStream(names, start, buffer_bytes=10)
     blocked: set[str] = set()
     saturated = Event()
-    wait = stream._queue.condition.wait
+    wait = stream._core._queue.condition.wait
 
     def wait_and_signal(timeout: float | None = None) -> bool:
         blocked.add(current_thread().name)
@@ -1185,7 +1187,9 @@ def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
         return wait(timeout)
 
     try:
-        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+        with patch.object(
+            stream._core._queue.condition, "wait", side_effect=wait_and_signal
+        ):
             stream._start()
             assert saturated.wait(timeout=3)
             with stream._queue.condition:
@@ -1221,9 +1225,9 @@ def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
                     b"bbb\n",
                     b"ccc\n",
                 ] * 10
-        executor = stream._executor
-        assert executor is not None
-        assert all(not worker.is_alive() for worker in executor._threads)
+        workers = stream._core._workers
+        assert workers is not None
+        assert all(not worker.is_alive() for worker in workers)
         for child in image_commands.children.values():
             _assert_image_process_released(child)
     finally:
@@ -1263,23 +1267,25 @@ def test_multiple_image_failure_wakes_saturated_sibling_producer(
         return MappedProcessStream(child, mapped())
 
     stream = MultiImageStream(["sibling", "failure"], start, buffer_bytes=4)
-    wait = stream._queue.condition.wait
+    wait = stream._core._queue.condition.wait
 
     def wait_and_signal(timeout: float | None = None) -> bool:
         saturated.set()
         return wait(timeout)
 
     try:
-        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+        with patch.object(
+            stream._core._queue.condition, "wait", side_effect=wait_and_signal
+        ):
             stream._start()
             assert saturated.wait(timeout=3)
             for _ in range(2):
                 image_commands.started.get(timeout=3)
             for name in ("sibling", "failure"):
                 assert image_commands.closed[name].wait(timeout=3)
-        executor = stream._executor
-        assert executor is not None
-        for worker in executor._threads:
+        workers = stream._core._workers
+        assert workers is not None
+        for worker in workers:
             worker.join(timeout=3)
             assert not worker.is_alive()
         expected = {
@@ -1350,7 +1356,7 @@ def test_background_child_failure_cancels_group_without_consumer_drain(
         return MappedProcessStream(child, mapped())
 
     stream = MultiImageStream(["sibling", "bad"], start, buffer_bytes=16)
-    wait = stream._queue.condition.wait
+    wait = stream._core._queue.condition.wait
 
     def wait_and_signal(timeout: float | None = None) -> bool:
         blocked.add(current_thread().name)
@@ -1360,7 +1366,9 @@ def test_background_child_failure_cancels_group_without_consumer_drain(
         return wait(timeout)
 
     try:
-        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+        with patch.object(
+            stream._core._queue.condition, "wait", side_effect=wait_and_signal
+        ):
             stream._start()
             assert ready.wait(timeout=3)
             if not failure_before_registration:
@@ -1380,9 +1388,9 @@ def test_background_child_failure_cancels_group_without_consumer_drain(
                 bad.stdin.flush()
             for child in tuple(children.values()):
                 assert child._released.wait(timeout=3)
-            executor = stream._executor
-            assert executor is not None
-            for worker in executor._threads:
+            workers = stream._core._workers
+            assert workers is not None
+            for worker in workers:
                 worker.join(timeout=3)
                 assert not worker.is_alive()
         assert set(children) == {"bad", "sibling"}
@@ -1497,15 +1505,15 @@ def test_multiple_image_stream_cancels_active_and_queued_commands(
         next(stream)
         started = [image_commands.started.get(timeout=3) for _ in range(4)]
         assert set(started) == set(names[:4])
-        executor = stream._executor
-        assert executor is not None
-        assert len(executor._threads) == 4
+        workers = stream._core._workers
+        assert workers is not None
+        assert len(workers) == 4
 
         closer.start()
         closer.join(timeout=3)
 
         assert not closer.is_alive()
-        assert all(not worker.is_alive() for worker in executor._threads)
+        assert all(not worker.is_alive() for worker in workers)
         assert set(image_commands.children) == set(names[:4])
         assert list(stream) == []
         for child in image_commands.children.values():
@@ -1525,7 +1533,7 @@ def test_multiple_image_stream_rejects_running_but_unadmitted_worker_after_close
     stream = image_commands.stream(operation, names)
     running = Event()
     admit = Event()
-    consume = stream._consume
+    consume = stream._core._consume
 
     def gated_consume(name: str) -> None:
         if name == names[4]:
@@ -1534,7 +1542,7 @@ def test_multiple_image_stream_rejects_running_but_unadmitted_worker_after_close
         consume(name)
 
     closer = Thread(target=stream.close, daemon=True)
-    with patch.object(stream, "_consume", side_effect=gated_consume):
+    with patch.object(stream._core, "_consume", side_effect=gated_consume):
         try:
             next(stream)
             for _ in range(4):
@@ -1572,7 +1580,7 @@ def test_multiple_image_stream_close_wakes_blocked_consumer(
     waiting = Event()
     finished = Event()
     output: list[tuple[str, bytes]] = []
-    get = stream._queue.get
+    get = stream._core._queue.get
 
     def get_and_signal() -> tuple[str, bytes] | None:
         waiting.set()
@@ -1585,7 +1593,7 @@ def test_multiple_image_stream_close_wakes_blocked_consumer(
             finished.set()
 
     consumer = Thread(target=consume, daemon=True)
-    with patch.object(stream._queue, "get", side_effect=get_and_signal):
+    with patch.object(stream._core._queue, "get", side_effect=get_and_signal):
         try:
             consumer.start()
             assert waiting.wait(timeout=3)
@@ -1623,9 +1631,9 @@ def test_multiple_image_failure_cancels_siblings_while_consumer_is_paused(
 
         for name in names[:4]:
             assert image_commands.closed[name].wait(timeout=3)
-        executor = stream._executor
-        assert executor is not None
-        for worker in executor._threads:
+        workers = stream._core._workers
+        assert workers is not None
+        for worker in workers:
             worker.join(timeout=3)
             assert not worker.is_alive()
         assert stream._remaining == 0
@@ -1655,7 +1663,7 @@ def test_multiple_image_stream_keeps_first_original_error(
     first_recorded = Event()
     second_recorded = Event()
     errors: dict[str, DockerException] = {}
-    record_error = stream._record_error
+    record_error = stream._core._record_error
 
     def ordered_failures(error: BaseException) -> None:
         assert isinstance(error, DockerException)
@@ -1673,7 +1681,7 @@ def test_multiple_image_stream_keeps_first_original_error(
         else:
             second_recorded.set()
 
-    with patch.object(stream, "_record_error", side_effect=ordered_failures):
+    with patch.object(stream._core, "_record_error", side_effect=ordered_failures):
         try:
             next(stream)
             for _ in range(2):
@@ -1760,7 +1768,7 @@ def test_multiple_image_stream_concurrent_close_waits_for_cleanup(
             image_commands.started.get(timeout=3)
         child = image_commands.children["one"]
         close = child.close
-        wait = stream._cleanup_done.wait
+        wait = stream._core._cleanup_done.wait
 
         def gated_close() -> None:
             entered.set()
@@ -1773,7 +1781,9 @@ def test_multiple_image_stream_concurrent_close_waits_for_cleanup(
 
         with (
             patch.object(child, "close", side_effect=gated_close),
-            patch.object(stream._cleanup_done, "wait", side_effect=wait_and_signal),
+            patch.object(
+                stream._core._cleanup_done, "wait", side_effect=wait_and_signal
+            ),
         ):
             first.start()
             assert entered.wait(timeout=3)
@@ -1834,32 +1844,27 @@ def test_multiple_image_stream_child_startup_failure_closes_sibling(
             stream.close()
 
 
-@pytest.mark.parametrize("phase", ["constructor", "submission"])
-def test_multiple_image_stream_executor_startup_failure_releases_resources(
-    phase: Literal["constructor", "submission"], image_commands: _ImageCommands
+@pytest.mark.parametrize("failing_start", [1, 2], ids=["first", "second"])
+def test_multiple_image_stream_worker_startup_failure_releases_resources(
+    failing_start: int, image_commands: _ImageCommands
 ) -> None:
     stream = image_commands.stream("pull", ["one", "two"])
-    error = RuntimeError("executor startup failed")
-    submit = ThreadPoolExecutor.submit
-    submissions = 0
+    error = RuntimeError("worker startup failed")
+    starts = 0
 
-    def submit_or_fail(
-        executor: ThreadPoolExecutor, callback: Callable[[str], None], name: str
-    ) -> Future[None]:
-        nonlocal submissions
-        submissions += 1
-        if submissions == 2:
-            raise error
-        return submit(executor, callback, name)
+    class FailingWorker(Thread):
+        @override
+        def start(self) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == failing_start:
+                raise error
+            super().start()
 
-    target = (
-        patch("pywhales.components.image.streams.ThreadPoolExecutor", side_effect=error)
-        if phase == "constructor"
-        else patch.object(
-            ThreadPoolExecutor, "submit", autospec=True, side_effect=submit_or_fail
-        )
-    )
-    with target, pytest.raises(RuntimeError) as raised:
+    with (
+        patch("pywhales.components.image.streams.Thread", FailingWorker),
+        pytest.raises(RuntimeError) as raised,
+    ):
         next(stream)
 
     assert raised.value is error

@@ -18,6 +18,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.config.models import (
     ConfigInspectResult,
@@ -204,6 +205,8 @@ class ConfigCLI(DockerCLICaller):
     def list(
         self,
         filters: Mapping[str, str] | Iterable[ConfigListFilter] = MappingProxyType({}),
+        *,
+        hydrate: bool = False,
     ) -> builtins.list[Config]:
         """List configs available in the Swarm.
 
@@ -214,6 +217,12 @@ class ConfigCLI(DockerCLICaller):
                 keys are `id`, `label`, and `name`. The default selects all
                 configs. For example, `filters={"name": "app"}` or
                 `filters=[("label", "tier=web"), ("label", "team=core")]`.
+            hydrate: If `True`, inspect the listed IDs in bounded batches, so a
+                listing costs one launch plus one per chunk and reading
+                properties costs none. Snapshots stay pinned until `reload()`
+                or a mutating call on the handle, and configs removed before
+                their inspect are omitted. If `False`, each handle inspects
+                lazily on first property access.
 
         Returns:
             Config handles in CLI output order.
@@ -222,13 +231,22 @@ class ConfigCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "config", "list", "--quiet"])
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
         output = run(full_cmd)
         ids = output.splitlines()
-        return [Config(self.client_config, id_, is_immutable_id=True) for id_ in ids]
+        configs = [Config(self.client_config, id_, is_immutable_id=True) for id_ in ids]
+        if not hydrate:
+            return configs
+        return hydrate_handles(
+            configs,
+            lambda ids: run([*self.docker_cmd, "config", "inspect", *ids]),
+            NoSuchConfig,
+        )
 
     def remove(self, x: ValidConfig | Iterable[ValidConfig]) -> None:
         """Remove one or more configs.
@@ -242,4 +260,7 @@ class ConfigCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "config", "rm"])
         full_cmd += configs
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(configs)

@@ -3,7 +3,9 @@
 Reader threads, a child-reaping thread, and a watchdog keep running independently
 of stream consumption. On POSIX they wait on readiness: no timer runs while idle,
 and every stop path wakes the readers through the stop latch. Cleanup controls
-only the local process, not daemon-managed resources.
+only the local process, not daemon-managed resources. The threads reference an
+internal core rather than the public handle, so a handle dropped without
+closing can be collected and its core closed by the shared reclaimer.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from subprocess import Popen
 from threading import Event, Thread
 from time import monotonic
 from types import TracebackType
-from typing import IO, TYPE_CHECKING, Self, override
+from typing import IO, TYPE_CHECKING, Any, Self, override
 
 from pywhales._readiness import (
     CANCEL_CHECK,
@@ -26,6 +28,7 @@ from pywhales._readiness import (
     unwind_launch,
     wait_ready,
 )
+from pywhales._reclaim import watch
 from pywhales._stream_buffer import StreamBuffer
 from pywhales.exceptions import (
     DockerException,
@@ -44,36 +47,12 @@ if TYPE_CHECKING:
     from pywhales._observation import ObservationState, _ChildReservation
 
 
-class ProcessStream(Iterator[tuple[str, bytes]]):
-    """Owned CLI process with output readers and an independent watchdog.
+class _ProcessCore:
+    """Internal state of one `ProcessStream`, shared with its worker threads.
 
-    Iteration blocks for stdout/stderr records and drains output after natural
-    child exit. A launch-based deadline keeps advancing even when iteration
-    pauses or never starts. Use a context manager or call close() when stopping
-    early; a bare loop break does not close the stream. Closing kills a running
-    local CLI and waits for cleanup, never removing daemon-managed resources.
-    Recorded terminal errors are delivered once through iteration or clean
-    context exit, without replacing an exception from the context body.
-
-    A stream launched inside an observation keeps that scope's deadline and
-    cancel tokens after the scope exits. When one trips first, the local CLI is
-    killed and reaped and iteration raises ``ObservationTimeout`` or
-    ``ObservationCancelled``. A command deadline wins only when it is strictly
-    earlier than the scope's, and a cancel token wins over both.
-
-    The snapshot also carries the scope's stream accounts, whether or not it has
-    a deadline or token. Each pipe read charges its stdout or stderr bytes to
-    every enclosing account; the first read past a limit stops the stream like a
-    scope stop, killing and reaping the local CLI, and iteration raises
-    ``ObservationLimitError`` (reason ``total_stream``) once. The scope's
-    aggregate I/O accounts are charged by the same reads, so a retained scope
-    with only that budget still stops the stream with reason ``total_io``; a
-    stream budget wins a same-read tie, and a read never starts on an account
-    another operation already overflowed.
-
-    Attributes:
-        stdin: Writable child input pipe when launch requested one; otherwise
-            ``None``. Cleanup closes this pipe along with the owned process.
+    Reader, reaper and watchdog threads and failure callbacks reference only
+    this core, never the public handle, so an abandoned handle can be collected
+    while the child still runs. The shared reclaimer then calls ``close()``.
     """
 
     def __init__(
@@ -567,32 +546,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 self._telemetry_outcome, stop_reason=self._telemetry_stop_reason
             )
 
-    @override
-    def __iter__(self) -> Self:
-        """Return this owned output iterator."""
-        return self
-
-    @override
-    def __next__(self) -> tuple[str, bytes]:
-        """Wait for the next output record or deliver terminal status.
-
-        Returns:
-            A ``(source, payload)`` pair labelled ``stdout`` or ``stderr``.
-            Records include their newline, except an unterminated final record.
-
-        Raises:
-            StopIteration: After successful exhaustion or explicit closure with
-                no remaining recorded failure.
-            DockerException: If the child exits unsuccessfully.
-            DockerTimeout: If the running child exceeded its launch deadline.
-            ObservationCancelled: If the launch-time observation was cancelled.
-            ObservationTimeout: If the launch-time observation deadline expired.
-            ObservationLimitError: If the launch-time observation's stream budget
-                was exceeded, with reason ``total_stream``.
-            StreamBufferLimitError: If a record or retained stderr exceeded its
-                byte limit.
-            OSError: If a pipe read failed.
-        """
+    def next(self) -> tuple[str, bytes]:
+        """Wait for the next record or deliver terminal status for the handle."""
         while True:
             self._check_scope()
             if self._stop.is_set():
@@ -651,6 +606,152 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._watchdog.join()
         self._complete_telemetry()
 
+
+class ProcessStream(Iterator[tuple[str, bytes]]):
+    """Owned CLI process with output readers and an independent watchdog.
+
+    Iteration blocks for stdout/stderr records and drains output after natural
+    child exit. A launch-based deadline keeps advancing even when iteration
+    pauses or never starts. Use a context manager or call close() when stopping
+    early; a bare loop break does not close the stream. A stream dropped without
+    closing is closed by a shared background reclaimer once it is garbage
+    collected, which may be later and isn't guaranteed before interpreter exit.
+    Closing kills a running local CLI and waits for cleanup, never removing
+    daemon-managed resources. Recorded terminal errors are delivered once
+    through iteration or clean context exit, without replacing an exception
+    from the context body.
+
+    A stream launched inside an observation keeps that scope's deadline and
+    cancel tokens after the scope exits. When one trips first, the local CLI is
+    killed and reaped and iteration raises ``ObservationTimeout`` or
+    ``ObservationCancelled``. A command deadline wins only when it is strictly
+    earlier than the scope's, and a cancel token wins over both.
+
+    The snapshot also carries the scope's stream accounts, whether or not it has
+    a deadline or token. Each pipe read charges its stdout or stderr bytes to
+    every enclosing account; the first read past a limit stops the stream like a
+    scope stop, killing and reaping the local CLI, and iteration raises
+    ``ObservationLimitError`` (reason ``total_stream``) once. The scope's
+    aggregate I/O accounts are charged by the same reads, so a retained scope
+    with only that budget still stops the stream with reason ``total_io``; a
+    stream budget wins a same-read tie, and a read never starts on an account
+    another operation already overflowed.
+
+    Attributes:
+        stdin: Writable child input pipe when launch requested one; otherwise
+            ``None``. Cleanup closes this pipe along with the owned process.
+    """
+
+    def __init__(
+        self,
+        process: Popen[bytes],
+        full_cmd: list[str],
+        *,
+        deadline: float | None = None,
+        buffer_bytes: int | None = None,
+        raw_diagnostics: bool = False,
+        strict_workload_errors: bool = False,
+        telemetry: ExecutionTelemetry | None = None,
+        observation: ObservationState | None = None,
+        reservation: _ChildReservation | None = None,
+    ) -> None:
+        """Take ownership of a launched process and start readers and a watchdog.
+
+        Args:
+            process: Running child with stdout and stderr pipes already open.
+            full_cmd: Launched arguments retained for exception attributes.
+            deadline: Absolute monotonic deadline in seconds, or ``None`` for no
+                deadline. The caller computes it from launch time.
+            buffer_bytes: Positive byte budget, or ``None`` for unbounded output.
+                Queued payload, each unfinished record, and stderr history are
+                bounded separately; this is not a total-memory cap.
+            raw_diagnostics: Whether exception text may expose command and
+                captured-output values. Raw exception attributes remain available
+                regardless and must be treated as confidential.
+            strict_workload_errors: Keep this workload's failures generic.
+            telemetry: Optional launch state completed by consumption or closure.
+            observation: Scope snapshotted at launch, or ``None`` outside one. Its
+                deadline, cancel tokens, and stream accounts are enforced for the
+                stream's whole life, whether or not the scope is still active.
+            reservation: Child capacity released at reap, before output drains.
+        """
+        self._core = _ProcessCore(
+            process,
+            full_cmd,
+            deadline=deadline,
+            buffer_bytes=buffer_bytes,
+            raw_diagnostics=raw_diagnostics,
+            strict_workload_errors=strict_workload_errors,
+            telemetry=telemetry,
+            observation=observation,
+            reservation=reservation,
+        )
+        self.stdin = self._core.stdin
+        watch(self, self._core)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        """Read internal state from the core for white-box inspection.
+
+        Assign or patch internal state on ``_core``; this only forwards reads.
+
+        Raises:
+            AttributeError: If the core is unset or lacks the attribute.
+        """
+        if name == "_core" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._core, name)
+
+    def _on_failure(
+        self, callback: Callable[[OSError | BufferError | DockerException], None]
+    ) -> None:
+        """Register an owner callback, replaying any already recorded failure.
+
+        Notification does not join reader threads and may happen on a worker
+        thread. A newly observed nonzero child exit can also trigger it.
+
+        Args:
+            callback: Failure notification that must not wait for reader cleanup.
+                It is retained by the core, so it must not reference this handle.
+        """
+        self._core._on_failure(callback)
+
+    @override
+    def __iter__(self) -> Self:
+        """Return this owned output iterator."""
+        return self
+
+    @override
+    def __next__(self) -> tuple[str, bytes]:
+        """Wait for the next output record or deliver terminal status.
+
+        Returns:
+            A ``(source, payload)`` pair labelled ``stdout`` or ``stderr``.
+            Records include their newline, except an unterminated final record.
+
+        Raises:
+            StopIteration: After successful exhaustion or explicit closure with
+                no remaining recorded failure.
+            DockerException: If the child exits unsuccessfully.
+            DockerTimeout: If the running child exceeded its launch deadline.
+            ObservationCancelled: If the launch-time observation was cancelled.
+            ObservationTimeout: If the launch-time observation deadline expired.
+            ObservationLimitError: If the launch-time observation's stream budget
+                was exceeded, with reason ``total_stream``.
+            StreamBufferLimitError: If a record or retained stderr exceeded its
+                byte limit.
+            OSError: If a pipe read failed.
+        """
+        return self._core.next()
+
+    def close(self) -> None:
+        """Cancel the local CLI and wait for process and reader cleanup.
+
+        Repeated calls are safe. Discard queued payloads but leave recorded
+        errors for one later iteration or clean context-exit delivery. This does
+        not cancel containers, services, or other daemon-side work.
+        """
+        self._core.close()
+
     def __enter__(self) -> Self:
         """Return the already-running stream without launching another process."""
         return self
@@ -668,6 +769,6 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             exc_value: Active context-body exception, preserved by this method.
             traceback: Context-body traceback supplied by the context protocol.
         """
-        self.close()
+        self._core.close()
         if exc_type is None:
-            self._raise_error()
+            self._core._raise_error()

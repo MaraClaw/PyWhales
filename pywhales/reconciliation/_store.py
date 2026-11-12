@@ -37,8 +37,9 @@ class JournalStore(Protocol):
     """Atomic create/read/CAS contract across every controller sharing the store.
 
     Every write checks version and generation together. Claim increments both;
-    CAS and release increment version and require an unexpired matching worker
-    lease using store-authoritative time. Verify is a linearizable read/check.
+    CAS, renew and release increment version and require an unexpired matching
+    worker lease using store-authoritative time. Renew moves only that lease's
+    expiry. Verify is a linearizable read/check.
     Conflicts raise StoreConflict (identity mismatch raises IdentityConflict).
     Store failures raise payload-free StoreUnavailable, even for ambiguous commits;
     callers stop actions and reread later, never assume a failed write rolled back.
@@ -66,6 +67,10 @@ class JournalStore(Protocol):
 
     def verify(self, expected: JournalEntry) -> None:
         """Require exact version, generation, owner and unexpired lease."""
+        ...
+
+    def renew(self, expected: JournalEntry, request: LeaseRequest) -> JournalEntry:
+        """CAS the same worker's unexpired lease to a fresh TTL, incrementing version."""
         ...
 
     def compare_and_swap(
@@ -150,6 +155,41 @@ class MemoryJournalStore:
             current = self._current(expected)
             if current.lease is None or current.lease.expires_at <= self._clock():
                 raise StoreConflict()
+
+    def renew(self, expected: JournalEntry, request: LeaseRequest) -> JournalEntry:
+        """Move a live lease's expiry to store time plus TTL, bumping only version.
+
+        Args:
+            expected: Exact current entry, as returned by the claim or the latest
+                renewal or commit.
+            request: Worker that must own the lease, and the TTL in seconds from
+                the store clock, validated when the request is built.
+
+        Returns:
+            The entry with a new version and expiry; generation, progress and
+            worker are unchanged.
+
+        Raises:
+            StoreConflict: The entry is stale, released or expired, or its lease
+                belongs to another worker.
+        """
+        with self._lock:
+            current = self._current(expected)
+            now = self._clock()
+            lease = current.lease
+            if (
+                lease is None
+                or lease.worker != request.worker
+                or lease.expires_at <= now
+            ):
+                raise StoreConflict()
+            renewed = replace(
+                current,
+                version=current.version + 1,
+                lease=Lease(lease.worker, now + request.ttl),
+            )
+            self._entries[current.spec.key.operation] = renewed
+            return renewed
 
     def compare_and_swap(
         self, expected: JournalEntry, change: Transition

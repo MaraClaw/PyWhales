@@ -1,4 +1,7 @@
+import copy
+import inspect
 import json
+import pickle
 import sys
 import tempfile
 import time
@@ -20,6 +23,12 @@ from pywhales.exceptions import (
 )
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import stream_stdout_and_stderr
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 def test_batch_inspect_matches_service_references_and_hydrates_cache() -> None:
@@ -681,3 +690,238 @@ def test_service_removed_inside_its_context_exits_cleanly(
         my_service.remove()
         assert not my_service.exists()
     assert not my_service.exists()
+
+
+def _service_ids(count: int) -> list[str]:
+    return [identity_of("service", index) for index in range(count)]
+
+
+def _truncated(ids: list[str]) -> list[str]:
+    return [identity[:12] for identity in ids]
+
+
+def test_hydrated_service_list_resolves_truncated_ids_then_inspects_per_chunk() -> None:
+    ids = _service_ids(5)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        services = client.service.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [service.id for service in services] == ids
+        for service in services:
+            assert service._inspect_result is not None
+            assert service._inspect_result.id == service.id
+        assert [
+            service.spec.name for service in services if service.spec is not None
+        ] == [f"ser-{index:04d}" for index in range(5)]
+    assert launches == 7
+    assert cli.lists() == [["docker-test", "service", "list", "--quiet"]]
+    truncated = _truncated(ids)
+    assert cli.resolves() == [truncated[:2], truncated[2:4], truncated[4:]]
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+    assert len(cli.launches) == launches
+
+
+@pytest.mark.parametrize(
+    ("count", "chunks"), [(0, []), (100, [100]), (101, [100, 1])], ids=str
+)
+def test_hydrated_service_list_resolves_and_inspects_at_most_one_chunk_bound(
+    count: int, chunks: list[int]
+) -> None:
+    ids = _service_ids(count)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        services = client.service.list(hydrate=True)
+    assert [service.id for service in services] == ids
+    assert [len(batch) for batch in cli.resolves()] == chunks
+    assert [len(batch) for batch in cli.inspects()] == chunks
+
+
+def test_default_service_list_stays_lazy_and_expiring() -> None:
+    ids = _service_ids(3)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        services = client.service.list([("name", "svc")])
+        assert [service.id for service in services] == ids
+        assert cli.inspects() == []
+        assert services[0].spec is not None
+        assert services[0].spec is not None
+        hydrate = inspect.signature(client.service.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.launches[:2] == [
+        ["docker-test", "service", "list", "--quiet", "--filter", "name=svc"],
+        [
+            "docker-test",
+            "service",
+            "inspect",
+            *_truncated(ids),
+            "--format",
+            "{{.ID}}",
+        ],
+    ]
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+    assert len(cli.launches) == 4
+
+
+def test_hydrated_service_list_keeps_filters() -> None:
+    ids = _service_ids(2)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        client.service.list([("label", "tier=web"), ("name", "svc")], hydrate=True)
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "service",
+            "list",
+            "--quiet",
+            "--filter",
+            "label=tier=web",
+            "--filter",
+            "name=svc",
+        ]
+    ]
+
+
+def test_services_removed_before_resolution_reprobe_only_the_affected_chunk() -> None:
+    ids = _service_ids(6)
+    truncated = _truncated(ids)
+    cli = FakeCli("service", ids)
+    cli.vanish_on_list = {ids[4]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        services = client.service.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [service.id for service in services] == [
+            identity for identity in ids if identity != ids[4]
+        ]
+        assert all(service.spec is not None for service in services)
+    assert len(cli.launches) == launches
+    assert cli.resolves() == [
+        truncated[:3],
+        truncated[3:],
+        truncated[3:4],
+        truncated[4:],
+        truncated[4:5],
+        truncated[5:],
+    ]
+    assert cli.inspects() == [ids[:3], [ids[3], ids[5]]]
+
+
+def test_services_removed_before_inspection_reprobe_only_the_affected_chunk() -> None:
+    ids = _service_ids(6)
+    cli = FakeCli("service", ids)
+    cli.vanish_on_resolve = {ids[1]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        services = client.service.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [service.id for service in services] == [ids[0], *ids[2:]]
+        assert all(service.spec is not None for service in services)
+    assert len(cli.launches) == launches
+    assert len(cli.resolves()) == 2
+    assert cli.inspects() == [
+        ids[:3],
+        ids[:1],
+        ids[1:3],
+        ids[1:2],
+        ids[2:3],
+        ids[3:],
+    ]
+
+
+def test_hydrated_service_list_is_empty_when_every_service_vanished() -> None:
+    ids = _service_ids(3)
+    cli = FakeCli("service", ids)
+    cli.vanish_on_list = set(ids)
+    with fake_daemon(cli) as client:
+        assert client.service.list(hydrate=True) == []
+    assert [len(batch) for batch in cli.resolves()] == [3, 1, 2, 1, 1]
+    assert cli.inspects() == []
+
+
+@pytest.mark.parametrize("formatted", [True, False], ids=["resolution", "inspection"])
+@pytest.mark.parametrize("failure", list(INSPECT_FAILURES))
+def test_hydrated_service_list_does_not_hide_other_failures(
+    failure: str, formatted: bool
+) -> None:
+    ids = _service_ids(4)
+    cli = FakeCli("service", ids)
+    expected = INSPECT_FAILURES[failure]
+    with (
+        fake_daemon(cli) as client,
+        patch(
+            "subprocess.run",
+            side_effect=cli.failing({"inspect"}, failure, formatted=formatted),
+        ),
+        pytest.raises(expected) as caught,
+    ):
+        client.service.list(hydrate=True)
+    assert type(caught.value) is expected
+    assert len(cli.resolves()) == 1
+    assert len(cli.inspects()) == (0 if formatted else 1)
+
+
+def test_hydrated_service_list_matches_results_by_exact_identity() -> None:
+    ids = _service_ids(3)
+    cli = FakeCli("service", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        for service in client.service.list(hydrate=True):
+            assert service._inspect_result is not None
+            assert service._inspect_result.id == service.id
+        cli.corrupt = {ids[1]: identity_of("service", 99)}
+        with pytest.raises(ParsingError):
+            client.service.list(hydrate=True)
+    assert len(cli.inspects()) == 1
+
+
+_SERVICE_MUTATIONS: dict[str, Callable[[DockerClient, Service], object]] = {
+    "handle-update": lambda client, service: service.update(replicas=2),
+    "handle-scale": lambda client, service: service.scale(2),
+    "handle-remove": lambda client, service: service.remove(),
+    "cli-update": lambda client, service: client.service.update(service, force=True),
+    "cli-scale": lambda client, service: client.service.scale({service: 2}),
+    "cli-rollback": lambda client, service: client.service.rollback(service),
+    "cli-remove": lambda client, service: client.service.remove([service]),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_SERVICE_MUTATIONS))
+def test_mutating_call_releases_only_that_services_pin(mutation: str) -> None:
+    ids = _service_ids(2)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        mutated, untouched = client.service.list(hydrate=True)
+        _SERVICE_MUTATIONS[mutation](client, mutated)
+        before = len(cli.inspects())
+        assert untouched.spec is not None
+        assert len(cli.inspects()) == before
+        assert mutated.spec is not None
+        assert len(cli.inspects()) == before + 1
+
+
+@pytest.mark.parametrize("mutation", list(_SERVICE_MUTATIONS))
+def test_failed_mutation_still_releases_the_services_pin(mutation: str) -> None:
+    ids = _service_ids(1)
+    cli = FakeCli("service", ids)
+    failing = cli.failing({"update", "scale", "rollback", "remove"}, "command")
+    with fake_daemon(cli) as client:
+        (service,) = client.service.list(hydrate=True)
+        with (
+            patch("subprocess.run", side_effect=failing),
+            pytest.raises(DockerException),
+        ):
+            _SERVICE_MUTATIONS[mutation](client, service)
+        before = len(cli.inspects())
+        assert service.spec is not None
+    assert len(cli.inspects()) == before + 1
+
+
+def test_copied_hydrated_service_and_batch_inspected_service_hold_no_pin() -> None:
+    ids = _service_ids(1)
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        (service,) = client.service.list(hydrate=True)
+        assert service._pinned is True
+        assert copy.copy(service)._pinned is False
+        assert pickle.loads(pickle.dumps(service))._pinned is False
+        (inspected,) = client.service.inspect(ids)
+        assert inspected._pinned is False

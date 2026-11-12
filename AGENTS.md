@@ -11,7 +11,7 @@ The public API exports `DockerClient`, resource classes, a shared `docker` clien
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.
 `DockerClient(inherited_environment_names=...)` selects exact ambient names before explicit overlays. `None` preserves `inherit_environment` behavior; an empty collection inherits nothing. This doesn't confine executable lookup, configuration files, or credential helpers; see the runtime guide.
 The installed `pywhales` console entry point only prints a notice; it isn't a Docker command runner.
-Container, image, network, and volume `list(hydrate=True)` batch-inspect and pin returned snapshots; default listings remain lazy. Ordinary cache expiry uses monotonic time, and copying or unpickling clears freshness and pins.
+Container, image, network, volume, node, service, config, and secret `list(hydrate=True)` batch-inspect and pin returned snapshots; default listings remain lazy. Ordinary cache expiry uses monotonic time, and copying or unpickling clears freshness and pins.
 
 Bounded observation sits on top of the command groups:
 
@@ -20,7 +20,8 @@ Bounded observation sits on top of the command groups:
 - `InspectionPolicy.max_total_archive_stderr_bytes` separately bounds actual direct-archive stderr reads, including after local reap. Opting in drains load output during upload and save stderr while consumption is paused; nested/copied accounts and launch-retained cleanup follow the runtime and image guides. It isn't a total-memory bound.
 - Multi-image pull/push fanout fits the observation's remaining child slots, capped at four. Sizing doesn't reserve capacity or change immediate launch refusals; see the image guide.
 - `pywhales.convergence.wait()` watches a captured Swarm service generation, fixed stack membership, selected Swarm nodes, selected Compose services, or standalone containers. Node readiness uses fixed IDs and an explicit manager subset, not version fencing; `capture_nodes(require_leader=True)` additionally requires exactly one observed designated leader on both clear passes. It ends in success, failure, deadline, or cancellation and never mutates anything. Compose and container captures optionally enable `fail_on_exit` and `fail_on_unhealthy`; see the convergence guide.
-- Convergence task and container inspections use policy-sized batches with ordered single-ID fallback. Service/node inspection and standalone reference resolution stay scalar; failure classifications and complete-cycle publication are preserved.
+- Convergence task, container, node and stack-service inspections use policy-sized batches with ordered single-ID fallback; service batches never mix client configs. Scalar service capture and standalone reference resolution stay single-call; failure classifications, `NodeMissing` and complete-cycle publication are preserved.
+- Reconciliation convergence adapters may renew their lease through `ActionContext.renew_lease(ttl)` between short waits; nothing renews in the background.
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
 - Admission `AdmissionOwner(..., owner_demand_capacity=...)` bounds active declared demand across classes for immediate/queued grants and resize growth. Separate `ClassLimit.pending_demand_capacity` and `owner_pending_demand_capacity` bound queued demand; immediate grants bypass those queue-only bounds. See the admission guide for growth guards and `owner_demand_full`.
 - `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 11. Completion/refusal `stop_reason` uses a closed vocabulary, including `total_io`, `buffer_output_record` and `buffer_stderr_history`; `BoundedExporter.stop_reason_counts` counts every offer, including dropped records. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
@@ -41,6 +42,7 @@ Bounded observation sits on top of the command groups:
 | `pywhales/_bounded_capture.py`, `pywhales/_scoped_launch.py`, `pywhales/_launch_limits.py` | Bounded interruptible capture and launch preflight; related helpers are `_capture_pipes.py`, `_readiness.py`, `_archive_deadline.py`, `_stdin_pump.py`, `_environment.py` |
 | `pywhales/utils.py` | Subprocess execution, common conversions, Pydantic model base |
 | `pywhales/_process_stream.py` | Process-backed streaming and lifecycle ownership |
+| `pywhales/_reclaim.py` | Shared reclaimer that closes stream cores after their public handles are collected |
 | `pywhales/_stream_buffer.py` | Thread-safe output buffering and byte accounting |
 | `pywhales/_environment.py` | Effective child environments and safe container `envs` forwarding |
 | `pywhales/telemetry/` | Admission decision, launch, completion and refusal records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |

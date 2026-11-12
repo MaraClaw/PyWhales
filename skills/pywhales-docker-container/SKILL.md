@@ -28,7 +28,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes source APIs for project version 1.2.1.
+This guidance describes source APIs for project version 1.2.5.
 An installed version string alone isn't proof of support; check actual
 capabilities before use.
 
@@ -44,7 +44,9 @@ are not part of this workflow.
 3. Check installed signatures, return annotations/overloads, and `help()` before
    adding unfamiliar arguments or assuming a closeable stream. For inventory,
    check supported kinds too; for Swarm waits, check the supported service modes.
-   For hydrated listings, check `list(hydrate=True)` on each needed resource group.
+   For hydrated listings, check `list(hydrate=True)` on each needed resource group,
+   including node, service, config and secret. For reconciliation that observes
+   long rollouts, check `ActionContext.renew_lease` and `JournalStore.renew`.
    For shared IO, archive stderr, launch-attempt and child-slot budgets, bounded uploads, owner active
    and class/owner queued demand, `inherited_environment_names`, strict workload errors,
    schema-11 stop attribution, exporter counts and admission correlation,
@@ -74,7 +76,7 @@ are not part of this workflow.
 | Building images, passing build args, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
 | Observing executions and preflight refusals with schema-11 stop reasons and exporter offer counts, measuring admission waits and correlating launches/refusals, or bounding concurrent work, owner active demand and class/owner queued demand with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
-| Bounding shared IO bytes, launch attempts, owned local CLI children, inspection, inventory, streams, or stdin uploads; waiting for Swarm node readiness with optional leadership, services/jobs/stacks, Compose services, or standalone containers with completion, restart budgets, `fail_on_exit`, and `fail_on_unhealthy`; or evaluating opt-in reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
+| Bounding shared IO bytes, launch attempts, owned local CLI children, inspection, inventory, streams, or stdin uploads; waiting for Swarm node readiness with optional leadership, services/jobs/stacks, Compose services, or standalone containers with completion, restart budgets, `fail_on_exit`, and `fail_on_unhealthy`; or evaluating opt-in reconciliation and lease renewal during observation | [Observation budgets and convergence](references/observation-and-convergence.md) |
 | Checking installed API support and verifying the user's automation | [Usage validation](references/validation.md) |
 
 ## Quick Translation

@@ -30,10 +30,37 @@ class ActionContext:
     Adapters must call check_current immediately before every SDK launch, resolve
     and verify approved input externally, and never nest admission. Docker cannot
     enforce this fence; a pause after a check still races with lease transfer.
+    Only the convergence adapter's context can renew the lease, explicitly, so a
+    stalled observer still loses it; no timer or thread renews on its behalf.
     """
 
     spec: OperationSpec
     check_current: Callable[[], None] = field(repr=False, compare=False)
+    renew_hook: Callable[[float], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def renew_lease(self, ttl: float) -> None:
+        """Extend the worker's live lease to ``ttl`` seconds from the store clock.
+
+        Call it between short convergence waits. After this call returns, the
+        context's check_current follows the renewed journal entry.
+
+        Args:
+            ttl: Positive finite lease duration in seconds, counted from the
+                store's own clock at renewal, not from the previous expiry.
+
+        Raises:
+            RuntimeError: This context carries no renewal hook, as for inventory
+                and mutation.
+            InvalidDescription: ttl is not a positive finite number.
+            StoreConflict: The lease expired or was taken over; stop acting.
+            StoreUnavailable: The store failed and the renewal may have committed;
+                stop acting. Later calls on this context raise the same failure.
+        """
+        if self.renew_hook is None:
+            raise RuntimeError("Lease renewal is only available while observing")
+        self.renew_hook(ttl)
 
 
 class InventoryDisposition(StrEnum):

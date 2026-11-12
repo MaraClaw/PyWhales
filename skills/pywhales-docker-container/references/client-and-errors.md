@@ -184,9 +184,11 @@ for result shapes, filters and destructive-timeout handling.
 
 For tables that read many resource properties, use the keyword-only
 `hydrate=True` on `client.container.list`, `client.image.list`,
-`client.network.list`, or `client.volume.list`. `client.ps(hydrate=True)` is the
-container alias. Default listings remain lazy and keep their existing ordering;
-hydrated image listings deduplicate in first-seen CLI order. All return lists.
+`client.network.list`, `client.volume.list`, or the Swarm groups
+`client.node.list`, `client.service.list`, `client.config.list` and
+`client.secret.list`. `client.ps(hydrate=True)` is the container alias. Default
+listings remain lazy and keep their existing ordering; hydrated image listings
+deduplicate in first-seen CLI order. All return lists.
 
 ```python
 from pywhales import DockerClient
@@ -202,9 +204,18 @@ match exact full IDs (exact names for volumes), and vanished resources are
 omitted by re-probing only affected chunks. Other inspection failures propagate.
 Each chunk is its own snapshot, not an atomic snapshot of the whole daemon.
 
+Swarm listings need a manager endpoint; `NotASwarmManager`, timeouts and
+malformed responses propagate rather than producing an empty or partial list.
+`service ls` prints truncated IDs, so a hydrated service listing adds one
+`service inspect --format {{.ID}}` launch per chunk to expand them before the
+snapshot inspect: about three launches for up to 100 services. A node counts as
+removed only when the CLI reports exactly `node <ID> not found` for a requested
+ID; there is no `NoSuchNode` exception.
+
 Hydrated properties keep their pinned snapshots until a successful explicit
-`reload()` or a mutation through that handle releases the pin. A failed mutation
-launch also releases it. Mutating by a plain name or through another handle
+`reload()` or a mutation through that handle releases the pin, including Swarm
+node update/promote/demote/remove, service update/scale/rollback/remove, and
+config and secret remove. A failed mutation launch also releases it. Mutating by a plain name or through another handle
 doesn't invalidate this instance; call `reload()` when fresh state is needed.
 Container context cleanup refreshes formerly pinned state before stopping or
 removing, so use context management only for resources the application owns.

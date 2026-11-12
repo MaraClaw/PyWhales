@@ -16,6 +16,8 @@ from pywhales.reconciliation._errors import (
     AdapterUnavailable,
     AmbiguousMutation,
     IdentityConflict,
+    StoreConflict,
+    StoreUnavailable,
 )
 from pywhales.reconciliation._intent import OperationSpec
 from pywhales.reconciliation._journal import (
@@ -62,6 +64,45 @@ def _outcome(progress: Progress, outcome: Outcome) -> Progress:
             assert_never(unreachable)
 
 
+class _ObservedLease:
+    """Latest journal entry of one observation, advanced only by its renewals.
+
+    Renewal bumps the entry version, so checks, further renewals and the final
+    commit must all use the entry returned by the last successful renewal. A
+    failed renewal may still have committed, so it halts this object for good:
+    every later access raises the same failure instead of reusing a prior entry.
+    """
+
+    def __init__(self, store: JournalStore, entry: JournalEntry) -> None:
+        """Track ``entry``, the unreleased OBSERVING commit that holds the lease."""
+        self._store = store
+        self._entry = entry
+        self._halt: StoreConflict | StoreUnavailable | None = None
+
+    @property
+    def entry(self) -> JournalEntry:
+        """Return the latest entry, or raise the failure that halted renewal."""
+        if self._halt is not None:
+            raise self._halt
+        return self._entry
+
+    def check_current(self) -> None:
+        """Verify the latest entry against the store."""
+        self._store.verify(self.entry)
+
+    def renew(self, ttl: float) -> None:
+        """Renew the latest entry's worker lease, adopting the renewed entry."""
+        entry = self.entry
+        lease = entry.lease
+        if lease is None:
+            raise StoreConflict()
+        try:
+            self._entry = self._store.renew(entry, LeaseRequest(lease.worker, ttl))
+        except (StoreConflict, StoreUnavailable) as error:
+            self._halt = error
+            raise
+
+
 class Controller:
     """Reconcile one named operation per call using explicitly supplied adapters.
 
@@ -69,7 +110,10 @@ class Controller:
     reconcile. Schedule passes periodically as well as on non-durable event hints.
     Every pass inventories, including previously successful operations. A completed
     pass releases its lease; interrupted work is recovered after lease expiry.
-    Store conflicts/unavailability halt the pass without further adapter actions.
+    A convergence adapter may renew the lease through its context while observing;
+    the outcome commit and release then use the renewed entry.
+    Store conflicts/unavailability, including failed renewals, halt the pass
+    without further adapter actions or an outcome commit.
     """
 
     def __init__(
@@ -220,9 +264,12 @@ class Controller:
             ),
             release=False,
         )
-        context = self._context(observing)
+        lease = _ObservedLease(self.store, observing)
+        lease.check_current()
+        context = ActionContext(spec, lease.check_current, lease.renew)
         try:
             outcome = self.adapters.convergence.observe(context, evidence.resources)
         except DockerException, OSError:
             raise AdapterUnavailable() from None
-        return self._commit(observing, _outcome(observing.progress, outcome))
+        latest = lease.entry
+        return self._commit(latest, _outcome(latest.progress, outcome))

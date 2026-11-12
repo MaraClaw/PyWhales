@@ -1,5 +1,9 @@
+import copy
 import datetime as dt
+import inspect
 import json
+import pickle
+from collections.abc import Callable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -14,6 +18,12 @@ from pywhales.exceptions import (
     NoSuchConfig,
     NoSuchService,
     NotASwarmManager,
+)
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
 )
 
 
@@ -329,3 +339,169 @@ def test_secret_removed_inside_its_context_exits_cleanly(
         assert not my_secret.exists()
     assert not my_secret.exists()
     assert not docker_client.secret.exists("removed_in_context")
+
+
+def _secret_ids(count: int) -> list[str]:
+    return [identity_of("secret", index) for index in range(count)]
+
+
+def test_hydrated_secret_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
+    ids = _secret_ids(5)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        secrets = client.secret.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [secret.id for secret in secrets] == ids
+        for secret in secrets:
+            assert secret._inspect_result is not None
+            assert secret._inspect_result.id == secret.id
+        assert [secret.spec.name for secret in secrets if secret.spec is not None] == [
+            f"sec-{index:04d}" for index in range(5)
+        ]
+    assert launches == 4
+    assert cli.lists() == [["docker-test", "secret", "list", "--quiet"]]
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+    assert len(cli.launches) == launches
+
+
+@pytest.mark.parametrize(
+    ("count", "chunks"), [(0, []), (100, [100]), (101, [100, 1])], ids=str
+)
+def test_hydrated_secret_list_inspects_at_most_one_chunk_bound_per_launch(
+    count: int, chunks: list[int]
+) -> None:
+    ids = _secret_ids(count)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli) as client:
+        secrets = client.secret.list(hydrate=True)
+    assert [secret.id for secret in secrets] == ids
+    assert [len(batch) for batch in cli.inspects()] == chunks
+
+
+def test_default_secret_list_stays_lazy_and_expiring() -> None:
+    ids = _secret_ids(3)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli) as client:
+        secrets = client.secret.list([("name", "token")])
+        assert [secret.id for secret in secrets] == ids
+        assert cli.inspects() == []
+        assert secrets[0].spec is not None
+        assert secrets[0].spec is not None
+        hydrate = inspect.signature(client.secret.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.lists() == [
+        ["docker-test", "secret", "list", "--quiet", "--filter", "name=token"]
+    ]
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+    assert len(cli.launches) == 3
+
+
+def test_vanished_secrets_reprobe_only_the_affected_chunk() -> None:
+    ids = _secret_ids(6)
+    cli = FakeCli("secret", ids)
+    cli.vanish_on_list = {ids[4]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        secrets = client.secret.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [secret.id for secret in secrets] == [
+            identity for identity in ids if identity != ids[4]
+        ]
+        assert all(secret.spec is not None for secret in secrets)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [
+        ids[:3],
+        ids[3:],
+        ids[3:4],
+        ids[4:],
+        ids[4:5],
+        ids[5:],
+    ]
+
+
+def test_hydrated_secret_list_is_empty_when_every_secret_vanished() -> None:
+    ids = _secret_ids(3)
+    cli = FakeCli("secret", ids)
+    cli.vanish_on_list = set(ids)
+    with fake_daemon(cli) as client:
+        assert client.secret.list(hydrate=True) == []
+    assert [len(batch) for batch in cli.inspects()] == [3, 1, 2, 1, 1]
+
+
+@pytest.mark.parametrize("failure", list(INSPECT_FAILURES))
+def test_hydrated_secret_list_does_not_hide_other_inspect_failures(
+    failure: str,
+) -> None:
+    ids = _secret_ids(4)
+    cli = FakeCli("secret", ids)
+    expected = INSPECT_FAILURES[failure]
+    with (
+        fake_daemon(cli) as client,
+        patch("subprocess.run", side_effect=cli.failing({"inspect"}, failure)),
+        pytest.raises(expected) as caught,
+    ):
+        client.secret.list(hydrate=True)
+    assert type(caught.value) is expected
+    assert len(cli.inspects()) == 1
+
+
+def test_hydrated_secret_list_matches_results_by_exact_identity() -> None:
+    ids = _secret_ids(3)
+    cli = FakeCli("secret", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        for secret in client.secret.list(hydrate=True):
+            assert secret._inspect_result is not None
+            assert secret._inspect_result.id == secret.id
+        cli.corrupt = {ids[1]: identity_of("secret", 99)}
+        with pytest.raises(ParsingError):
+            client.secret.list(hydrate=True)
+
+
+_SECRET_MUTATIONS: dict[str, Callable[[DockerClient, Secret], object]] = {
+    "handle-remove": lambda client, secret: secret.remove(),
+    "cli-remove": lambda client, secret: client.secret.remove(secret),
+    "cli-remove-list": lambda client, secret: client.secret.remove([secret]),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_SECRET_MUTATIONS))
+def test_mutating_call_releases_only_that_secrets_pin(mutation: str) -> None:
+    ids = _secret_ids(2)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli) as client:
+        mutated, untouched = client.secret.list(hydrate=True)
+        _SECRET_MUTATIONS[mutation](client, mutated)
+        before = len(cli.inspects())
+        assert untouched.spec is not None
+        assert len(cli.inspects()) == before
+        assert mutated.spec is not None
+        assert len(cli.inspects()) == before + 1
+
+
+@pytest.mark.parametrize("mutation", list(_SECRET_MUTATIONS))
+def test_failed_mutation_still_releases_the_secrets_pin(mutation: str) -> None:
+    ids = _secret_ids(1)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli) as client:
+        (secret,) = client.secret.list(hydrate=True)
+        with (
+            patch("subprocess.run", side_effect=cli.failing({"remove"}, "command")),
+            pytest.raises(DockerException),
+        ):
+            _SECRET_MUTATIONS[mutation](client, secret)
+        before = len(cli.inspects())
+        assert secret.spec is not None
+    assert len(cli.inspects()) == before + 1
+
+
+def test_copied_hydrated_secret_and_batch_inspected_secret_hold_no_pin() -> None:
+    ids = _secret_ids(1)
+    cli = FakeCli("secret", ids)
+    with fake_daemon(cli) as client:
+        (secret,) = client.secret.list(hydrate=True)
+        assert secret._pinned is True
+        assert copy.copy(secret)._pinned is False
+        assert pickle.loads(pickle.dumps(secret))._pinned is False
+        (inspected,) = client.secret.inspect(ids)
+        assert inspected._pinned is False

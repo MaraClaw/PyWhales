@@ -1,4 +1,7 @@
+import copy
+import inspect
 import json
+import pickle
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -11,6 +14,12 @@ from pywhales.client_config import ParsingError
 from pywhales.components.node.models import NodeInspectResult
 from pywhales.exceptions import DockerException
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 def test_batch_inspect_matches_node_hostnames_and_hydrates_cache() -> None:
@@ -296,3 +305,204 @@ def test_node_ps_launches_for_current_node_or_nonempty_selection(
         *selected,
     ]
     assert [task.id for task in tasks] == ["task-id"]
+
+
+def _node_ids(count: int) -> list[str]:
+    return [identity_of("node", index) for index in range(count)]
+
+
+def test_hydrated_node_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
+    ids = _node_ids(5)
+    cli = FakeCli("node", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        nodes = client.node.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [node.id for node in nodes] == ids
+        for node in nodes:
+            assert node._inspect_result is not None
+            assert node._inspect_result.id == node.id
+        assert [
+            node.description.hostname for node in nodes if node.description is not None
+        ] == [f"host-{identity[:7]}" for identity in ids]
+        assert all(node.status is not None for node in nodes)
+    assert launches == 4
+    assert cli.lists() == [["docker-test", "node", "list", "--quiet"]]
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+    assert len(cli.launches) == launches
+
+
+@pytest.mark.parametrize(
+    ("count", "chunks"), [(0, []), (100, [100]), (101, [100, 1])], ids=str
+)
+def test_hydrated_node_list_inspects_at_most_one_chunk_bound_per_launch(
+    count: int, chunks: list[int]
+) -> None:
+    ids = _node_ids(count)
+    cli = FakeCli("node", ids)
+    with fake_daemon(cli) as client:
+        nodes = client.node.list(hydrate=True)
+    assert [node.id for node in nodes] == ids
+    assert [len(batch) for batch in cli.inspects()] == chunks
+
+
+def test_default_node_list_stays_lazy_and_expiring() -> None:
+    ids = _node_ids(3)
+    cli = FakeCli("node", ids)
+    with fake_daemon(cli) as client:
+        nodes = client.node.list()
+        assert [node.id for node in nodes] == ids
+        assert cli.inspects() == []
+        assert nodes[0].status is not None
+        assert nodes[0].status is not None
+        hydrate = inspect.signature(client.node.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.lists() == [["docker-test", "node", "list", "--quiet"]]
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+    assert len(cli.launches) == 3
+
+
+def test_vanished_nodes_reprobe_only_the_affected_chunk() -> None:
+    ids = _node_ids(6)
+    cli = FakeCli("node", ids)
+    cli.vanish_on_list = {ids[1], ids[2]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        nodes = client.node.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [node.id for node in nodes] == [ids[0], *ids[3:]]
+        assert all(node.status is not None for node in nodes)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [
+        ids[:3],
+        ids[:1],
+        ids[1:3],
+        ids[1:2],
+        ids[2:3],
+        ids[3:],
+    ]
+
+
+def test_hydrated_node_list_is_empty_when_every_node_vanished() -> None:
+    ids = _node_ids(3)
+    cli = FakeCli("node", ids)
+    cli.vanish_on_list = set(ids)
+    with fake_daemon(cli) as client:
+        assert client.node.list(hydrate=True) == []
+    assert [len(batch) for batch in cli.inspects()] == [3, 1, 2, 1, 1]
+
+
+@pytest.mark.parametrize("failure", list(INSPECT_FAILURES))
+def test_hydrated_node_list_does_not_hide_other_inspect_failures(failure: str) -> None:
+    ids = _node_ids(4)
+    cli = FakeCli("node", ids)
+    expected = INSPECT_FAILURES[failure]
+    with (
+        fake_daemon(cli) as client,
+        patch("subprocess.run", side_effect=cli.failing({"inspect"}, failure)),
+        pytest.raises(expected) as caught,
+    ):
+        client.node.list(hydrate=True)
+    assert type(caught.value) is expected
+    assert len(cli.inspects()) == 1
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        pytest.param(
+            lambda ids: "Error response from daemon: node unrequested not found",
+            id="unrequested-node",
+        ),
+        pytest.param(
+            lambda ids: (
+                f"Error response from daemon: node {ids[0]} not found\n"
+                "Error response from daemon: boom"
+            ),
+            id="mixed-with-another-failure",
+        ),
+        pytest.param(lambda ids: f"Error: No such node: {ids[0]}", id="other-phrase"),
+    ],
+)
+def test_hydrated_node_list_bisects_only_exact_missing_node_responses(
+    stderr: Callable[[list[str]], str],
+) -> None:
+    ids = _node_ids(4)
+    cli = FakeCli("node", ids)
+    with (
+        fake_daemon(cli) as client,
+        patch(
+            "subprocess.run",
+            side_effect=cli.failing({"inspect"}, stderr(ids).encode()),
+        ),
+        pytest.raises(DockerException) as caught,
+    ):
+        client.node.list(hydrate=True)
+    assert type(caught.value) is DockerException
+    assert len(cli.inspects()) == 1
+
+
+def test_hydrated_node_list_matches_results_by_exact_identity() -> None:
+    ids = _node_ids(3)
+    cli = FakeCli("node", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        for node in client.node.list(hydrate=True):
+            assert node._inspect_result is not None
+            assert node._inspect_result.id == node.id
+        cli.corrupt = {ids[1]: identity_of("node", 99)}
+        with pytest.raises(ParsingError):
+            client.node.list(hydrate=True)
+
+
+_NODE_MUTATIONS: dict[str, Callable[[DockerClient, Node], object]] = {
+    "handle-update": lambda client, node: node.update(availability="drain"),
+    "cli-update": lambda client, node: client.node.update(node, role="worker"),
+    "promote": lambda client, node: client.node.promote(node),
+    "promote-list": lambda client, node: client.node.promote([node]),
+    "demote": lambda client, node: client.node.demote(node),
+    "remove": lambda client, node: client.node.remove(node),
+    "remove-force": lambda client, node: client.node.remove([node], force=True),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_NODE_MUTATIONS))
+def test_mutating_call_releases_only_that_nodes_pin(mutation: str) -> None:
+    ids = _node_ids(2)
+    cli = FakeCli("node", ids)
+    with fake_daemon(cli) as client:
+        mutated, untouched = client.node.list(hydrate=True)
+        _NODE_MUTATIONS[mutation](client, mutated)
+        before = len(cli.inspects())
+        assert untouched.status is not None
+        assert len(cli.inspects()) == before
+        assert mutated.status is not None
+        assert len(cli.inspects()) == before + 1
+
+
+@pytest.mark.parametrize("mutation", list(_NODE_MUTATIONS))
+def test_failed_mutation_still_releases_the_nodes_pin(mutation: str) -> None:
+    ids = _node_ids(1)
+    cli = FakeCli("node", ids)
+    failing = cli.failing({"update", "promote", "demote", "remove"}, "command")
+    with fake_daemon(cli) as client:
+        (node,) = client.node.list(hydrate=True)
+        with (
+            patch("subprocess.run", side_effect=failing),
+            pytest.raises(DockerException),
+        ):
+            _NODE_MUTATIONS[mutation](client, node)
+        before = len(cli.inspects())
+        assert node.status is not None
+    assert len(cli.inspects()) == before + 1
+
+
+def test_copied_hydrated_node_and_batch_inspected_node_hold_no_pin() -> None:
+    ids = _node_ids(1)
+    cli = FakeCli("node", ids)
+    with fake_daemon(cli) as client:
+        (node,) = client.node.list(hydrate=True)
+        assert node._pinned is True
+        assert copy.copy(node)._pinned is False
+        assert pickle.loads(pickle.dumps(node))._pinned is False
+        (inspected,) = client.node.inspect(ids)
+        assert inspected._pinned is False
