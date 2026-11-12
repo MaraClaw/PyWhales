@@ -31,7 +31,8 @@ Opt-in, in-process FIFO admission around caller-supplied work. It adds no execut
 
 - `operation_scope` adds the owner id to a `ContextVar` and sets telemetry's current admission ID around user operations, stream factory and source entry, each `next()`, and source exit. Both tokens reset on exit; nested different owners use the innermost ID (`None` for an unobserved owner). Same-owner nesting in that context raises `AdmissionReentryError`; cross-thread nesting is unsupported.
 - `AdmittedStream` holds one permit until source `__exit__` and any in-flight read finish. `_begin_close` is the only call that takes the owner lock while the stream lock is held, so don't add the reverse order. It ends resize eligibility without releasing the reservation.
-- Source exit runs before waiting on an in-flight read so it can wake a blocked `next()`. `close()` is idempotent, concurrent closers wait for one cleanup owner, and a bare loop `break` keeps the permit.
+- Source exit runs before waiting on an in-flight read so it can wake a blocked `next()`. `close()` is idempotent, concurrent closers wait for one cleanup owner, and a bare loop `break` keeps the permit while the stream is reachable.
+- A dropped stream is closed after garbage collection by the shared reclaimer thread through the same `close()` path: source exit, any in-flight read, then `_release`. Its finalizer only enqueues the internal core and never enters `_owner.py`. The [runtime guide](../AGENTS.md#observation-and-subprocesses) covers the handle and core split.
 - `__exit__` returns `False`. A cleanup failure after a body failure joins it in a `BaseExceptionGroup`; interrupted cleanup waits keep waiting and are combined, not dropped. Failed setup releases without exiting a half-entered source.
 - One stream permit covers every child of its source, including composite image streams. Don't admit those children again through the same owner.
 
@@ -52,6 +53,7 @@ Paths are under `tests/pywhales/`. None use the `docker_client` fixture: Docker 
 - `test_admission_owner_pending_demand.py`: cross-class queue-demand bounds and reuse, immediate-grant bypass, rejection precedence, independent owners, terminal cleanup, saturating counters and unlocked schema-11 refusal delivery.
 - `test_admission_owner_demand.py`, `test_admission_owner_demand_streams.py`: owner-wide active demand: validation, fast/queued grants, resize and cross-class growth exclusion, FIFO, cancellation/close, stream retention through source exit and in-flight reads, saturating counter and unlocked refusal telemetry.
 - `test_admission_streams.py`, `test_admission_stream_races.py`, `test_admission_processes.py`: cleanup order, error grouping, one permit over real children.
+- `test_admission_stream_reclaim.py`: dropped streams exit their source before release, and collection under the owner or stream lock does no cleanup inline.
 - `test_admission_resize.py`, `test_admission_resize_races.py`, `test_admission_concurrency.py`: reservation, close, cancel, and grant races.
 - `test_admission_telemetry.py`, `test_admission_telemetry_correlation.py`, `test_admission_telemetry_locks.py`: decision outcomes, disabled overhead, observer isolation, nested call/stream correlation, cross-thread cancellation, and unlocked observer delivery.
 - `test_admission_types.py` holds `assert_type` checks for `ty`; pytest collects nothing from it.
