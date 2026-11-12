@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import override
 
@@ -27,6 +27,7 @@ from pywhales.reconciliation import (
     DesiredDescription,
     IdentityConflict,
     InputReference,
+    InvalidDescription,
     InventoryDisposition,
     InventoryEvidence,
     LeaseRequest,
@@ -68,6 +69,14 @@ def spec() -> OperationSpec:
             target="web",
         ),
     )
+
+
+@dataclass(slots=True)
+class Clock:
+    now: float = 10
+
+    def __call__(self) -> float:
+        return self.now
 
 
 class Endpoint:
@@ -121,6 +130,26 @@ def controller(store: MemoryJournalStore, endpoint: Endpoint) -> Controller:
     return Controller(
         store, ReconciliationAdapters(spec().key.endpoint, endpoint, endpoint, endpoint)
     )
+
+
+class RenewingEndpoint(Endpoint):
+    """Observe in short waits that advance the injected clock, renewing after each."""
+
+    def __init__(self, clock: Clock, waits: int = 3) -> None:
+        super().__init__()
+        self.clock, self.waits = clock, waits
+
+    @override
+    def observe(
+        self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+    ) -> Outcome:
+        outcome = super().observe(context, resources)
+        for _ in range(self.waits):
+            self.clock.now += 4
+            context.renew_lease(5)
+            context.check_current()
+            self.trace.append("renew")
+        return outcome
 
 
 def test_restart_same_spec_returns_existing_result_without_mutation() -> None:
@@ -330,6 +359,94 @@ def test_uncertain_inventory_clears_deadline_detail_without_replay(
         result.progress.convergence is None and result.progress.deadline_detail is None
     )
     assert endpoint.trace == ["inventory"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        Success(),
+        Failure(reason="update_failed"),
+        Deadline(DeadlineDetail(2, ongoing_updates=1)),
+        Cancelled(),
+    ],
+)
+def test_renewed_observation_outlasting_the_lease_commits_like_a_short_one(
+    outcome: Outcome,
+) -> None:
+    quick = Endpoint()
+    quick.outcome = outcome
+    quick_owner = controller(MemoryJournalStore(Clock()), quick)
+    short = quick_owner.reconcile(
+        quick_owner.claim(quick_owner.submit(spec()), LeaseRequest("worker-a", 5))
+    )
+    clock = Clock()
+    store, endpoint = MemoryJournalStore(clock), RenewingEndpoint(clock)
+    endpoint.outcome = outcome
+    owner = controller(store, endpoint)
+    claimed = owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 5))
+    started = clock.now
+    result = owner.reconcile(claimed)
+    assert clock.now - started > 5
+    assert result.progress == short.progress
+    assert result.lease is None
+    assert (result.version, result.generation) == (short.version + 3, short.generation)
+    assert store.read(spec().key) == result
+    assert endpoint.trace == [*quick.trace, "renew", "renew", "renew"]
+
+
+@pytest.mark.parametrize("ttl", [0, -1, float("nan"), float("inf"), True])
+def test_invalid_renewal_ttl_is_rejected_without_touching_the_journal(
+    ttl: float,
+) -> None:
+    store = MemoryJournalStore()
+
+    class InvalidTTLEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            before = store.read(context.spec.key)
+            with pytest.raises(InvalidDescription):
+                context.renew_lease(ttl)
+            assert store.read(context.spec.key) == before
+            return super().observe(context, resources)
+
+    owner = controller(store, InvalidTTLEndpoint())
+    result = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert result.progress.state is AttemptState.SUCCEEDED
+
+
+@pytest.mark.parametrize("stage", ["inventory", "apply"])
+def test_inventory_and_mutation_contexts_cannot_renew(stage: str) -> None:
+    class ProbingEndpoint(Endpoint):
+        @override
+        def inventory(self, context: ActionContext) -> InventoryEvidence:
+            if stage == "inventory":
+                context.renew_lease(30)
+            return super().inventory(context)
+
+        @override
+        def apply(self, context: ActionContext) -> None:
+            if stage == "apply":
+                context.renew_lease(30)
+            super().apply(context)
+
+    store = MemoryJournalStore()
+    owner = controller(store, ProbingEndpoint())
+    claimed = owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    with pytest.raises(RuntimeError):
+        owner.reconcile(claimed)
+    current = store.read(spec().key)
+    assert current is not None and current.lease == claimed.lease
+
+
+def test_renewal_hook_stays_out_of_context_repr_and_equality() -> None:
+    plain = ActionContext(spec(), lambda: None)
+    hooked = ActionContext(spec(), lambda: None, lambda ttl: None)
+    assert plain == hooked
+    assert "renew" not in repr(hooked)
 
 
 def test_real_cli_deadline_is_journaled_and_repeated_passes_only_observe(

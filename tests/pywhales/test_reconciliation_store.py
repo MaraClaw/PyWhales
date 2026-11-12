@@ -12,6 +12,7 @@ from pywhales.reconciliation import (
     InputReference,
     InvalidDescription,
     JournalEntry,
+    Lease,
     LeaseRequest,
     MemoryJournalStore,
     Progress,
@@ -20,15 +21,7 @@ from pywhales.reconciliation import (
     Transition,
     ownership_labels,
 )
-from tests.pywhales.test_reconciliation import spec
-
-
-@dataclass(slots=True)
-class Clock:
-    now: float = 10
-
-    def __call__(self) -> float:
-        return self.now
+from tests.pywhales.test_reconciliation import Clock, spec
 
 
 def test_atomic_create_if_absent_returns_one_entry_across_workers() -> None:
@@ -101,6 +94,80 @@ def test_expired_lease_cannot_commit_without_transfer() -> None:
     clock.now = 15
     with pytest.raises(StoreConflict):
         store.compare_and_swap(claimed, Transition(Progress()))
+
+
+def test_renew_moves_expiry_from_store_time_and_bumps_only_version() -> None:
+    clock = Clock()
+    store = MemoryJournalStore(clock)
+    claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 5))
+    clock.now = 13
+    renewed = store.renew(claimed, LeaseRequest("worker-a", 5))
+    assert renewed.lease == Lease("worker-a", 18)
+    assert (renewed.version, renewed.generation) == (
+        claimed.version + 1,
+        claimed.generation,
+    )
+    assert renewed.progress == claimed.progress
+    assert store.read(spec().key) == renewed
+    clock.now = 17
+    store.verify(renewed)
+    committed = store.compare_and_swap(
+        renewed, Transition(Progress(AttemptState.UNKNOWN, 1))
+    )
+    assert committed.lease == renewed.lease
+    with pytest.raises(StoreConflict):
+        store.verify(claimed)
+
+
+def test_renew_rejects_stale_forged_foreign_and_released_entries() -> None:
+    store = MemoryJournalStore()
+    claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 30))
+    renewed = store.renew(claimed, LeaseRequest("worker-a", 30))
+    forged = replace(renewed, generation=renewed.generation + 1)
+    for entry, worker in [
+        (claimed, "worker-a"),
+        (forged, "worker-a"),
+        (renewed, "worker-b"),
+    ]:
+        with pytest.raises(StoreConflict):
+            store.renew(entry, LeaseRequest(worker, 30))
+    assert store.read(spec().key) == renewed
+    released = store.compare_and_swap(renewed, Transition(renewed.progress, True))
+    with pytest.raises(StoreConflict):
+        store.renew(released, LeaseRequest("worker-a", 30))
+
+
+def test_expired_lease_cannot_renew_and_missed_renewal_allows_takeover() -> None:
+    clock = Clock()
+    store = MemoryJournalStore(clock)
+    claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 5))
+    clock.now = 13
+    renewed = store.renew(claimed, LeaseRequest("worker-a", 5))
+    clock.now = 17
+    with pytest.raises(StoreConflict):
+        store.claim(renewed, LeaseRequest("worker-b", 5))
+    clock.now = 18
+    with pytest.raises(StoreConflict):
+        store.renew(renewed, LeaseRequest("worker-a", 5))
+    assert store.read(spec().key) == renewed
+    taken = store.claim(renewed, LeaseRequest("worker-b", 5))
+    assert (taken.version, taken.generation) == (
+        renewed.version + 1,
+        renewed.generation + 1,
+    )
+    with pytest.raises(StoreConflict):
+        store.renew(renewed, LeaseRequest("worker-a", 5))
+    with pytest.raises(StoreConflict):
+        store.renew(taken, LeaseRequest("worker-a", 5))
+
+
+@pytest.mark.parametrize("ttl", [0, -1, float("nan"), float("inf"), True])
+def test_renew_requires_a_valid_ttl_and_leaves_the_entry_unchanged(ttl: float) -> None:
+    store = MemoryJournalStore()
+    claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 30))
+    with pytest.raises(InvalidDescription):
+        store.renew(claimed, LeaseRequest("worker-a", ttl))
+    assert store.read(spec().key) == claimed
 
 
 def test_release_invalidates_worker_and_preserves_generation() -> None:
