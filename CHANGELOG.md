@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.2.5
+
+### New Features
+
+- Node, service, config, and secret `list(hydrate=True)` return handles with
+  pinned inspection snapshots, using chunks of at most 100 resources and
+  affected-chunk re-probes when resources disappear. Hydrated service listings
+  first expand the truncated IDs printed by `service ls`. A removed node is
+  recognized only from exact `node <ID> not found` stderr lines; timeouts,
+  `NotASwarmManager`, and other failures propagate. Exception classification
+  and default listings are unchanged.
+- `JournalStore.renew()` and `MemoryJournalStore.renew()` extend the same
+  worker's unexpired lease to store time plus a validated TTL, incrementing only
+  the entry version. Convergence adapters renew explicitly through
+  `ActionContext.renew_lease(ttl)` between short waits; the controller commits
+  and releases with the renewed entry. A failed renewal halts the pass without an
+  outcome commit, and nothing renews in the background.
+
+### Behavior Changes And Fixes
+
+- Convergence node waits and stack service checks, including the ready-time
+  fence, use policy-sized inspection batches with ordered single-ID fallback.
+  Batches never mix client configs. `NodeMissing`, failure reasons and causes,
+  and deadline details match single-ID checks; outside an observation, launches
+  and arguments are unchanged. `check_service()` accepts a fetched snapshot.
+- Owned process, mapped, multi-image, and admitted streams dropped without
+  `close()` are closed after garbage collection by one shared daemon thread,
+  through the explicit close path: the local CLI is reaped, its child slot
+  returned, workers joined, and any admission permit released after source exit.
+  Finalizers only enqueue work. Multi-image workers are daemon threads, so an
+  unclosed image group no longer blocks interpreter exit.
+- Node update, promote, demote, and remove; service update, scale, rollback, and
+  remove; and config and secret remove release supplied handles' pins, including
+  after failed launches.
+- Custom `JournalStore` implementations must provide `renew()`.
+
+### Documentation
+
+- Updated contributor guides and the consumer skill for Swarm hydrated listings,
+  batched node and stack convergence, stream reclamation, and lease renewal.
+
 ## 1.2.1
 
 ### New Features
