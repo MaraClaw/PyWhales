@@ -129,7 +129,8 @@ nonempty input reports `"limit"` without writing past it. See
 [Bound archive uploads](registry-and-archives.md#bound-archive-uploads).
 
 A stream completes only when its consumer exhausts it, observes a terminal
-error, or closes it; a bare loop `break` doesn't promise a completion record.
+error, or closes it, or after garbage collection of a dropped stream, which a
+background thread closes; a bare loop `break` doesn't promise a completion record.
 Observers run synchronously on the launching/consuming/closing thread, must
 be quick, thread-safe, and non-reentrant, and must not mutate execution state. An ordinary
 `Exception` raised by the observer is contained without being logged and
@@ -284,6 +285,8 @@ with owner.request(control).stream(
 iterator; the permit stays held until exhaustion, an observed failure, or an
 explicit close completes source cleanup and any in-flight read unwinds. A bare
 `break`, local child exit, or unobserved source failure doesn't release it.
+Dropping the stream releases it only after garbage collection, when a
+background thread closes the stream the same way.
 A plain generator needs wrapping in `contextlib.closing` inside the factory.
 Use `stream()`, not `call()`, when returning an owned stream: `call()` releases
 its permit as soon as the callable returns. One stream permit covers all direct

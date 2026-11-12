@@ -304,7 +304,8 @@ The inner context owns only the local CLI process, pipes, and reader threads.
 Consume the stream to exhaustion to observe a nonzero command exit as
 `DockerException`. Exiting early or calling `close()` cancels and reaps the
 local CLI; that cancellation isn't proof the command succeeded and doesn't
-remove daemon-managed containers. A bare loop `break` doesn't close a stream.
+remove daemon-managed containers. A bare loop `break` doesn't close a stream;
+a dropped stream is closed only after garbage collection, so close it yourself.
 Recorded deadline, observation, or reader errors remain deliverable once after
 `close()` or on a clean context exit; cleanup preserves an active body exception.
 

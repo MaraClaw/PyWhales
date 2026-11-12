@@ -58,6 +58,9 @@ Streaming starts eagerly for one unique reference; for several, workers start
 on first consumption of the stream, not at construction or context entry, and
 at most four concurrent transfers run at once. A bare loop `break` doesn't
 close the stream; exhaust it, use its context manager, or call `close()`.
+A dropped stream is closed only after garbage collection; an unclosed
+multi-reference stream doesn't delay interpreter exit, but its local CLIs
+aren't reaped then.
 For a multi-reference stream, the first worker's error stops sibling and
 queued transfers without waiting for further consumption; that error is
 delivered once through iteration, including after an explicit `close()`.
