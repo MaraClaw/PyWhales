@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pywhales.client_config import ParsingError
 from pywhales.convergence._types import DeadlineDetail, Failure, ServiceTarget
 from pywhales.convergence._wire import (
+    ServiceWire,
     canonical,
     inspect_service,
     inspect_tasks,
@@ -75,9 +76,25 @@ def summarize(
     )
 
 
-def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
-    """Inspect a captured generation and count blockers only on desired-running tasks."""
-    service = inspect_service(target.client_config, target.service_id)
+def check_service(
+    target: ServiceTarget, snapshot: ServiceWire | None = None
+) -> ServiceObservation | Failure:
+    """Check a captured generation, counting blockers only on desired-running tasks.
+
+    Args:
+        target: The captured service generation.
+        snapshot: An inspection of ``target.service_id`` the caller already fetched.
+            Omit it to inspect the service here. The task listing is launched here
+            either way.
+
+    Returns:
+        The provisional blocker flags, or a terminal failure for the generation.
+    """
+    service = (
+        inspect_service(target.client_config, target.service_id)
+        if snapshot is None
+        else snapshot
+    )
     if not same_generation(target, service):
         return Failure(reason="superseded", service_id=target.service_id)
     state = service.update.state if service.update is not None else None

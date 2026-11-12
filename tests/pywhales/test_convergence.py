@@ -68,20 +68,39 @@ for identity, sequence in data.get("task_sequences", {}).items():
     count = sum(call[:2] == ["service", "ps"] and call[-1] == identity for call in calls)
     tasks = [item for item in tasks if item["ServiceID"] != identity] + sequence[min(max(count - 1, 0), len(sequence) - 1)]
 if args[:2] == ["node", "inspect"]:
-    entries = data.get("nodes", {}).get(args[2], [None])
-    result = entries[min(calls.count(args) - 1, len(entries) - 1)]
-    if result is None:
-        sys.stderr.write("Error response from daemon: node " + args[2] + " not found\\n")
+    found, failure = [], None
+    for identity in args[2:]:
+        entries = data.get("nodes", {}).get(identity, [None])
+        count = sum(call[:2] == args[:2] and identity in call[2:] for call in calls)
+        result = entries[min(count, len(entries)) - 1]
+        if result is None:
+            failure = failure or "Error response from daemon: node " + identity + " not found\\n"
+        elif isinstance(result, dict) and "error" in result:
+            failure = failure or result["error"]
+        else:
+            found += result
+    if failure is None or found:
+        print(json.dumps(found))
+    if failure:
+        sys.stderr.write(failure)
         sys.exit(1)
-    if isinstance(result, dict) and "error" in result:
-        sys.stderr.write(result["error"])
-        sys.exit(1)
-    print(json.dumps(result))
 elif args[:2] == ["service", "inspect"]:
-    sequence = data.get("sequences", {}).get(args[2])
-    calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
-    count = sum(call[:2] == ["service", "inspect"] and call[2] == args[2] for call in calls)
-    print(json.dumps([sequence[min(count - 1, len(sequence) - 1)] if sequence else data["services"][args[2]]]))
+    found, failure = [], None
+    for identity in args[2:]:
+        sequence = data.get("sequences", {}).get(identity)
+        count = sum(call[:2] == args[:2] and identity in call[2:] for call in calls)
+        entry = sequence[min(count, len(sequence)) - 1] if sequence else data["services"][identity]
+        if entry is None:
+            failure = failure or "Error: No such service: " + identity + "\\n"
+        elif "error" in entry:
+            failure = failure or entry["error"]
+        else:
+            found.append(entry)
+    if failure is None or found:
+        print(json.dumps(found))
+    if failure:
+        sys.stderr.write(failure)
+        sys.exit(1)
 elif args[:2] == ["service", "ps"]:
     if (root / "hang").exists():
         (root / "started").touch()
@@ -4217,6 +4236,8 @@ def test_nodes_hung_child_is_reaped_and_partial_cycle_not_published(
 
 TASK = ["inspect", "--type", "task"]
 CONTAINER = ["inspect", "--type", "container"]
+NODE = ["node", "inspect"]
+SERVICE = ["service", "inspect"]
 
 
 def many(count: int) -> list[str]:
@@ -4635,3 +4656,408 @@ def test_standalone_batch_failures_match_single_probes_in_target_order(
         counts.append(len(launches(tmp_path, CONTAINER)) - 3)
     assert shapes[0] == shapes[1]
     assert counts[1] == expected
+
+
+def many_nodes(count: int) -> list[str]:
+    return [f"node-{index}" for index in range(count)]
+
+
+def many_services(count: int) -> list[str]:
+    return [f"service-{index}" for index in range(count)]
+
+
+def shape_of(result: object) -> object:
+    return outcome_shape(result) if isinstance(result, Failure) else result
+
+
+def test_node_passes_inspect_one_launch_per_chunk(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = many_nodes(5)
+    leader = node(names[0], manager=True)
+    leader["ManagerStatus"]["Leader"] = True
+    store_nodes(
+        tmp_path,
+        {name: [[leader if name == names[0] else node(name)]] for name in names},
+    )
+    chunks = [[*NODE, *names[0:2]], [*NODE, *names[2:4]], [*NODE, names[4]]]
+    singles = [[*NODE, name] for name in names]
+    results: list[Outcome] = []
+    for limit, expected in ((1, singles * 3), (2, chunks * 3)):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, limit)
+        target = capture_nodes(
+            fake_cli,
+            tuple(names),
+            manager_ids=(names[0],),
+            require_leader=True,
+            policy=run_policy,
+            timeout=5,
+        )
+        assert isinstance(target, NodeTarget)
+        results.append(wait(target, policy=run_policy, timeout=5, poll_interval=0.01))
+        assert launches(tmp_path, NODE) == expected
+    assert results == [Success(), Success()]
+
+
+def test_node_removed_mid_wait_matches_single_probes(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = many_nodes(3)
+    nodes: dict[str, list[Any]] = {name: [[node(name)]] for name in names}
+    nodes[names[1]] = [[node(names[1])], None]
+    store_nodes(tmp_path, nodes)
+    shapes: list[object] = []
+    waits: list[list[list[str]]] = []
+    for limit in (1, 3):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, limit)
+        target = capture_nodes(fake_cli, tuple(names), policy=run_policy, timeout=5)
+        assert isinstance(target, NodeTarget)
+        captured = len(launches(tmp_path, NODE))
+        result = wait(target, policy=run_policy, timeout=5, poll_interval=0.01)
+        shapes.append(shape_of(result))
+        waits.append(launches(tmp_path, NODE)[captured:])
+    assert shapes == [outcome_shape(Failure(reason="superseded"))] * 2
+    assert waits == [
+        [[*NODE, names[0]], [*NODE, names[1]]],
+        [[*NODE, *names], [*NODE, names[0]], [*NODE, names[1]]],
+    ]
+
+
+def wrong_state() -> list[dict[str, Any]]:
+    bad = node("node-1")
+    bad["Status"]["State"] = "future"
+    return [bad]
+
+
+NODE_FALLBACKS = [
+    pytest.param(None, 3, ("observation", "superseded"), id="missing"),
+    pytest.param(
+        {"error": "Error response from daemon: permission denied\n"},
+        3,
+        ("observation", "observation"),
+        id="cli-failure",
+    ),
+    pytest.param(
+        {"error": "Error response from daemon: node node-1 not found\ndenied\n"},
+        3,
+        ("observation", "observation"),
+        id="lookalike-missing",
+    ),
+    pytest.param([node("other")], 3, ("malformed", "malformed"), id="foreign-id"),
+    pytest.param(wrong_state(), 2, ("malformed", "malformed"), id="malformed-item"),
+]
+
+
+@pytest.mark.parametrize("stage", ["capture", "wait"])
+@pytest.mark.parametrize("bad,expected,reasons", NODE_FALLBACKS)
+def test_node_batch_failures_match_single_probes_in_target_order(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    stage: str,
+    bad: object,
+    expected: int,
+    reasons: tuple[str, str],
+) -> None:
+    names = many_nodes(3)
+    nodes: dict[str, list[Any]] = {name: [[node(name)]] for name in names}
+    nodes[names[1]] = [bad] if stage == "capture" else [[node(names[1])], bad]
+    store_nodes(tmp_path, nodes)
+    shapes: list[object] = []
+    counts: list[int] = []
+    for limit in (1, 3):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, limit)
+        outcome: object = capture_nodes(
+            fake_cli, tuple(names), policy=run_policy, timeout=5
+        )
+        spent = 0 if stage == "capture" else len(launches(tmp_path, NODE))
+        if stage == "wait":
+            assert isinstance(outcome, NodeTarget)
+            outcome = wait(outcome, policy=run_policy, timeout=5, poll_interval=0.01)
+        shapes.append(shape_of(outcome))
+        counts.append(len(launches(tmp_path, NODE)) - spent)
+    assert shapes[0] == shapes[1]
+    assert counts == [2, expected]
+    assert isinstance(shapes[0], tuple)
+    assert shapes[0][0] == reasons[stage == "wait"]
+
+
+def test_cancellation_reaps_a_hung_node_batch_without_reprobing(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = many_nodes(2)
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    size_two = batched(policy, 2)
+    target = capture_nodes(fake_cli, tuple(names), policy=size_two, timeout=5)
+    assert isinstance(target, NodeTarget)
+    chunk = [*NODE, *names]
+    fifo = tmp_path / "notification"
+    os.mkfifo(fifo)
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["hang_at"] = {"args": chunk, "occurrence": 2, "notify": str(fifo)}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    processes = track_processes(monkeypatch)
+    descriptor = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    cancel = Event()
+    results: list[Outcome] = []
+    worker = Thread(
+        target=lambda: results.append(
+            wait(target, policy=size_two, timeout=30, poll_interval=1, cancel=cancel)
+        )
+    )
+    try:
+        worker.start()
+        ready, _, _ = select.select([descriptor], [], [], 10)
+        assert ready and os.read(descriptor, 32) == b"started"
+        cancel.set()
+    finally:
+        worker.join(5)
+        os.close(descriptor)
+    assert not worker.is_alive()
+    assert results == [Cancelled()]
+    assert_reaped(processes)
+    assert launches(tmp_path, NODE) == [chunk, chunk]
+    assert calls_of(tmp_path)[-1] == chunk
+
+
+def test_node_batching_fits_a_launch_attempt_budget_that_single_probes_exhaust(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    from pywhales.exceptions import ObservationLimitError
+
+    names = many_nodes(4)
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    target = capture_nodes(fake_cli, tuple(names), policy=policy, timeout=5)
+    assert isinstance(target, NodeTarget)
+    budget = {"max_total_launch_attempts": 4}
+    packed = wait(
+        target, policy=batched(policy, 4, **budget), timeout=5, poll_interval=0.01
+    )
+    singles = wait(
+        target, policy=batched(policy, 1, **budget), timeout=5, poll_interval=0.01
+    )
+    assert packed == Success()
+    assert isinstance(singles, Failure) and singles.reason == "observation"
+    assert isinstance(singles.cause, ObservationLimitError)
+
+
+def stack_of(
+    client: DockerClient, policy: InspectionPolicy, names: list[str]
+) -> StackTarget:
+    return StackTarget(services=tuple(capture(client, policy, name) for name in names))
+
+
+def test_stack_inspects_services_in_chunks_each_cycle_and_at_the_fence(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = many_services(5)
+    store(
+        tmp_path,
+        [service(name) for name in names],
+        [task(f"task-{index}", name) for index, name in enumerate(names)],
+    )
+    target = stack_of(fake_cli, policy, names)
+    chunks = [[*SERVICE, *names[0:2]], [*SERVICE, *names[2:4]], [*SERVICE, names[4]]]
+    singles = [[*SERVICE, name] for name in names]
+    results: list[Outcome] = []
+    for limit, expected in ((1, singles * 2), (2, chunks * 2)):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        results.append(
+            wait(target, policy=batched(policy, limit), timeout=5, poll_interval=0.01)
+        )
+        assert launches(tmp_path, SERVICE) == expected
+    assert results == [Success(), Success()]
+
+
+def test_stack_batches_never_span_client_configs(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "docker.py").write_text((tmp_path / "docker.py").read_text())
+    other = DockerClient(client_call=[sys.executable, str(elsewhere / "docker.py")])
+    assert other.client_config is not fake_cli.client_config
+    names = many_services(4)
+    for path, members in ((tmp_path, (0, 1, 3)), (elsewhere, (2,))):
+        store(
+            path,
+            [service(names[index]) for index in members],
+            [task(f"task-{index}", names[index]) for index in members],
+        )
+    clients = (fake_cli, fake_cli, other, fake_cli)
+    target = StackTarget(
+        services=tuple(
+            capture(client, policy, name)
+            for client, name in zip(clients, names, strict=True)
+        )
+    )
+    home_singles = [[*SERVICE, names[0]], [*SERVICE, names[1]], [*SERVICE, names[3]]]
+    home_chunks = [[*SERVICE, names[0], names[1]], [*SERVICE, names[3]]]
+    results: list[Outcome] = []
+    for limit, expected in ((1, home_singles), (4, home_chunks)):
+        for path in (tmp_path, elsewhere):
+            (path / "calls").unlink(missing_ok=True)
+        results.append(
+            wait(target, policy=batched(policy, limit), timeout=5, poll_interval=0.01)
+        )
+        assert launches(tmp_path, SERVICE) == expected * 2
+        assert launches(elsewhere, SERVICE) == [[*SERVICE, names[2]]] * 2
+    assert results == [Success(), Success()]
+
+
+def test_service_removed_before_the_ready_fence_matches_single_probes(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = many_services(3)
+    store(
+        tmp_path,
+        [service(name) for name in names],
+        [task(f"task-{index}", name) for index, name in enumerate(names)],
+    )
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["sequences"] = {names[1]: [service(names[1]), service(names[1]), None]}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    shapes: list[object] = []
+    counts: list[int] = []
+    for limit in (1, 3):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        target = stack_of(fake_cli, policy, names)
+        spent = len(launches(tmp_path, SERVICE))
+        result = wait(
+            target, policy=batched(policy, limit), timeout=5, poll_interval=0.01
+        )
+        assert isinstance(result, Failure)
+        shapes.append(outcome_shape(result))
+        counts.append(len(launches(tmp_path, SERVICE)) - spent)
+    assert shapes[0] == shapes[1]
+    assert isinstance(shapes[0], tuple) and shapes[0][:2] == ("observation", names[1])
+    assert counts == [5, 4]
+
+
+def headless_service(identity: str) -> dict[str, Any]:
+    bad = service(identity)
+    del bad["Spec"]["Mode"]
+    return bad
+
+
+SERVICE_FALLBACKS = [
+    pytest.param(headless_service("service-1"), 2, "ValidationError", id="malformed"),
+    pytest.param(
+        {"error": "Error response from daemon: permission denied\n"},
+        3,
+        "DockerException",
+        id="cli-failure",
+    ),
+    pytest.param(service("other"), 3, "ParsingError", id="foreign-id"),
+]
+
+
+@pytest.mark.parametrize("bad,expected,cause", SERVICE_FALLBACKS)
+def test_stack_batch_failures_match_single_probes_in_target_order(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    bad: object,
+    expected: int,
+    cause: str,
+) -> None:
+    names = many_services(3)
+    store(
+        tmp_path,
+        [service(name) for name in names],
+        [task(f"task-{index}", name) for index, name in enumerate(names)],
+    )
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["sequences"] = {names[1]: [service(names[1]), bad]}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    shapes: list[object] = []
+    counts: list[int] = []
+    for limit in (1, 3):
+        (tmp_path / "calls").unlink(missing_ok=True)
+        target = stack_of(fake_cli, policy, names)
+        spent = len(launches(tmp_path, SERVICE))
+        result = wait(
+            target, policy=batched(policy, limit), timeout=5, poll_interval=0.01
+        )
+        assert isinstance(result, Failure)
+        assert cause in {item.__name__ for item in type(result.cause).__mro__}
+        shapes.append(outcome_shape(result))
+        counts.append(len(launches(tmp_path, SERVICE)) - spent)
+    assert shapes[0] == shapes[1]
+    assert isinstance(shapes[0], tuple) and shapes[0][:2] == ("observation", names[1])
+    assert counts == [2, expected]
+
+
+def test_deadline_reaps_a_hung_service_batch_and_keeps_the_last_complete_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = many_services(2)
+    store(tmp_path, [service(name) for name in names], [task("task-0", names[0])])
+    target = stack_of(fake_cli, policy, names)
+    chunk = [*SERVICE, *names]
+    hang_at(tmp_path, chunk, 2)
+    processes = track_processes(monkeypatch)
+    result = wait(target, policy=batched(policy, 2), timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(DeadlineDetail(2, missing_ready_slots=1))
+    assert_reaped(processes)
+    assert launches(tmp_path, SERVICE) == [
+        *([[*SERVICE, name] for name in names]),
+        chunk,
+        chunk,
+    ]
+    assert calls_of(tmp_path)[-1] == chunk
+
+
+@pytest.mark.parametrize("kind", ["nodes", "stack"])
+def test_node_and_service_chunks_are_preceded_by_an_observation_checkpoint(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    import pywhales.convergence._wire as wire_module
+
+    size_two = batched(policy, 2)
+    target: NodeTarget | StackTarget
+    if kind == "nodes":
+        names = many_nodes(5)
+        store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+        captured = capture_nodes(fake_cli, tuple(names), policy=size_two, timeout=5)
+        assert isinstance(captured, NodeTarget)
+        target, expected = captured, 6
+    else:
+        names = many_services(3)
+        store(
+            tmp_path,
+            [service(name) for name in names],
+            [task(f"task-{index}", name) for index, name in enumerate(names)],
+        )
+        target, expected = stack_of(fake_cli, policy, names), 4
+    events: list[str] = []
+    launch, check = wire_module.run, wire_module.check_observation
+
+    def spy_run(args: Sequence[object]) -> str:
+        pair = "inspect" in args and ("node" in args or "service" in args)
+        events.append("inspect" if pair else "other")
+        return launch(args)
+
+    def spy_check() -> None:
+        events.append("check")
+        check()
+
+    monkeypatch.setattr(wire_module, "run", spy_run)
+    monkeypatch.setattr(wire_module, "check_observation", spy_check)
+    assert wait(target, policy=size_two, timeout=5, poll_interval=0.01) == Success()
+    inspections = [index for index, event in enumerate(events) if event == "inspect"]
+    assert len(inspections) == expected
+    assert all(events[index - 1] == "check" for index in inspections)

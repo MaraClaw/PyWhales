@@ -2,6 +2,7 @@
 
 import math
 import time
+from collections.abc import Iterator
 from threading import Event
 from typing import assert_never
 
@@ -33,7 +34,9 @@ from pywhales.convergence._types import (
     Success,
 )
 from pywhales.convergence._wire import (
+    ServiceWire,
     inspect_service,
+    inspect_services,
     same_generation,
     target_from_wire,
 )
@@ -50,6 +53,15 @@ from pywhales.inventory import InspectionPolicy
 def _positive(value: float) -> None:
     if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
         raise ValueError("Duration must be positive and finite")
+
+
+def _observe(
+    service: ServiceTarget, snapshots: Iterator[ServiceWire] | None
+) -> ServiceObservation | Failure:
+    """Check a service from the cycle's next batched snapshot, or inspect it alone."""
+    if snapshots is None:
+        return check_service(service)
+    return check_service(service, next(snapshots))
 
 
 def capture_service(
@@ -341,13 +353,15 @@ def wait(
     last_complete: DeadlineDetail | None = None
     try:
         with observation(policy, deadline=deadline, cancel=cancel) as state:
+            batched = state.policy.max_references > 1
             while True:
                 check_observation(state)
                 observations: list[ServiceObservation] = []
+                snapshots = inspect_services(targets) if batched else None
                 for service in targets:
                     check_observation(state)
                     current = service.service_id
-                    match check_service(service):
+                    match _observe(service, snapshots):
                         case Failure() as failure:
                             return failure
                         case ServiceObservation() as checked:
@@ -357,11 +371,10 @@ def wait(
                 ready = all(item.ready for item in observations)
                 rechecked_updates = 0
                 if ready:
+                    fences = inspect_services(targets)
                     for service in targets:
                         current = service.service_id
-                        latest = inspect_service(
-                            service.client_config, service.service_id
-                        )
+                        latest = next(fences)
                         if not same_generation(service, latest):
                             return Failure(
                                 reason="superseded", service_id=service.service_id
