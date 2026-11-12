@@ -28,9 +28,10 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.2.1.
+The guidance describes source APIs for project version 1.2.5.
 An installed version string alone isn't proof of support. Check inherited
-environment selection, archive stderr allowances, node and standalone targets,
+environment selection, archive stderr allowances, Swarm hydrated listings,
+reconciliation lease renewal, node and standalone targets,
 completion/restart/failure keywords, strict workload
 errors, schema-11 stop attribution and exporter counts, refusal/admission correlation,
 owner active and class/owner queued demand, shared IO and launch-attempt/child-slot
@@ -66,7 +67,7 @@ from pywhales.convergence import (
 )
 from pywhales.inventory import InventoryKind
 from pywhales.profiles import CONTROLS, CreateRequest, RuntimePolicy, SecurityProfile
-from pywhales.reconciliation import ConvergenceSummary
+from pywhales.reconciliation import ActionContext, ConvergenceSummary, JournalStore
 from pywhales.telemetry import (
     AdmissionDecisionRecord,
     AdmissionOutcome,
@@ -98,6 +99,8 @@ for target_type in (ComposeTarget, ContainerTarget):
     )  # False
 print(get_annotations(Failure, format=Format.STRING)["reason"])  # unhealthy
 print(get_args(ConvergenceSummary.__value__))  # includes unhealthy
+print(signature(ActionContext.renew_lease))  # (self, ttl: float) -> None
+print(hasattr(JournalStore, "renew"))  # True: custom stores must implement it
 print(signature(CreateRequest))  # health_start_interval: int | None = None
 print(signature(SecurityProfile))  # max_health_start_interval: int | None = None
 print(signature(RuntimePolicy))  # operator-declared supported_controls
@@ -161,6 +164,10 @@ methods += [
     docker.image.list,
     docker.network.list,
     docker.volume.list,
+    docker.node.list,
+    docker.service.list,
+    docker.config.list,
+    docker.secret.list,
     docker.create,
     docker.run,
     docker.container.create,
@@ -179,8 +186,9 @@ for method in methods:
         print(signature(overload, annotation_format=Format.STRING))
 ```
 
-Look for keyword-only `hydrate: bool = False` on the four resource `list`
-methods and the `docker.ps` alias. A signature proves argument support, not
+Look for keyword-only `hydrate: bool = False` on the eight resource `list`
+methods (container, image, network, volume, node, service, config, secret) and
+the `docker.ps` alias. A signature proves argument support, not
 snapshot or fanout behavior: follow the linked lifecycle and observation
 contracts, then validate the smallest authorized runtime scenario.
 
