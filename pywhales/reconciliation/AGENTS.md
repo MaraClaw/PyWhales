@@ -20,8 +20,12 @@
 
 ## Store Contract
 
-- Every write checks version and generation together. `claim` bumps both, even for a repeated worker token; CAS and
-  release need an unexpired matching lease on the store's own clock. A live lease can't be claimed early.
+- Every write checks version and generation together. `claim` bumps both, even for a repeated worker token; CAS,
+  `renew` and release need an unexpired matching lease on the store's own clock. A live lease can't be claimed early.
+- `renew(expected, LeaseRequest)` needs the exact entry and the lease's own worker. It sets expiry to store time plus
+  TTL (not old expiry plus TTL) and bumps only `version`: generation and progress stay, and nothing new is journaled.
+  The old entry is then stale, so callers must carry the returned one. Expired, released, foreign or stale entries
+  raise `StoreConflict`; a later `claim` still bumps both counters.
 - Attempts never decrease and a progressed entry never returns to `SUBMITTED`. Operation tokens are unique across
   the store, not per endpoint; conflicting intent or a rebound endpoint raises `IdentityConflict`.
 - Keep `JournalEntry` tombstones while identities can be reused; deleting one loses deduplication and fencing history.
@@ -46,6 +50,13 @@
 - `ConvergenceSummary` includes `completion_failed` and opt-in long-running `exited`/`unhealthy`: project each to `FAILED` with the closed reason and no deadline detail. Keep its failure literals aligned with convergence `Failure.reason`. Never journal container state, health payloads, exit codes, output or a failure cause; [convergence semantics](../convergence/AGENTS.md) stay there.
 - `_context` verifies the lease before each adapter call, and adapters call `check_current` before every launch.
   Docker can't enforce this, so a pause after a check still races a lease transfer.
+- Only the convergence adapter's context can `renew_lease(ttl)`; inventory and mutation contexts raise `RuntimeError`
+  and keep their plain lease checks. Adapters renew between short `convergence.wait` slices inside one outer
+  `observation()`, so a wedged observer still expires. No thread or timer renews, and no heartbeat belongs here.
+- `_observe` holds the latest renewed entry in `_ObservedLease`: `check_current`, further renewals, the outcome commit
+  and release all use it, so a renewed pass commits exactly what a short one would. A renewal `StoreConflict` or
+  `StoreUnavailable` halts that object for good (a failed renewal may have committed, never assume rollback): later
+  checks and the post-observe commit re-raise it, even if the adapter swallowed it, with no outcome commit.
 - Observation errors become `AdapterUnavailable` `from None`. Store conflicts and outages halt the pass with no
   further adapter action. `AdmittedReconciliation` defers the whole pass; adapters must not nest admission. A spec for
   another endpoint fails in `submit` and `claim`; an admission owner for another endpoint fails at construction.
@@ -61,8 +72,10 @@
 
 ## Related Tests
 
-- `tests/pywhales/test_reconciliation.py` and `test_reconciliation_store.py`: controller flows, ownership, CAS, leases.
-- `tests/pywhales/test_reconciliation_recovery.py`: store faults, lease expiry, admission, no-replay recovery.
+- `tests/pywhales/test_reconciliation.py` and `test_reconciliation_store.py`: controller flows, ownership, CAS, leases,
+  and injected-clock renewal (`Clock` lives in `test_reconciliation.py`); no sleeps.
+- `tests/pywhales/test_reconciliation_recovery.py`: store faults, lease expiry, admission, no-replay recovery, renewal
+  outages and takeover after an observer stops renewing.
 - `tests/pywhales/test_reconciliation_ownership.py`: 64-character bounds round-trip through storage labels.
 - `test_reconciliation.py::test_real_cli_completion_failure_is_journaled_as_a_closed_reason` guards completion failure projection without raw payloads.
 - `test_reconciliation.py` also drives fake-CLI `fail_on_exit` observation through the controller, verifying `FAILED`/`exited`, cleared deadline detail, and no exit-code/output payload.
