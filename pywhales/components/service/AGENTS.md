@@ -9,6 +9,7 @@ Service `create` uses the [runtime environment transport](../../AGENTS.md#contai
 - `_update_options.py` validates and encodes rollout policy options before command construction.
 - `ServiceCLI.update()` builds the CLI; `Service.update()` forwards the same policy and timeout options.
 - `ServiceCLI.create()` returns an immutable-ID `Service` and has no rollout-policy parameters.
+- `ServiceCLI.list(hydrate=True)` resolves the truncated listed IDs, then pins snapshots by full ID; the default keeps its listing plus one resolve launch. `update`, `scale`, `rollback` and `remove` release supplied handles' pins even when the launch fails.
 - Read-only generation capture and readiness evaluation belong to [convergence](../../convergence/AGENTS.md), not this wrapper.
 
 ## Update And Rollback Policies
@@ -39,7 +40,7 @@ Paths are relative to `tests/pywhales/`; read [test-selection hazards](../../../
 - `components/test_service_rollout.py`: fake local Python CLI, positional compatibility, handle forwarding,
   zero values, bounds, validation before lookup, and `test_rollback_single_launch`; no daemon required.
 - `test_service_rollout_types.py`: static `ty` contracts, not pytest execution.
-- `components/test_service.py`: mocked inspect/cleanup/log cases mixed with real Swarm operations.
+- `components/test_service.py`: mocked inspect/cleanup/log cases and fake-CLI hydrated listings (`hydration_fakes.py`) mixed with real Swarm operations.
 - `components/test_deadline_forwarding.py`: service budget forwarding, scale preflight and validation order.
 - `components/test_service_rollout_live.py` needs `PYWHALES_LIVE_SERVICE_ROLLOUT=1` and an explicitly
   selected disposable manager; it creates/removes a service. Never use it as a workstation smoke test.
