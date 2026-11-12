@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
@@ -17,6 +18,7 @@ from pywhales.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.node.models import (
     NodeDescription,
@@ -26,6 +28,7 @@ from pywhales.components.node.models import (
     NodeStatus,
     NodeVersion,
 )
+from pywhales.exceptions import DockerException
 from pywhales.utils import run, to_list
 
 
@@ -113,6 +116,43 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
 
 ValidNode = Node | str
 
+_NODE_NOT_FOUND = re.compile(r"Error response from daemon: node (\S+) not found")
+
+
+class _NodeGone(DockerException):
+    """Local signal that a batch inspect failed only on nodes that no longer exist.
+
+    Nodes have no global missing-resource classification, so a hydrated listing
+    raises this itself and consumes it; it never reaches callers.
+    """
+
+
+def _names_only_missing_nodes(
+    error: DockerException, identities: Sequence[str]
+) -> bool:
+    """Return whether a node inspect failed solely because nodes no longer exist.
+
+    This is the exact missing-node response convergence treats as absence: an
+    unclassified failure whose every stderr line is
+    ``Error response from daemon: node <ID> not found`` for a requested ID.
+
+    Args:
+        error: Failure raised by the batch inspect launch.
+        identities: Node IDs sent to that launch.
+
+    Returns:
+        True only for a plain `DockerException` whose stderr holds nothing but
+        such lines. Timeouts, `NotASwarmManager`, uncaptured stderr and any other
+        output return False.
+    """
+    if type(error) is not DockerException or error.stderr is None:
+        return False
+    lines = [line for line in error.stderr.splitlines() if line.strip()]
+    matches = [_NODE_NOT_FOUND.fullmatch(line) for line in lines]
+    return bool(matches) and all(
+        match is not None and match[1] in identities for match in matches
+    )
+
 
 class NodeCLI(DockerCLICaller):
     """Node administration commands requiring access to a Swarm manager."""
@@ -128,7 +168,10 @@ class NodeCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "node", "demote"])
         full_cmd += nodes
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(nodes)
 
     @overload
     def inspect(self, x: str) -> Node: ...
@@ -171,15 +214,39 @@ class NodeCLI(DockerCLICaller):
             case unreachable:
                 assert_never(unreachable)
 
-    def list(self) -> builtins.list[Node]:
+    def list(self, *, hydrate: bool = False) -> builtins.list[Node]:
         """List nodes in the selected Swarm.
+
+        Args:
+            hydrate: If `True`, inspect the listed IDs in bounded batches, so a
+                listing costs one launch plus one per chunk and reading
+                properties costs none. Snapshots stay pinned until `reload()`
+                or a mutating call on the handle, and nodes removed before
+                their inspect are omitted. If `False`, each handle inspects
+                lazily on first property access.
 
         Returns:
             Node handles in CLI output order.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         full_cmd = Command([*self.docker_cmd, "node", "list", "--quiet"])
         all_ids = run(full_cmd).splitlines()
-        return [Node(self.client_config, x, is_immutable_id=True) for x in all_ids]
+        nodes = [Node(self.client_config, x, is_immutable_id=True) for x in all_ids]
+        if not hydrate:
+            return nodes
+
+        def inspect_json(identities: Sequence[str]) -> str:
+            try:
+                return run([*self.docker_cmd, "node", "inspect", *identities])
+            except DockerException as error:
+                if _names_only_missing_nodes(error, identities):
+                    raise _NodeGone(error.docker_command, error.return_code) from error
+                raise
+
+        return hydrate_handles(nodes, inspect_json, _NodeGone)
 
     def promote(self, x: ValidNode | Iterable[ValidNode]) -> None:
         """Promote one or more Swarm nodes to managers.
@@ -192,7 +259,10 @@ class NodeCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "node", "promote"])
         full_cmd += nodes
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(nodes)
 
     def ps(
         self, x: ValidNode | Iterable[ValidNode] | None = None
@@ -246,7 +316,10 @@ class NodeCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "node", "remove"])
         full_cmd.add_flag("--force", force)
         full_cmd += nodes
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(nodes)
 
     def update(
         self,
@@ -277,4 +350,7 @@ class NodeCLI(DockerCLICaller):
 
         full_cmd.add_simple_arg("--role", role)
         full_cmd.append(node)
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins([node])

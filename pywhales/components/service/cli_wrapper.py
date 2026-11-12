@@ -25,6 +25,11 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import (
+    hydrate_handles,
+    release_pins,
+    resolve_identities,
+)
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.container.cli_wrapper import to_seconds
 from pywhales.components.service._update_options import update_options
@@ -567,15 +572,29 @@ class ServiceCLI(DockerCLICaller):
             with iterator:
                 return "".join(x[1].decode() for x in iterator)
 
-    def list(self, filters: Iterable[ServiceListFilter] = ()) -> builtins.list[Service]:
+    def list(
+        self, filters: Iterable[ServiceListFilter] = (), *, hydrate: bool = False
+    ) -> builtins.list[Service]:
         """List services in the selected Swarm.
 
         Args:
             filters: Docker filter pairs; the default selects all services.
+            hydrate: If `True`, resolve the truncated listed IDs and inspect the
+                full IDs in bounded batches, so a listing costs one launch, one
+                to resolve the IDs and one per chunk, and reading properties
+                costs none. Snapshots stay pinned until `reload()` or a
+                mutating call on the handle, and services removed before the
+                resolution or the inspect are omitted. If `False`, each handle
+                inspects lazily on first property access.
 
         Returns:
-            Service handles with full IDs. Nonempty results require a second CLI
-            call to resolve the truncated IDs returned by service list.
+            Service handles with full IDs in CLI output order. Nonempty results
+            require a second CLI call to resolve the truncated IDs returned by
+            service list.
+
+        Raises:
+            ParsingError: A resolution or hydration response is malformed or does
+                not match the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -591,6 +610,30 @@ class ServiceCLI(DockerCLICaller):
 
         if ids_truncated == []:
             return []
+
+        if hydrate:
+            full_ids = resolve_identities(
+                ids_truncated,
+                lambda ids: run(
+                    [
+                        *self.docker_cmd,
+                        "service",
+                        "inspect",
+                        *ids,
+                        "--format",
+                        "{{.ID}}",
+                    ]
+                ),
+                NoSuchService,
+            )
+            return hydrate_handles(
+                [
+                    Service(self.client_config, id_, is_immutable_id=True)
+                    for id_ in full_ids
+                ],
+                lambda ids: run([*self.docker_cmd, "service", "inspect", *ids]),
+                NoSuchService,
+            )
 
         full_cmd = [
             *self.docker_cmd,
@@ -658,7 +701,10 @@ class ServiceCLI(DockerCLICaller):
         for service in selected:
             full_cmd.append(service)
 
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(selected)
 
     def rollback(
         self,
@@ -692,7 +738,10 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(service)
-        run(full_cmd, capture_stdout=False, timeout=timeout)
+        try:
+            run(full_cmd, capture_stdout=False, timeout=timeout)
+        finally:
+            release_pins([service])
 
     def scale(
         self,
@@ -722,14 +771,17 @@ class ServiceCLI(DockerCLICaller):
         validate_timeout(timeout)
         if not new_scales:
             return
-        # verify that the services exists
-        self.inspect([str(service) for service in new_scales])
+        try:
+            # verify that the services exists
+            self.inspect([str(service) for service in new_scales])
 
-        full_cmd = Command([*self.docker_cmd, "service", "scale"])
-        full_cmd.add_flag("--detach", detach)
-        for service, new_scale in new_scales.items():
-            full_cmd.append(f"{service!s}={new_scale}")
-        run(full_cmd, capture_stderr=False, capture_stdout=False, timeout=timeout)
+            full_cmd = Command([*self.docker_cmd, "service", "scale"])
+            full_cmd.add_flag("--detach", detach)
+            for service, new_scale in new_scales.items():
+                full_cmd.append(f"{service!s}={new_scale}")
+            run(full_cmd, capture_stderr=False, capture_stdout=False, timeout=timeout)
+        finally:
+            release_pins(new_scales)
 
     def update(
         self,
@@ -822,4 +874,7 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--replicas", replicas)
         full_cmd.extend(policy_args)
         full_cmd.append(service)
-        run(full_cmd, capture_stdout=False, timeout=timeout)
+        try:
+            run(full_cmd, capture_stdout=False, timeout=timeout)
+        finally:
+            release_pins([service])

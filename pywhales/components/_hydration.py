@@ -4,6 +4,8 @@ A hydrated listing costs one listing launch plus one inspect launch per chunk of
 identities. Snapshots are matched by exact stored identity and pinned on the
 returned handles. Resources that vanish between the listing and the inspect
 are dropped by re-probing only the chunk whose inspect reported them missing.
+A listing that prints truncated IDs first resolves them to full identities the
+same way.
 """
 
 from collections.abc import Callable, Iterable, Sequence
@@ -86,6 +88,74 @@ def _hydrate_chunk[HandleT: ReloadableObjectFromJson[Any]](
     for handle, identity in zip(chunk, identities, strict=True):
         handle._set_pinned_inspect_result(by_identity[identity])
     return list(chunk)
+
+
+def resolve_identities(
+    references: Sequence[str],
+    resolve_output: Callable[[Sequence[str]], str],
+    missing: type[DockerException],
+) -> list[str]:
+    """Expand abbreviated references to full identities, dropping vanished ones.
+
+    For a listing that prints truncated IDs. References go out in chunks of at
+    most `HYDRATION_CHUNK_SIZE`; a chunk whose launch raises `missing` is
+    bisected, so only its own members are probed again.
+
+    Args:
+        references: Distinct abbreviated identities in listing order.
+        resolve_output: Run one launch that prints the full identity of each
+            given reference on its own line, in request order.
+        missing: Exception class the launch raises when a reference no longer
+            exists.
+
+    Returns:
+        The full identities of the references that still exist, in listing order.
+
+    Raises:
+        ParsingError: A response does not hold exactly one identity per requested
+            reference, each beginning with that reference.
+        DockerException: A launch fails for a reason other than `missing`.
+    """
+    resolved: list[str] = []
+    for start in range(0, len(references), HYDRATION_CHUNK_SIZE):
+        chunk = references[start : start + HYDRATION_CHUNK_SIZE]
+        resolved.extend(_resolve_chunk(chunk, resolve_output, missing))
+    return resolved
+
+
+def _resolve_chunk(
+    chunk: Sequence[str],
+    resolve_output: Callable[[Sequence[str]], str],
+    missing: type[DockerException],
+) -> list[str]:
+    """Resolve one chunk, bisecting only after a missing-resource failure.
+
+    Args:
+        chunk: Distinct abbreviated identities to resolve together.
+        resolve_output: Run one launch printing a full identity per reference.
+        missing: Exception class signaling that a reference no longer exists.
+
+    Returns:
+        The surviving full identities in order, accepted only when the whole
+        response matched the chunk.
+    """
+    try:
+        output = resolve_output(chunk)
+    except missing:
+        if len(chunk) == 1:
+            return []
+        middle = len(chunk) // 2
+        return [
+            *_resolve_chunk(chunk[:middle], resolve_output, missing),
+            *_resolve_chunk(chunk[middle:], resolve_output, missing),
+        ]
+    identities = output.splitlines()
+    if len(identities) != len(chunk) or not all(
+        identity.startswith(reference)
+        for identity, reference in zip(identities, chunk, strict=True)
+    ):
+        raise ParsingError("Resolved identities do not match the listing")
+    return identities
 
 
 def release_pins(resources: Iterable[object]) -> None:

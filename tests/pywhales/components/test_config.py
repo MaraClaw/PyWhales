@@ -1,4 +1,7 @@
+import copy
+import inspect
 import json
+import pickle
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -11,11 +14,18 @@ from pywhales.client_config import ParsingError
 from pywhales.components.config.models import ConfigInspectResult
 from pywhales.exceptions import (
     DockerException,
+    NoSuchConfig,
     NoSuchSecret,
     NoSuchService,
     NotASwarmManager,
 )
 from pywhales.test_utils import random_name
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 def test_batch_inspect_matches_config_references_and_hydrates_cache() -> None:
@@ -414,3 +424,171 @@ def test_config_removed_inside_its_context_exits_cleanly(
         assert not my_conf.exists()
     assert not my_conf.exists()
     assert not docker_client.config.exists("removed_in_context")
+
+
+def _config_ids(count: int) -> list[str]:
+    return [identity_of("config", index) for index in range(count)]
+
+
+def test_hydrated_config_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
+    ids = _config_ids(5)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        configs = client.config.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [config.id for config in configs] == ids
+        for config in configs:
+            assert config._inspect_result is not None
+            assert config._inspect_result.id == config.id
+        assert [config.spec.name for config in configs if config.spec is not None] == [
+            f"con-{index:04d}" for index in range(5)
+        ]
+    assert launches == 4
+    assert cli.lists() == [["docker-test", "config", "list", "--quiet"]]
+    assert cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+    assert len(cli.launches) == launches
+
+
+@pytest.mark.parametrize(
+    ("count", "chunks"), [(0, []), (100, [100]), (101, [100, 1])], ids=str
+)
+def test_hydrated_config_list_inspects_at_most_one_chunk_bound_per_launch(
+    count: int, chunks: list[int]
+) -> None:
+    ids = _config_ids(count)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli) as client:
+        configs = client.config.list(hydrate=True)
+    assert [config.id for config in configs] == ids
+    assert [len(batch) for batch in cli.inspects()] == chunks
+
+
+def test_default_config_list_stays_lazy_and_expiring() -> None:
+    ids = _config_ids(3)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli) as client:
+        configs = client.config.list({"name": "app"})
+        assert [config.id for config in configs] == ids
+        assert cli.inspects() == []
+        assert configs[0].spec is not None
+        assert configs[0].spec is not None
+        hydrate = inspect.signature(client.config.list).parameters["hydrate"]
+        assert hydrate.kind is inspect.Parameter.KEYWORD_ONLY
+        assert hydrate.default is False
+    assert cli.lists() == [
+        ["docker-test", "config", "list", "--quiet", "--filter", "name=app"]
+    ]
+    assert cli.inspects() == [[ids[0]], [ids[0]]]
+    assert len(cli.launches) == 3
+
+
+def test_vanished_configs_reprobe_only_the_affected_chunk() -> None:
+    ids = _config_ids(6)
+    cli = FakeCli("config", ids)
+    cli.vanish_on_list = {ids[4]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        configs = client.config.list(hydrate=True)
+        launches = len(cli.launches)
+        assert [config.id for config in configs] == [
+            identity for identity in ids if identity != ids[4]
+        ]
+        assert all(config.spec is not None for config in configs)
+    assert len(cli.launches) == launches
+    assert cli.inspects() == [
+        ids[:3],
+        ids[3:],
+        ids[3:4],
+        ids[4:],
+        ids[4:5],
+        ids[5:],
+    ]
+
+
+def test_hydrated_config_list_is_empty_when_every_config_vanished() -> None:
+    ids = _config_ids(3)
+    cli = FakeCli("config", ids)
+    cli.vanish_on_list = set(ids)
+    with fake_daemon(cli) as client:
+        assert client.config.list(hydrate=True) == []
+    assert [len(batch) for batch in cli.inspects()] == [3, 1, 2, 1, 1]
+
+
+@pytest.mark.parametrize("failure", list(INSPECT_FAILURES))
+def test_hydrated_config_list_does_not_hide_other_inspect_failures(
+    failure: str,
+) -> None:
+    ids = _config_ids(4)
+    cli = FakeCli("config", ids)
+    expected = INSPECT_FAILURES[failure]
+    with (
+        fake_daemon(cli) as client,
+        patch("subprocess.run", side_effect=cli.failing({"inspect"}, failure)),
+        pytest.raises(expected) as caught,
+    ):
+        client.config.list(hydrate=True)
+    assert type(caught.value) is expected
+    assert len(cli.inspects()) == 1
+
+
+def test_hydrated_config_list_matches_results_by_exact_identity() -> None:
+    ids = _config_ids(3)
+    cli = FakeCli("config", ids)
+    cli.reorder = True
+    with fake_daemon(cli) as client:
+        for config in client.config.list(hydrate=True):
+            assert config._inspect_result is not None
+            assert config._inspect_result.id == config.id
+        cli.corrupt = {ids[1]: identity_of("config", 99)}
+        with pytest.raises(ParsingError):
+            client.config.list(hydrate=True)
+
+
+_CONFIG_MUTATIONS: dict[str, Callable[[DockerClient, Config], object]] = {
+    "handle-remove": lambda client, config: config.remove(),
+    "cli-remove": lambda client, config: client.config.remove(config),
+    "cli-remove-list": lambda client, config: client.config.remove([config]),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_CONFIG_MUTATIONS))
+def test_mutating_call_releases_only_that_configs_pin(mutation: str) -> None:
+    ids = _config_ids(2)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli) as client:
+        mutated, untouched = client.config.list(hydrate=True)
+        _CONFIG_MUTATIONS[mutation](client, mutated)
+        before = len(cli.inspects())
+        assert untouched.spec is not None
+        assert len(cli.inspects()) == before
+        # The fake daemon removed it, so only a refetch can notice that.
+        with pytest.raises(NoSuchConfig):
+            _ = mutated.spec
+        assert len(cli.inspects()) == before + 1
+
+
+@pytest.mark.parametrize("mutation", list(_CONFIG_MUTATIONS))
+def test_failed_mutation_still_releases_the_configs_pin(mutation: str) -> None:
+    ids = _config_ids(1)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli) as client:
+        (config,) = client.config.list(hydrate=True)
+        with (
+            patch("subprocess.run", side_effect=cli.failing({"rm"}, "command")),
+            pytest.raises(DockerException),
+        ):
+            _CONFIG_MUTATIONS[mutation](client, config)
+        before = len(cli.inspects())
+        assert config.spec is not None
+    assert len(cli.inspects()) == before + 1
+
+
+def test_copied_hydrated_config_and_batch_inspected_config_hold_no_pin() -> None:
+    ids = _config_ids(1)
+    cli = FakeCli("config", ids)
+    with fake_daemon(cli) as client:
+        (config,) = client.config.list(hydrate=True)
+        assert config._pinned is True
+        assert copy.copy(config)._pinned is False
+        assert pickle.loads(pickle.dumps(config))._pinned is False
+        (inspected,) = client.config.inspect(ids)
+        assert inspected._pinned is False

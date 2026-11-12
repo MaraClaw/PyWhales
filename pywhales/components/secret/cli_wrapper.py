@@ -21,6 +21,7 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._hydration import hydrate_handles, release_pins
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.secret.models import SecretInspectResult, SecretSpec
 from pywhales.exceptions import NoSuchSecret
@@ -199,14 +200,26 @@ class SecretCLI(DockerCLICaller):
             case unreachable:
                 assert_never(unreachable)
 
-    def list(self, filters: Iterable[SecretListFilter] = ()) -> builtins.list[Secret]:
+    def list(
+        self, filters: Iterable[SecretListFilter] = (), *, hydrate: bool = False
+    ) -> builtins.list[Secret]:
         """List secrets in the selected Swarm.
 
         Args:
             filters: Docker filter pairs; the default selects all secrets.
+            hydrate: If `True`, inspect the listed IDs in bounded batches, so a
+                listing costs one launch plus one per chunk and reading
+                properties costs none. Snapshots stay pinned until `reload()`
+                or a mutating call on the handle, and secrets removed before
+                their inspect are omitted. If `False`, each handle inspects
+                lazily on first property access.
 
         Returns:
             Secret handles in CLI output order.
+
+        Raises:
+            ParsingError: A hydration response is malformed or does not match
+                the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
@@ -215,7 +228,14 @@ class SecretCLI(DockerCLICaller):
             "--filter", (f"{key}={value}" for key, value in filters)
         )
         ids = run(full_cmd).splitlines()
-        return [Secret(self.client_config, id_, is_immutable_id=True) for id_ in ids]
+        secrets = [Secret(self.client_config, id_, is_immutable_id=True) for id_ in ids]
+        if not hydrate:
+            return secrets
+        return hydrate_handles(
+            secrets,
+            lambda ids: run([*self.docker_cmd, "secret", "inspect", *ids]),
+            NoSuchSecret,
+        )
 
     def remove(self, x: ValidSecret | Iterable[ValidSecret]) -> None:
         """Remove one or more secrets.
@@ -229,4 +249,7 @@ class SecretCLI(DockerCLICaller):
         if not secrets:
             return
         full_cmd = Command([*self.docker_cmd, "secret", "remove", *secrets])
-        run(full_cmd)
+        try:
+            run(full_cmd)
+        finally:
+            release_pins(secrets)
