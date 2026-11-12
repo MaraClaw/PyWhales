@@ -20,6 +20,10 @@ def stack(
 
     Requires a disposable daemon and its Swarm setup. Use small multi-platform
     services and let the scale CLI wait for convergence before listing tasks.
+    Teardown waits for the stack's task containers and networks to disappear,
+    because `stack remove` returns first and a force-leave with attached task
+    containers leaves a stale `some_stack_default` network that the next
+    deploy reuses instead of creating.
 
     Yields:
         The converged stack handle, removed during teardown even on failure.
@@ -29,6 +33,7 @@ def stack(
         "services:\n"
         + "".join(
             f"  {name}:\n    image: busybox:1.37.0\n    command: [sleep, '3600']\n"
+            "    init: true\n"
             for name in ("app", "db", "influxdb", "agent")
         )
     )
@@ -43,6 +48,13 @@ def stack(
         yield some_stack
     finally:
         some_stack.remove()
+        namespace = ("label", "com.docker.stack.namespace=some_stack")
+        deadline = time.monotonic() + 60
+        while docker_client.container.list(
+            all=True, filters=[namespace]
+        ) or docker_client.network.list(filters=[namespace]):
+            assert time.monotonic() < deadline, "some_stack resources remain"
+            time.sleep(0.25)
 
 
 @pytest.mark.usefixtures("stack")
