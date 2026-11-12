@@ -84,7 +84,7 @@ def test_process_source_exit_wakes_blocked_next_before_permit_release() -> None:
     )
     stream = owner.request(pressure).stream(lambda: child)
     reading = Event()
-    get = child._queue.get
+    get = child._core._queue.get
 
     def signal_read() -> tuple[str | None, bytes] | None:
         reading.set()
@@ -93,7 +93,7 @@ def test_process_source_exit_wakes_blocked_next_before_permit_release() -> None:
     try:
         assert next(stream) == ("stdout", b"ready\n")
         with (
-            patch.object(child._queue, "get", side_effect=signal_read),
+            patch.object(child._core._queue, "get", side_effect=signal_read),
             ThreadPoolExecutor(1) as executor,
         ):
             result = executor.submit(next, stream)

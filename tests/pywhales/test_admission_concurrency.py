@@ -43,7 +43,7 @@ def test_concurrent_closers_wait_for_one_exit_and_inflight_next() -> None:
             assert finish_exit.wait(3)
 
     stream = owner.request(pressure).stream(source)
-    wait = stream._condition.wait
+    wait = stream._core._condition.wait
 
     def signal_wait(timeout: float | None = None) -> bool:
         if current_thread().name.startswith("first"):
@@ -56,7 +56,7 @@ def test_concurrent_closers_wait_for_one_exit_and_inflight_next() -> None:
         ThreadPoolExecutor(1, "reader") as reader,
         ThreadPoolExecutor(1, "first") as first,
         ThreadPoolExecutor(1, "second") as second,
-        patch.object(stream._condition, "wait", side_effect=signal_wait),
+        patch.object(stream._core._condition, "wait", side_effect=signal_wait),
     ):
         read = reader.submit(next, stream)
         try:

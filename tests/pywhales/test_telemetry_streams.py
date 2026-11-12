@@ -190,7 +190,7 @@ def test_builtin_buffer_error_stays_an_ordinary_stream_failure() -> None:
     stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
     try:
         with stream._queue.condition:
-            stream._error = BufferError()
+            stream._core._error = BufferError()
             stream._stop.set()
             stream._queue.close()
 
@@ -345,7 +345,7 @@ def test_close_wins_pending_nonzero_completion(monkeypatch: pytest.MonkeyPatch) 
     records: list[TelemetryRecord] = []
     stream = stream_stdout_and_stderr(command(records, "raise SystemExit(7)"))
     reaped, resume = Event(), Event()
-    original_raise = stream._raise_error
+    original_raise = stream._core._raise_error
     errors: list[DockerException] = []
 
     def paused() -> None:
@@ -359,7 +359,7 @@ def test_close_wins_pending_nonzero_completion(monkeypatch: pytest.MonkeyPatch) 
         except DockerException as error:
             errors.append(error)
 
-    monkeypatch.setattr(stream, "_raise_error", paused)
+    monkeypatch.setattr(stream._core, "_raise_error", paused)
     consumer = Thread(target=consume)
     consumer.start()
     try:
@@ -621,11 +621,11 @@ def test_stream_outcome_matches_the_error_it_delivers(
     try:
         with stream._queue.condition:
             if expired:
-                stream._expired = True
-                stream._timeout_stdout = b""
-            stream._error = reader
+                stream._core._expired = True
+                stream._core._timeout_stdout = b""
+            stream._core._error = reader
             if scope is not None:
-                stream._scope_error = scope
+                stream._core._scope_error = scope
             stream._stop.set()
             stream._queue.close()
 
@@ -664,11 +664,11 @@ def test_reader_buffer_overflow_never_outranks_an_earlier_stop(
     try:
         with stream._queue.condition:
             if expired:
-                stream._expired = True
-                stream._timeout_stdout = b""
-            stream._error = StreamBufferLimitError("history", "stderr_history")
+                stream._core._expired = True
+                stream._core._timeout_stdout = b""
+            stream._core._error = StreamBufferLimitError("history", "stderr_history")
             if scope is not None:
-                stream._scope_error = scope
+                stream._core._scope_error = scope
             stream._stop.set()
             stream._queue.close()
 

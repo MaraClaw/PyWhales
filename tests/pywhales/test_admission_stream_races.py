@@ -71,7 +71,7 @@ def test_reader_gets_original_first_group_when_closer_finishes_first() -> None:
     stream = request.stream(lambda: source)
     assert request.try_resize(3)
     closer_done = Event()
-    finish = stream._finish
+    finish = stream._core._finish
 
     def delayed_finish(error: BaseException | None, outcome: Outcome) -> None:
         if error is original:
@@ -85,7 +85,7 @@ def test_reader_gets_original_first_group_when_closer_finishes_first() -> None:
 
     with (
         ThreadPoolExecutor(2) as executor,
-        patch.object(stream, "_finish", side_effect=delayed_finish),
+        patch.object(stream._core, "_finish", side_effect=delayed_finish),
     ):
         reader = executor.submit(next, stream)
         assert source.reading.wait(3)
@@ -120,7 +120,7 @@ def test_interrupted_cleanup_waiter_waits_and_preserves_original(
         source.read_error = original
     stream = owner.request(pressure).stream(lambda: source)
     interrupted, waiting = Event(), Event()
-    wait = stream._condition.wait
+    wait = stream._core._condition.wait
 
     def interrupt_waiter(timeout: float | None = None) -> bool:
         if current_thread().name.startswith("waiter"):
@@ -133,7 +133,7 @@ def test_interrupted_cleanup_waiter_waits_and_preserves_original(
     with (
         ThreadPoolExecutor(1, "owner") as closers,
         ThreadPoolExecutor(1, "waiter") as waiters,
-        patch.object(stream._condition, "wait", side_effect=interrupt_waiter),
+        patch.object(stream._core._condition, "wait", side_effect=interrupt_waiter),
     ):
         result = waiters.submit(next, stream) if reader_failure else None
         try:
@@ -168,7 +168,7 @@ def test_interrupted_cleanup_wait_still_waits_then_releases_permit() -> None:
     stream = owner.request(pressure).stream(lambda: source)
     interrupted = Event()
     error = KeyboardInterrupt()
-    wait = stream._condition.wait
+    wait = stream._core._condition.wait
 
     def interrupt_once(timeout: float | None = None) -> bool:
         if current_thread().name.startswith("closer") and not interrupted.is_set():
@@ -179,7 +179,7 @@ def test_interrupted_cleanup_wait_still_waits_then_releases_permit() -> None:
     with (
         ThreadPoolExecutor(1, "reader") as executor,
         ThreadPoolExecutor(1, "closer") as closers,
-        patch.object(stream._condition, "wait", side_effect=interrupt_once),
+        patch.object(stream._core._condition, "wait", side_effect=interrupt_once),
     ):
         reader = executor.submit(next, stream)
         try:
@@ -211,7 +211,7 @@ def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
     stream = request.stream(lambda: source)
     assert stream.try_resize(3)
     waiting, cleanup_waiting = Event(), Event()
-    wait, stream_wait = owner._condition.wait, stream._condition.wait
+    wait, stream_wait = owner._condition.wait, stream._core._condition.wait
 
     def signal_wait(timeout: float | None = None) -> bool:
         waiting.set()
@@ -232,7 +232,9 @@ def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
             with patch.object(owner._condition, "wait", side_effect=signal_wait):
                 drained = executor.submit(owner.wait_drained, timeout=3)
                 assert waiting.wait(3)
-            with patch.object(stream._condition, "wait", side_effect=signal_cleanup):
+            with patch.object(
+                stream._core._condition, "wait", side_effect=signal_cleanup
+            ):
                 closed = executor.submit(stream.close)
                 assert source.exit_started.wait(3)
                 for resize in (request.try_resize, stream.try_resize):

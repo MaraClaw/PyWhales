@@ -16,12 +16,24 @@ from typing import assert_never
 import pytest
 
 from pywhales import DockerClient
+from pywhales._reclaim import _ensure_worker
 
 logger = logging.getLogger(__name__)
 
 #
 # -----------------------------------------------------------------------------
 # Fixtures
+
+
+@pytest.fixture(scope="session", autouse=True)
+def stream_reclaimer() -> None:
+    """Start the process-lifetime stream reclaimer before any test runs.
+
+    Streams start it lazily on first construction. Tests that compare
+    ``threading.enumerate()`` around a launch would otherwise count that
+    one-time start as a leaked worker thread.
+    """
+    _ensure_worker()
 
 
 @pytest.fixture(scope="session")

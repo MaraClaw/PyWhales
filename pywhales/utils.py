@@ -23,6 +23,7 @@ from subprocess import PIPE, Popen
 from time import monotonic
 from types import MappingProxyType, TracebackType
 from typing import (
+    Any,
     Literal,
     Self,
     overload,
@@ -38,6 +39,7 @@ from pywhales._execution_policy import (
     get_execution_policy,
 )
 from pywhales._process_stream import ProcessStream as ProcessStream
+from pywhales._reclaim import watch
 from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
@@ -486,14 +488,61 @@ def to_list(x: object) -> list[object]:
     return [x]
 
 
+class _MappedCore[T]:
+    """Internal state of one `MappedProcessStream`, kept apart from its handle.
+
+    The shared reclaimer closes it after the handle is collected, so the mapping
+    iterator is also discarded on the reclaimer thread rather than inside an
+    arbitrary garbage collection.
+    """
+
+    def __init__(self, stream: ProcessStream, iterator: Iterator[T]) -> None:
+        """Retain the owned process stream and its mapping iterator."""
+        self._stream = stream
+        self._iterator = iterator
+
+    def next(self) -> T:
+        """Return the next mapped value, cleaning up on termination."""
+        yielded = False
+        try:
+            result = next(self._iterator)
+            yielded = True
+            return result
+        except StopIteration:
+            self._stream.__exit__(None, None, None)
+            raise
+        finally:
+            if not yielded:
+                self.close()
+
+    def close(self) -> None:
+        """Close the process stream and discard the mapping iterator."""
+        self._stream.close()
+        self._iterator = iter(())
+
+    def exit(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Exit the process stream's context, then discard the mapping iterator."""
+        try:
+            self._stream.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._iterator = iter(())
+
+
 class MappedProcessStream[T](Iterator[T]):
     """Output adapter preserving ownership of an already-running process stream.
 
     Mapping begins on iteration, not construction. Exhaustion closes the owned
     stream and checks recorded terminal failures; mapper errors also trigger
     cleanup. Use a context manager or close() when stopping early, including
-    before the first iteration. A bare break does not close the adapter.
-    Cleanup affects only the local CLI, not daemon-managed resources.
+    before the first iteration. A bare break does not close the adapter, but an
+    adapter dropped without closing is closed by a shared background reclaimer
+    once it is garbage collected. Cleanup affects only the local CLI, not
+    daemon-managed resources.
     """
 
     def __init__(self, stream: ProcessStream, iterator: Iterator[T]) -> None:
@@ -503,8 +552,20 @@ class MappedProcessStream[T](Iterator[T]):
             stream: Already-running stream whose cleanup this adapter owns.
             iterator: Lazy output transformation consumed by this adapter.
         """
-        self._stream = stream
-        self._iterator = iterator
+        self._core = _MappedCore(stream, iterator)
+        watch(self, self._core)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        """Read internal state from the core for white-box inspection.
+
+        Assign or patch internal state on ``_core``; this only forwards reads.
+
+        Raises:
+            AttributeError: If the core is unset or lacks the attribute.
+        """
+        if name == "_core" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._core, name)
 
     def _on_failure(
         self, callback: Callable[[OSError | BufferError | DockerException], None]
@@ -515,7 +576,7 @@ class MappedProcessStream[T](Iterator[T]):
             callback: Nonblocking failure notification, including replay of an
                 already recorded process failure.
         """
-        self._stream._on_failure(callback)
+        self._core._stream._on_failure(callback)
 
     @override
     def __iter__(self) -> Self:
@@ -535,17 +596,7 @@ class MappedProcessStream[T](Iterator[T]):
             DockerTimeout: If the owned stream's launch deadline expires.
             BufferError: If the owned stream exceeds a retained-output bound.
         """
-        yielded = False
-        try:
-            result = next(self._iterator)
-            yielded = True
-            return result
-        except StopIteration:
-            self._stream.__exit__(None, None, None)
-            raise
-        finally:
-            if not yielded:
-                self.close()
+        return self._core.next()
 
     def close(self) -> None:
         """Close the local process stream and discard the mapping iterator.
@@ -554,8 +605,7 @@ class MappedProcessStream[T](Iterator[T]):
         Repeated calls are safe; recorded process failures remain available to
         a subsequent clean context exit rather than being raised here.
         """
-        self._stream.close()
-        self._iterator = iter(())
+        self._core.close()
 
     def __enter__(self) -> Self:
         """Return this adapter without starting iteration or another process."""
@@ -576,10 +626,7 @@ class MappedProcessStream[T](Iterator[T]):
             exc_value: Active body exception passed through to stream cleanup.
             traceback: Context-body traceback supplied by the context protocol.
         """
-        try:
-            self._stream.__exit__(exc_type, exc_value, traceback)
-        finally:
-            self._iterator = iter(())
+        self._core.exit(exc_type, exc_value, traceback)
 
 
 def _start_process(
