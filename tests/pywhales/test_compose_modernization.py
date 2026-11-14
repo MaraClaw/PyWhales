@@ -208,7 +208,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-14:] == [
+    assert [field.name for field in fields(ClientConfig)][-16:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
@@ -223,6 +223,8 @@ def test_constructor_accepts_current_positional_slots() -> None:
         "inherit_environment",
         "strict_workload_errors",
         "inherited_environment_names",
+        "compose_all_resources",
+        "compose_ansi",
     ]
 
 
@@ -450,7 +452,7 @@ def test_run_returns_preview_text_when_dry_run_is_attached(
     result = client.compose.run("web", tty=False)
 
     assert result == "would create web"
-    assert command.call_args.args[0][-4:] == ["--dry-run", "run", "--no-TTY", "web"]
+    assert command.call_args.args[0][-4:] == ["--dry-run", "run", "--no-tty", "web"]
 
 
 def test_ps_retains_container_ids_when_not_dry_run(

@@ -32,7 +32,11 @@ pages: Final[dict[str, list[str]]] = {
     "sub-commands/checkpoint.md": [
         "pywhales.components.checkpoint.cli_wrapper.CheckpointCLI"
     ],
-    "sub-commands/compose.md": ["pywhales.components.compose.cli_wrapper.ComposeCLI"],
+    "sub-commands/compose.md": [
+        "pywhales.components.compose.cli_wrapper.ComposeCLI",
+        "pywhales.components.compose.bridge.ComposeBridgeCLI",
+        "pywhales.components.compose.bridge.ComposeTransformationsCLI",
+    ],
     "sub-commands/config.md": ["pywhales.components.config.cli_wrapper.ConfigCLI"],
     "sub-commands/container.md": [
         "pywhales.components.container.cli_wrapper.ContainerCLI"

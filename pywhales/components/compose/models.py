@@ -1,10 +1,10 @@
-"""Typed subsets of resolved Compose configuration, project summaries, and events."""
+"""Typed subsets of Compose configuration, project summaries, events and listings."""
 
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from pywhales.enums import (
     ComposeDependencyCondition,
@@ -156,3 +156,88 @@ class ComposeEvent(BaseModel):
     service: Annotated[str | None, Field(alias="service")] = None
     time: Annotated[datetime | None, Field(alias="time")] = None
     type: Annotated[str | None, Field(alias="type")] = None
+
+
+class _ComposeWireModel(BaseModel):
+    """Base for listings that map the CLI's capitalized JSON names explicitly."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ComposeImage(_ComposeWireModel):
+    """One image used by a created project container, from `images --format json`."""
+
+    id: Annotated[str | None, Field(alias="ID")] = None
+    container_name: Annotated[str | None, Field(alias="ContainerName")] = None
+    repository: Annotated[str | None, Field(alias="Repository")] = None
+    tag: Annotated[str | None, Field(alias="Tag")] = None
+    platform: Annotated[str | None, Field(alias="Platform")] = None
+    size: Annotated[int | None, Field(alias="Size")] = None
+    created: Annotated[datetime | None, Field(alias="Created")] = None
+    last_tag_time: Annotated[datetime | None, Field(alias="LastTagTime")] = None
+
+
+class ComposeVolume(_ComposeWireModel):
+    """One project volume, from `volumes --format json`.
+
+    Every value is the CLI's display text, including `labels` (comma-joined
+    `key=value` pairs) and sizes such as `N/A`.
+    """
+
+    availability: Annotated[str | None, Field(alias="Availability")] = None
+    driver: Annotated[str | None, Field(alias="Driver")] = None
+    group: Annotated[str | None, Field(alias="Group")] = None
+    labels: Annotated[str | None, Field(alias="Labels")] = None
+    links: Annotated[str | None, Field(alias="Links")] = None
+    mountpoint: Annotated[str | None, Field(alias="Mountpoint")] = None
+    name: Annotated[str | None, Field(alias="Name")] = None
+    scope: Annotated[str | None, Field(alias="Scope")] = None
+    size: Annotated[str | None, Field(alias="Size")] = None
+    status: Annotated[str | None, Field(alias="Status")] = None
+
+
+class ComposeStats(_ComposeWireModel):
+    """One resource-usage sample, from `stats --no-stream --format json`.
+
+    Usage values keep the CLI's display text, such as `0.03%` or
+    `2.2MiB / 7.7GiB`. Per-container rows set `container`, `id` and `name`;
+    `all_projects` rows set `project` and `name`; `aggregate` rows set `project`
+    and `containers`. Process counts are strings for per-container rows and
+    integers elsewhere.
+    """
+
+    project: Annotated[str | None, Field(alias="Project")] = None
+    container: Annotated[str | None, Field(alias="Container")] = None
+    id: Annotated[str | None, Field(alias="ID")] = None
+    name: Annotated[str | None, Field(alias="Name")] = None
+    containers: Annotated[int | None, Field(alias="Containers")] = None
+    cpu_perc: Annotated[str | None, Field(alias="CPUPerc")] = None
+    mem_usage: Annotated[str | None, Field(alias="MemUsage")] = None
+    mem_perc: Annotated[str | None, Field(alias="MemPerc")] = None
+    net_io: Annotated[str | None, Field(alias="NetIO")] = None
+    block_io: Annotated[str | None, Field(alias="BlockIO")] = None
+    pids: Annotated[str | int | None, Field(alias="PIDs")] = None
+
+
+class ComposeVariable(_ComposeWireModel):
+    """One interpolation variable found in the project, from `config --variables`."""
+
+    name: Annotated[str | None, Field(alias="Name")] = None
+    default_value: Annotated[str | None, Field(alias="DefaultValue")] = None
+    presence_value: Annotated[str | None, Field(alias="PresenceValue")] = None
+    required: Annotated[bool | None, Field(alias="Required")] = None
+
+
+class ComposeTransformation(_ComposeWireModel):
+    """One Compose Bridge transformation image, as the Docker image summary."""
+
+    id: Annotated[str | None, Field(alias="Id")] = None
+    parent_id: Annotated[str | None, Field(alias="ParentId")] = None
+    repo_tags: Annotated[list[str] | None, Field(alias="RepoTags")] = None
+    repo_digests: Annotated[list[str] | None, Field(alias="RepoDigests")] = None
+    labels: Annotated[dict[str, str] | None, Field(alias="Labels")] = None
+    created: Annotated[datetime | None, Field(alias="Created")] = None
+    size: Annotated[int | None, Field(alias="Size")] = None
+    shared_size: Annotated[int | None, Field(alias="SharedSize")] = None
+    containers: Annotated[int | None, Field(alias="Containers")] = None
+    descriptor: Annotated[dict[str, JsonValue] | None, Field(alias="Descriptor")] = None

@@ -7,7 +7,7 @@ operations require their corresponding external CLI support when invoked.
 
 import base64
 from collections.abc import Collection, Mapping, Sequence
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pydantic
 
@@ -161,6 +161,8 @@ class DockerClient(DockerCLICaller):
         inherit_environment: bool = True,
         strict_workload_errors: bool = False,
         inherited_environment_names: Collection[str] | None = None,
+        compose_all_resources: bool = False,
+        compose_ansi: Literal["never", "always", "auto"] | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -232,6 +234,10 @@ class DockerClient(DockerCLICaller):
                 collection selects none; None preserves the legacy inheritance mode.
                 Explicit client and operation overlays still apply. Executable lookup,
                 configuration files and credential helpers are not confined by this.
+            compose_all_resources: Emit Compose `--all-resources`, including
+                resources no service uses, only when true.
+            compose_ansi: Compose control-character mode (`"never"`, `"always"`
+                or `"auto"`); `None` omits `--ansi`.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -273,6 +279,8 @@ class DockerClient(DockerCLICaller):
                 inherit_environment=inherit_environment,
                 strict_workload_errors=strict_workload_errors,
                 inherited_environment_names=inherited_environment_names,
+                compose_all_resources=compose_all_resources,
+                compose_ansi=compose_ansi,
             )
         super().__init__(client_config)
 
