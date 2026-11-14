@@ -165,17 +165,26 @@ class SecretCLI(DockerCLICaller):
     @overload
     def inspect(self, x: Iterable[str]) -> builtins.list[Secret]: ...
 
-    def inspect(self, x: str | Iterable[str]) -> Secret | builtins.list[Secret]:
+    @overload
+    def inspect(self, x: str | Iterable[str], *, pretty: Literal[True]) -> str: ...
+
+    def inspect(
+        self, x: str | Iterable[str], *, pretty: bool = False
+    ) -> Secret | builtins.list[Secret] | str:
         """Inspect one or more Swarm secrets by name or ID.
 
         Args:
             x: One name or ID, or an iterable of references. Empty input returns
                 without invoking the CLI.
+            pretty: Return Docker's human-friendly text instead of handles. The
+                text isn't parsed, and no handle or cache snapshot is created.
 
         Returns:
             One handle for a string, otherwise handles in request order with
             duplicates retained as distinct handles. All snapshots are validated
-            before any returned handle is hydrated.
+            before any returned handle is hydrated. With `pretty=True`, the CLI
+            text for all references, or an empty string for empty input. Docker
+            never prints secret payloads.
 
         Raises:
             ParsingError: If response identities cannot be associated unambiguously
@@ -183,7 +192,9 @@ class SecretCLI(DockerCLICaller):
         """
         references = to_list(x)
         if not references:
-            return []
+            return "" if pretty else []
+        if pretty:
+            return run([*self.docker_cmd, "secret", "inspect", "--pretty", *references])
         json_str = run([*self.docker_cmd, "secret", "inspect", *references])
         parser = Secret(self.client_config, references[0], is_immutable_id=True)
         snapshots = parse_swarm_inspect_results(parser, json_str, references)
