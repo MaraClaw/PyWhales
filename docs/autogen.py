@@ -24,6 +24,10 @@ pages: Final[dict[str, list[str]]] = {
     "sub-commands/buildx.md": [
         "pywhales.components.buildx.cli_wrapper.BuildxCLI",
         "pywhales.components.buildx.imagetools.cli_wrapper.ImagetoolsCLI",
+        "pywhales.components.buildx.history.BuildxHistoryCLI",
+        "pywhales.components.buildx.policy.BuildxPolicyCLI",
+        "pywhales.components.buildx.replay.BuildxReplayCLI",
+        "pywhales.components.buildx.dap.BuildxDapCLI",
     ],
     "sub-commands/checkpoint.md": [
         "pywhales.components.checkpoint.cli_wrapper.CheckpointCLI"

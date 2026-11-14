@@ -1,0 +1,40 @@
+{
+  "Name": "ctx",
+  "Ref": "n05qf75ban22nlq56a2dgroyx",
+  "Context": "/work/ctx",
+  "Dockerfile": "Dockerfile",
+  "StartedAt": "2026-11-14T18:52:20.915795296+07:00",
+  "CompletedAt": "2026-11-14T18:52:21.497234005+07:00",
+  "Duration": 581438709,
+  "Status": "completed",
+  "NumCompletedSteps": 6,
+  "NumTotalSteps": 6,
+  "NumCachedSteps": 0,
+  "Config": {
+    "ImageResolveMode": "local",
+    "NoCache": true
+  },
+  "Materials": [
+    {
+      "URI": "pkg:docker/alpine@latest?platform=linux%2Farm64",
+      "Digests": [
+        "sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"
+      ]
+    }
+  ],
+  "Attachments": [
+    {
+      "Digest": "sha256:0806519c5d32934f43a5c94c89956a10d6e98e877d1d1c6950420d2b3edc9264",
+      "Type": "application/vnd.oci.image.index.v1+json"
+    },
+    {
+      "Digest": "sha256:95e2efabf078dcaa3830e99e5e515cf2f7fb521f95feda9cee58380d559aa00a",
+      "Type": "https://slsa.dev/provenance/v1"
+    },
+    {
+      "Digest": "sha256:26de294e4ed514d20283f5fbefac7c004329ce45a69a766378ab31f51bbedd80",
+      "Platform": "linux/arm64",
+      "Type": "application/vnd.oci.image.manifest.v1+json"
+    }
+  ]
+}
