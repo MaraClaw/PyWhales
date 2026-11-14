@@ -2,9 +2,9 @@
 
 ## Local Navigation
 
-The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`,
+The 17 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`,
 `manifest`, `network`, `node`, `plugin`, `secret`, `service`, `stack`, `swarm`,
-`system`, `task`, `trust`, and `volume`.
+`system`, `task`, and `volume`.
 
 - Each group's `cli_wrapper.py` holds its CLI class and resource wrappers where present.
   Its `models.py`, when present, defines typed Docker wire data.

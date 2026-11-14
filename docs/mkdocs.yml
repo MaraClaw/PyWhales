@@ -74,7 +74,6 @@ nav:
     - docker swarm: sub-commands/swarm.md
     - docker system: sub-commands/system.md
     - docker task: sub-commands/task.md
-    - docker trust: sub-commands/trust.md
     - docker volume: sub-commands/volume.md
   - Objects:
     - Builders: objects/builders.md

@@ -83,12 +83,13 @@ configuration beyond the selected build argument or container assignment.
 * [`docker.manifest`](sub-commands/manifest.md)
 * [`docker.network`](sub-commands/network.md)
 * [`docker.node`](sub-commands/node.md)
+* [`docker.plugin`](sub-commands/plugin.md)
 * [`docker.secret`](sub-commands/secret.md)
 * [`docker.service`](sub-commands/service.md)
 * [`docker.stack`](sub-commands/stack.md)
 * [`docker.swarm`](sub-commands/swarm.md)
 * [`docker.system`](sub-commands/system.md)
-* [`docker.trust`](sub-commands/trust.md)
+* [`docker.task`](sub-commands/task.md)
 * [`docker.volume`](sub-commands/volume.md)
 
 

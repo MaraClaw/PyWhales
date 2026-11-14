@@ -44,7 +44,6 @@ pages: Final[dict[str, list[str]]] = {
     "sub-commands/swarm.md": ["pywhales.components.swarm.cli_wrapper.SwarmCLI"],
     "sub-commands/system.md": ["pywhales.components.system.cli_wrapper.SystemCLI"],
     "sub-commands/task.md": ["pywhales.components.task.cli_wrapper.TaskCLI"],
-    "sub-commands/trust.md": ["pywhales.components.trust.cli_wrapper.TrustCLI"],
     "sub-commands/volume.md": ["pywhales.components.volume.cli_wrapper.VolumeCLI"],
     "objects/builders.md": ["pywhales.Builder"],
     "objects/containers.md": ["pywhales.Container"],

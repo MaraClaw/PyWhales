@@ -29,7 +29,6 @@ from pywhales.components.stack.cli_wrapper import StackCLI
 from pywhales.components.swarm.cli_wrapper import SwarmCLI
 from pywhales.components.system.cli_wrapper import SystemCLI
 from pywhales.components.task.cli_wrapper import TaskCLI
-from pywhales.components.trust.cli_wrapper import TrustCLI
 from pywhales.components.volume.cli_wrapper import VolumeCLI
 from pywhales.enums import ClientTypeInput, ComposeProgressInput
 from pywhales.telemetry import TelemetryObserver
@@ -292,7 +291,6 @@ class DockerClient(DockerCLICaller):
         self.swarm = SwarmCLI(self.client_config)
         self.system = SystemCLI(self.client_config)
         self.task = TaskCLI(self.client_config)
-        self.trust = TrustCLI(self.client_config)
         self.volume = VolumeCLI(self.client_config)
 
         # aliases
