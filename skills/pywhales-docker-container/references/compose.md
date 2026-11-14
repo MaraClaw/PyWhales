@@ -100,7 +100,12 @@ while nothing consumes it, so drain it or close it on early exit.
 
 Don't confuse the two: `compose.up(wait_timeout=60)` is a third, separate
 concept, the Compose-side `--wait-timeout` bound on service readiness, not a
-local CLI deadline either.
+local CLI deadline either. `start(wait_timeout=...)` and
+`up(shutdown_timeout=...)` are Compose-side options too.
+
+A local deadline kills and reaps only the local `docker` CLI. The `docker-compose`
+plugin child it started can outlive it, as live checks showed for `attach` and
+`logs`, so don't treat expiry as proof the plugin stopped.
 
 ## One-Off Commands and TTY Defaults
 
@@ -166,6 +171,60 @@ explicitly forwarded values from affecting interpolation.
 `build(services=[])` is a validated no-op: it checks `timeout` and the
 `quiet`/`stream_logs` conflict, then returns `None` without a launch. It never
 evaluates `build_args`, so strict mode raises nothing for an empty selection.
+
+## Compose 5.7 Commands And Queries
+
+These methods are new in PyWhales 1.3.0. Each one takes a keyword-only local
+`timeout` unless noted.
+
+| Method | Result |
+| --- | --- |
+| `attach(service, *, detach_keys=None, index=None, stdin=True, sig_proxy=True)` | `None`; inherits the caller's stdio and blocks until the CLI exits |
+| `commit(service, repository=None, *, author=None, changes=(), index=None, message=None, pause=True)` | `Image` |
+| `cp(source, destination, *, all=False, archive=False, follow_link=False, index=None)` | `None`; one side is a service path |
+| `export(service, output, *, index=None)` | `None`; writes a tar file at `output` |
+| `images(services=None)` | `list[ComposeImage]`; no `timeout` |
+| `scale(scales, *, no_deps=False)` | `None`; `scales` is a mapping such as `{"app": 2}` |
+| `stats(service=None, *, all=False, aggregate=False, all_projects=False, stream=False)` | `list[ComposeStats]`, or an owned `ProcessStream` with `stream=True` |
+| `volumes(services=None)` | `list[ComposeVolume]`; no `timeout` |
+| `wait(services, *, down_project=False)` | `int` exit code |
+
+`wait` blocks until the selected services stop, so pass a deadline.
+`down_project=True` also takes the project down: use it only on a project you
+own. It is separate from `up(wait=True)`. `stats(stream=True)` runs until closed,
+so use it as a context manager. A `ComposeStats` snapshot carries `name`,
+`cpu_perc`, `mem_usage`, `mem_perc`, `net_io`, `block_io`, and `pids`.
+
+`docker.compose.bridge.convert(*, output=None, templates=None,
+transformations=None, yes=False)` returns `None`.
+`bridge.transformations.list()` returns `list[ComposeTransformation]` and
+`bridge.transformations.create(path, *, from_=None)` returns `None`.
+
+Read the resolved configuration without rendering the whole model:
+
+```python
+print(client.compose.config_names("services"))  # list[str]
+print(client.compose.config_hashes(["app"]))  # dict[str, str]
+```
+
+`config_names(kind)` takes `"services"`, `"volumes"`, `"profiles"`, `"images"`,
+`"networks"`, or `"models"`. `config_hashes(services=None)` maps service names to
+hashes, `config_variables()` returns `list[ComposeVariable]`, and
+`config_environment()` returns `dict[str, str]`. `config(...)` gained the
+keyword-only render modifiers `no_interpolate`, `no_normalize`,
+`no_path_resolution`, `no_consistency`, `no_env_resolution`,
+`lock_image_digests`, `resolve_image_digests`, `output`, and `quiet`.
+
+Existing methods gained flags in this release: `build`, `create`, `events`,
+`kill`, `logs`, `ps`, `publish`, `pull`, `push`, `restart`, `run`, `start`, `up`,
+and `version`. Examples are `up(shutdown_timeout=...)`,
+`start(wait=True, wait_timeout=...)`, and `version(short=True)`. `execute` and
+`run` now emit `--no-tty` for `tty=False`. Check the installed signature for the
+rest.
+
+`compose_all_resources=True` and `compose_ansi` (one of `"never"`, `"always"`, or
+`"auto"`) are `DockerClient` globals like
+`compose_files`; see [Docker CLI 29 surface changes](client-and-errors.md#docker-cli-29-surface-changes).
 
 ## Plugin Features and Previews
 

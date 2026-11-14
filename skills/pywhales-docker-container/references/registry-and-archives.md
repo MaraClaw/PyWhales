@@ -124,7 +124,7 @@ with closing(docker.save("alpine:3.22")) as chunks:
             output.write(chunk)
 ```
 
-`save(images, output=None, *, timeout=None)` validates the deadline and rejects
+`save(images, output=None, *, timeout=None, platform=None)` validates the deadline and rejects
 empty input, then inspects every requested image eagerly, raising
 `NoSuchImage` for a missing one before starting the save CLI. An
 explicit `output` path blocks and returns `None`. Omitted `output` returns a
@@ -136,7 +136,7 @@ telemetry starts. The eager inspection can still emit its own telemetry.
 Closing a started generator kills a still-running local save CLI, reaps it, and
 joins its accounting thread. It doesn't undo daemon-side work.
 
-`load(input, quiet=False, *, timeout=None)` accepts a path, complete bytes, or
+`load(input, quiet=False, *, timeout=None, platform=None)` accepts a path, complete bytes, or
 an iterator of byte chunks. Path input runs an eager, process-backed progress stream,
 printing decoded lines unless `quiet=True`. Byte or iterator input is written
 to a local CLI's own stdin and fully consumed during the call; these archive
@@ -293,3 +293,46 @@ explicit value gives each helper launch its own deadline, including inspection,
 pull, temporary-container creation, copy, commit when needed, and cleanup. It
 isn't one total operation budget. `copy_from` returns `None`; `copy_to` commits
 and returns a new `Image`, leaving the original image unchanged.
+
+## History, Search, And Platform Selection
+
+```python
+from pywhales import DockerClient
+
+docker = DockerClient()
+for layer in docker.history("alpine:3.22"):
+    print(layer.created_by, layer.size)
+for result in docker.search("alpine", limit=5):
+    print(result.name, result.star_count)
+```
+
+`image.history(image, *, platform=None, timeout=None)` returns
+`list[ImageHistoryLayer]`, newest layer first. `Image.history()` and the root
+alias `docker.history` mirror it. A layer has `id` (`None` when Docker reports
+`<missing>`), `created_at`, `created_by`, `size` in bytes, and `comment`. A
+missing image raises `NoSuchImage`.
+
+`image.search(term, *, filters=None, limit=None, timeout=None)` and the root
+alias `docker.search` return `list[ImageSearchResult]` with `name`,
+`description`, `is_official`, and `star_count`. The call needs registry access.
+`filters` is a mapping or string pairs, and the typed keys are `is-official` and
+`stars`. Both methods take a local CLI `timeout`.
+
+`image.list(tree=True)` returns the CLI's tree text as an unparsed `str`, not
+`Image` handles, and rejects `hydrate=True`. See
+[raw-text option results](client-and-errors.md#raw-text-option-results).
+
+`pull` and `push` accept keyword-only `all_tags=True` to transfer every tag of
+one repository. `x` must be a single string with no tag or digest, or the call
+raises `ValueError` before any lookup. It's one transfer with no fanout: the
+blocking call returns `None` instead of handles, and `stream_logs=True` returns
+the stream. `push(..., all_tags=True)` skips the local-image preflight described
+above, so the CLI reports a missing repository.
+
+`platform` selects a platform manifest. `push` and `inspect` take one string;
+`load`, `save`, and `remove` take a string or an iterable of strings, sent as
+repeated `--platform` options. `pull` already took one string.
+`inspect(..., platform=...)` returns `ImageInspectResult` snapshots (one for a
+string, a list for an iterable), not `Image` handles, because a platform
+manifest's own ID can't be reloaded. An image-ID reference can't match its
+platform snapshot and raises `ParsingError`.
