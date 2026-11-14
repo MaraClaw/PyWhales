@@ -155,12 +155,16 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         """Return whether this network can still be inspected."""
         return NetworkCLI(self.client_config).exists(self.id)
 
-    def remove(self) -> None:
+    def remove(self, *, force: bool = False) -> None:
         """Remove this Docker network.
 
         A context manager attempts this removal even if its body raises.
+
+        Args:
+            force: Pass `--force`, so Docker doesn't report an error when the
+                network doesn't exist.
         """
-        NetworkCLI(self.client_config).remove(self)
+        NetworkCLI(self.client_config).remove(self, force=force)
 
 
 ValidNetwork = Network | str
@@ -178,6 +182,9 @@ class NetworkCLI(DockerCLICaller):
         ip: str | None = None,
         ip6: str | None = None,
         links: Sequence[pywhales.components.container.cli_wrapper.ValidContainer] = (),
+        *,
+        gw_priority: int | None = None,
+        link_local_ips: Iterable[str] = (),
     ) -> None:
         """Connect a container to a network.
 
@@ -189,13 +196,20 @@ class NetworkCLI(DockerCLICaller):
             ip: IPv4 address, or None to let Docker choose.
             ip6: IPv6 address, or None to let Docker choose.
             links: Add links to other containers
+            gw_priority: Gateway priority for this attachment; the highest value
+                provides the container's default gateway and negative values are
+                allowed. None omits the option, while zero is sent.
+            link_local_ips: Link-local addresses to add to the container; the
+                default adds none.
         """
         full_cmd = Command([*self.docker_cmd, "network", "connect"])
         full_cmd.add_simple_arg("--alias", alias)
         full_cmd.add_args_iterable_or_single("--driver-opt", driver_options)
+        full_cmd.add_simple_arg("--gw-priority", gw_priority)
         full_cmd.add_simple_arg("--ip", ip)
         full_cmd.add_simple_arg("--ip6", ip6)
         full_cmd.add_args_iterable_or_single("--link", links)
+        full_cmd.add_args_iterable_or_single("--link-local-ip", link_local_ips)
         full_cmd += [network, container]
         try:
             run(full_cmd)
@@ -217,6 +231,11 @@ class NetworkCLI(DockerCLICaller):
         ipam_driver: str | None = None,
         ipam_options: Mapping[str, str | int] | None = None,
         ipam_pools: Sequence[NetworkIPAMPool] | None = None,
+        config_from: str | None = None,
+        config_only: bool = False,
+        ingress: bool = False,
+        ipv4: bool | None = None,
+        scope: Literal["local", "swarm"] | None = None,
     ) -> Network:
         """Create a Docker network.
 
@@ -233,28 +252,42 @@ class NetworkCLI(DockerCLICaller):
             ipam_driver: IPAM driver, or None for Docker's default.
             ipam_options: IPAM driver options; None adds none.
             ipam_pools: Ordered pools; cannot be combined with gateway or subnet.
+            config_from: Name of the configuration-only network from which the
+                new network copies its configuration; None adds none. Docker
+                resolves only the name, not the ID or a handle.
+            config_only: Create a configuration-only network.
+            ingress: Create a Swarm routing-mesh network.
+            ipv4: Enable IPv4 address assignment (`--ipv4`), disable it
+                (`--ipv4=false`), or omit the option when None.
+            scope: Network scope, `"local"` or `"swarm"`; None lets Docker choose.
 
         Returns:
             A handle to the created network without an initial inspect call.
 
         Raises:
             ValueError: For conflicting or ambiguous pool settings, invalid
-                mapping keys, or pool address values that expand as CSV.
+                mapping keys, pool address values that expand as CSV, or a scope
+                other than `"local"` or `"swarm"`.
             TypeError: For malformed option structures or boolean values.
         """
         extra_options = create_options(
             gateway=gateway,
             subnet=subnet,
             internal=internal,
+            ipv4=ipv4,
             enable_ipv6=enable_ipv6,
+            scope=scope,
             ipam_driver=ipam_driver,
             ipam_options=ipam_options,
             ipam_pools=ipam_pools,
         )
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
+        full_cmd.add_simple_arg("--config-from", config_from)
+        full_cmd.add_flag("--config-only", config_only)
         full_cmd.add_simple_arg("--driver", driver)
         full_cmd.add_simple_arg("--gateway", gateway)
+        full_cmd.add_flag("--ingress", ingress)
         full_cmd.add_simple_arg("--subnet", subnet)
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
         full_cmd.add_args_iterable_or_single("--opt", options)
@@ -304,26 +337,44 @@ class NetworkCLI(DockerCLICaller):
             return True
 
     @overload
-    def inspect(self, x: str) -> Network: ...
+    def inspect(self, x: str, *, verbose: Literal[False] = ...) -> Network: ...
 
     @overload
-    def inspect(self, x: Iterable[str]) -> builtins.list[Network]: ...
+    def inspect(
+        self, x: Iterable[str], *, verbose: Literal[False] = ...
+    ) -> builtins.list[Network]: ...
 
-    def inspect(self, x: str | Iterable[str]) -> Network | builtins.list[Network]:
+    @overload
+    def inspect(self, x: str | Iterable[str], *, verbose: Literal[True]) -> str: ...
+
+    def inspect(
+        self, x: str | Iterable[str], *, verbose: bool = False
+    ) -> Network | builtins.list[Network] | str:
         """Inspect one or more networks by name or ID.
 
         Args:
             x: One name or ID, or an iterable of references. An empty iterable
                 returns without invoking the CLI.
+            verbose: Return the raw `--verbose` diagnostic text from one launch
+                for every reference, instead of handles. The text is JSON and is
+                returned unparsed; it never seeds or pins any handle's cache.
 
         Returns:
-            One handle for a string, otherwise handles in request order with
-            duplicates retained as distinct handles.
+            With `verbose=True`, the CLI output as `str`, or `""` for an empty
+            iterable. Otherwise one handle for a string, or handles in request
+            order with duplicates retained as distinct handles.
 
         Raises:
             ParsingError: If a batch response has invalid shape, inconsistent
                 duplicate snapshots, or identities that do not match the requests.
         """
+        if verbose:
+            references = [x] if isinstance(x, str) else list(x)
+            if not references:
+                return ""
+            return run(
+                [*self.docker_cmd, "network", "inspect", "--verbose", *references]
+            )
         if isinstance(x, str):
             return Network(self.client_config, x)
         references = list(x)
@@ -409,16 +460,21 @@ class NetworkCLI(DockerCLICaller):
         )
         run(full_cmd, timeout=timeout)
 
-    def remove(self, networks: ValidNetwork | Iterable[ValidNetwork]) -> None:
+    def remove(
+        self, networks: ValidNetwork | Iterable[ValidNetwork], *, force: bool = False
+    ) -> None:
         """Remove one or more Docker networks.
 
         Args:
             networks: Network names, IDs, or handles. An empty selection is a no-op.
+            force: Pass `--force`, so Docker doesn't report an error for a network
+                that doesn't exist.
         """
         selected = to_list(networks)
         if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "network", "remove"])
+        full_cmd.add_flag("--force", force)
         full_cmd += selected
         try:
             run(full_cmd)
