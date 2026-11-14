@@ -2,7 +2,7 @@
 
 Docker contexts allow you to connect to docker daemons other than the local one. This is similar to the `-H` argument of the Docker command.
 
-Contexts commands allow you to declare, save, list local and remote Docker daemons and Kubernetes endpoints that you have.
+Contexts commands allow you to declare, save, list local and remote Docker daemon endpoints that you have.
 
 An exemple here with pywhales:
 
