@@ -68,6 +68,7 @@ def _check_resource_inspection_contracts(client: DockerClient) -> None:
 def _check_root_alias_contracts(client: DockerClient) -> None:
     assert_type(client.port("container"), list[PublishedPort])
     assert_type(client.port("container", 80, "tcp"), list[PublishedPort])
+    assert_type(client.events(), MappedProcessStream[DockerEvent])
 
 
 def _check_process_contracts(client: DockerClient, raw: bool) -> None:

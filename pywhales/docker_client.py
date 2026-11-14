@@ -302,7 +302,7 @@ class DockerClient(DockerCLICaller):
         self.copy = self.container.copy
         self.create = self.container.create
         self.diff = self.container.diff
-        self.events = None
+        self.events = self.system.events
         self.execute = self.container.execute
         self.export = self.container.export
         self.history = self.image.history
