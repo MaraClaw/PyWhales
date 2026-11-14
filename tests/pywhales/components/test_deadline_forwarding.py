@@ -763,7 +763,16 @@ def test_container_handle_start_forwards_positional_options_and_deadline(
 
     assert handle.start(True, True, False, "ctrl-x", timeout=2.5) == "out"
 
-    start.assert_called_once_with(handle, True, True, False, "ctrl-x", timeout=2.5)
+    start.assert_called_once_with(
+        handle,
+        True,
+        True,
+        False,
+        "ctrl-x",
+        checkpoint=None,
+        checkpoint_dir=None,
+        timeout=2.5,
+    )
 
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
@@ -1343,13 +1352,22 @@ def test_swarm_and_plugin_deadlines_are_keyword_only_and_append_to_old_signature
 def test_added_deadline_keeps_every_earlier_parameter_positional(
     method: Callable[..., object],
 ) -> None:
-    parameters = list(signature(method).parameters.values())
+    parameters = [
+        parameter
+        for parameter in signature(method).parameters.values()
+        if parameter.name != "self"
+    ]
+    positional = [
+        parameter
+        for parameter in parameters
+        if parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+    ]
 
     assert parameters[-1].name == "timeout"
+    assert parameters[: len(positional)] == positional
     assert all(
-        parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD,)
-        for parameter in parameters[:-1]
-        if parameter.name != "self"
+        parameter.kind is Parameter.KEYWORD_ONLY
+        for parameter in parameters[len(positional) :]
     )
 
 

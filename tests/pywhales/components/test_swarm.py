@@ -236,7 +236,7 @@ def test_update_serializes_optional_values(
         "0.0s",
         "--dispatcher-heartbeat",
         "2.5s",
-        "--external-ci",
+        "--external-ca",
         "endpoint",
         "--max-snapshots",
         "0",

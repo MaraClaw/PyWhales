@@ -28,8 +28,10 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.2.5.
-An installed version string alone isn't proof of support. Check inherited
+The guidance describes source APIs for project version 1.3.0.
+An installed version string alone isn't proof of support. Check Docker CLI 29
+additions (the checkpoint group, raw-text flags, Buildx history and policy,
+Compose stats and wait), inherited
 environment selection, archive stderr allowances, Swarm hydrated listings,
 reconciliation lease renewal, node and standalone targets,
 completion/restart/failure keywords, strict workload
@@ -142,6 +144,13 @@ for record_type in (
         {f.name: f.default for f in fields(record_type)}["schema_version"],
     )  # schema_version must be 11 for all four record types
 print(get_annotations(ServiceTarget, format=Format.STRING)["mode"])  # job modes?
+print(hasattr(docker, "checkpoint"))  # True; the engine still needs CRIU
+print(hasattr(docker, "trust"))  # False: removed with Docker CLI 29
+print(signature(docker.buildx.history.list, annotation_format=Format.STRING))
+print(signature(docker.checkpoint.create, annotation_format=Format.STRING))
+print(signature(docker.compose.stats, annotation_format=Format.STRING))
+print(signature(DockerClient).parameters["compose_all_resources"])  # bool = False
+print(signature(DockerClient).parameters["compose_ansi"])  # defaults to None
 
 methods = [
     getattr(docker.compose, name)
@@ -154,8 +163,10 @@ methods = [
         "pull",
         "run",
         "start",
+        "stats",
         "stop",
         "up",
+        "wait",
     )
 ]
 methods += [
@@ -179,6 +190,11 @@ methods += [
     docker.volume.prune,
     docker.system.prune,
     docker.service.logs,
+    docker.container.port,
+    docker.config.inspect,
+    docker.image.list,
+    docker.system.disk_free,
+    docker.buildx.disk_usage,
 ]
 for method in methods:
     print(method.__qualname__, signature(method, annotation_format=Format.STRING))
@@ -328,6 +344,22 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   positive exact integer seconds only, require explicit ceiling approval and
   the conditional `health_start_interval` runtime control, and keep `CONTROLS`
   unchanged. See [Startup health intervals and profiles](containers-and-output.md#startup-health-interval-and-approved-profiles).
+- `hasattr(docker, "checkpoint")` true and `hasattr(docker, "trust")` false. The
+  group's presence doesn't prove the daemon is experimental with CRIU, and
+  `container.port` should return `list[PublishedPort]`. See
+  [Docker CLI 29 container changes](containers-and-output.md#docker-cli-29-container-changes).
+- Keyword-only raw-text flags that default to `False`: `pretty` on config, secret,
+  node, and service `inspect`; `verbose` on `system.disk_free`, `network.inspect`,
+  `manifest.inspect`, and `buildx.disk_usage`; `tree` on `image.list`; and Buildx
+  `debug`. Each needs a `Literal[True]` overload returning `str`; the loop above
+  prints them for config `inspect`, `disk_free`, `image.list`, and `disk_usage`,
+  so add other methods the same way. See
+  [Raw-text option results](client-and-errors.md#raw-text-option-results).
+- `compose_all_resources: bool = False` and
+  `compose_ansi: Literal["never", "always", "auto"] | None = None` on `DockerClient`,
+  plus the `docker.buildx.history`, `docker.buildx.policy`,
+  `docker.buildx.replay`, and `docker.buildx.dap` sub-CLIs. A missing attribute
+  means this installed capability isn't available.
 
 Optional `None` results still need a guard before context entry. A missing
 import, keyword, kind, or annotation means this installed capability isn't

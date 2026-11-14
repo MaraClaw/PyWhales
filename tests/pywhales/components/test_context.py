@@ -8,11 +8,7 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales.client_config import ParsingError
-from pywhales.components.context.cli_wrapper import (
-    Context,
-    DockerContextConfig,
-    KubernetesContextConfig,
-)
+from pywhales.components.context.cli_wrapper import Context, DockerContextConfig
 from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
 from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
@@ -200,23 +196,24 @@ def test_create_context_with_endpoint_options(as_dict: bool) -> None:
     client = DockerClient(host="origin")
     client.client_config._client_call_with_path = ["docker-test"]
     source = Context(client.client_config, "source", is_immutable_id=True)
-    docker_options = {
-        "from_": source,
-        "host": "ssh://example",
-        "certificate_authority": Path("/certs/ca.pem"),
-        "certificate": Path("/certs/client.pem"),
-        "key": Path("/certs/key.pem"),
-        "skip_tls_verify": True,
-    }
-    kubernetes_options = {
-        "from_": source,
-        "config_file": Path("/config/kube"),
-        "context_override": "cluster",
-        "namespace_override": "team",
-    }
-    docker = docker_options if as_dict else DockerContextConfig(**docker_options)
-    kubernetes = (
-        kubernetes_options if as_dict else KubernetesContextConfig(**kubernetes_options)
+    docker = (
+        {
+            "from_": source,
+            "host": "ssh://example",
+            "certificate_authority": Path("/certs/ca.pem"),
+            "certificate": Path("/certs/client.pem"),
+            "key": Path("/certs/key.pem"),
+            "skip_tls_verify": True,
+        }
+        if as_dict
+        else DockerContextConfig(
+            from_=source,
+            host="ssh://example",
+            certificate_authority=Path("/certs/ca.pem"),
+            certificate=Path("/certs/client.pem"),
+            key=Path("/certs/key.pem"),
+            skip_tls_verify=True,
+        )
     )
     responses = [
         CompletedProcess([], 0, b"created\n", b""),
@@ -225,11 +222,9 @@ def test_create_context_with_endpoint_options(as_dict: bool) -> None:
     with patch("subprocess.run", side_effect=responses) as command:
         result = client.context.create(
             "created",
-            default_stack_orchestrator="swarm",
             description="test context",
             from_=source,
             docker=docker,
-            kubernetes=kubernetes,
         )
 
     assert isinstance(result, Context)
@@ -242,16 +237,12 @@ def test_create_context_with_endpoint_options(as_dict: bool) -> None:
             "origin",
             "context",
             "create",
-            "--default-stack-orchestrator",
-            "swarm",
             "--description",
             "test context",
             "--from",
             "source",
             "--docker",
             "from=source,host=ssh://example,ca=/certs/ca.pem,cert=/certs/client.pem,key=/certs/key.pem,skip-tls-verify=True",
-            "--kubernetes",
-            "from=source,config-file=/config/kube,context-override=cluster,namespace-override=team",
             "created",
         ],
         ["docker-test", "--host", "origin", "context", "inspect", "created"],
@@ -267,17 +258,9 @@ def test_create_context_omits_unspecified_options(empty_configs: bool) -> None:
         CompletedProcess([], 0, b'[{"Name":"minimal"}]', b""),
     ]
     with patch("subprocess.run", side_effect=responses) as command:
-        result = client.context.create(
-            "minimal",
-            docker={} if empty_configs else None,
-            kubernetes={} if empty_configs else None,
-        )
+        result = client.context.create("minimal", docker={} if empty_configs else None)
 
-    options = (
-        ["--docker", "skip-tls-verify=False", "--kubernetes", ""]
-        if empty_configs
-        else []
-    )
+    options = ["--docker", "skip-tls-verify=False"] if empty_configs else []
     assert result.name == "minimal"
     assert [call.args[0] for call in command.call_args_list] == [
         ["docker-test", "context", "create", *options, "minimal"],

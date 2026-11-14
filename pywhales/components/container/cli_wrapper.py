@@ -10,6 +10,7 @@ import builtins
 import shlex
 import textwrap
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType, TracebackType
@@ -86,6 +87,8 @@ type ContainerListFilter = (
     | tuple[Literal["is-task"], str]
     | tuple[Literal["until"], str]
 )
+
+type AttachStream = Literal["stdin", "stdout", "stderr"]
 
 
 class ExecuteArgs(TypedDict, total=False, closed=True):
@@ -288,6 +291,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         author: str | None = None,
         message: str | None = None,
         pause: bool = True,
+        *,
+        changes: str | Iterable[str] = (),
     ) -> pywhales.components.image.cli_wrapper.Image:
         """Create a new image from the container's changes.
 
@@ -297,7 +302,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         information about the arguments.
         """
         return ContainerCLI(self.client_config).commit(
-            self, tag, author, message, pause
+            self, tag, author, message, pause, changes=changes
         )
 
     def copy_from(
@@ -305,6 +310,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         container_path: ValidPath,
         local_path: ValidPath,
         *,
+        archive: bool = False,
+        follow_link: bool = False,
+        quiet: bool = False,
         timeout: float | None = None,
     ) -> None:
         """Copy a container path to the Python host's filesystem.
@@ -312,6 +320,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         Args:
             container_path: Source path inside this container.
             local_path: Destination path on the Python host, not the daemon host.
+            archive: Copy all uid/gid information.
+            follow_link: Always follow symlinks in the source path.
+            quiet: Suppress progress output during the copy.
             timeout: Positive finite seconds from local copy CLI launch, or `None`
                 to inherit the configured default.
 
@@ -320,7 +331,12 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             DockerTimeout: The local copy CLI exceeds its deadline.
         """
         return ContainerCLI(self.client_config).copy(
-            (self, container_path), local_path, timeout=timeout
+            (self, container_path),
+            local_path,
+            archive=archive,
+            follow_link=follow_link,
+            quiet=quiet,
+            timeout=timeout,
         )
 
     def copy_to(
@@ -328,6 +344,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         local_path: ValidPath,
         container_path: ValidPath,
         *,
+        archive: bool = False,
+        follow_link: bool = False,
+        quiet: bool = False,
         timeout: float | None = None,
     ) -> None:
         """Copy a local path into this container.
@@ -335,6 +354,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         Args:
             local_path: Source path on the Python host, not the daemon host.
             container_path: Destination path inside this container.
+            archive: Copy all uid/gid information.
+            follow_link: Always follow symlinks in the source path.
+            quiet: Suppress progress output during the copy.
             timeout: Positive finite seconds from local copy CLI launch, or `None`
                 to inherit the configured default.
 
@@ -343,7 +365,12 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             DockerTimeout: The local copy CLI exceeds its deadline.
         """
         return ContainerCLI(self.client_config).copy(
-            local_path, (self, container_path), timeout=timeout
+            local_path,
+            (self, container_path),
+            archive=archive,
+            follow_link=follow_link,
+            quiet=quiet,
+            timeout=timeout,
         )
 
     def diff(self) -> dict[str, str]:
@@ -546,22 +573,39 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         """
         return ContainerCLI(self.client_config).rename(self, new_name)
 
-    def restart(self, time: int | timedelta | None = None) -> None:
+    def port(
+        self, private_port: int | str | None = None, protocol: str | None = None
+    ) -> list[PublishedPort]:
+        """Return this container's published port bindings.
+
+        See the [`docker.container.port`](../sub-commands/container.md#port) command for
+        information about the arguments.
+        """
+        return ContainerCLI(self.client_config).port(self, private_port, protocol)
+
+    def restart(
+        self,
+        time: int | timedelta | None = None,
+        *,
+        signal: int | str | None = None,
+    ) -> None:
         """Restart this container.
 
         See the [`docker.container.restart`](../sub-commands/container.md#restart) command for
         information about the arguments.
         """
-        return ContainerCLI(self.client_config).restart(self, time)
+        return ContainerCLI(self.client_config).restart(self, time, signal=signal)
 
-    def remove(self, force: bool = False, volumes: bool = False) -> None:
+    def remove(
+        self, force: bool = False, volumes: bool = False, *, link: bool = False
+    ) -> None:
         """Remove this container.
 
         See the [`docker.container.remove`](../sub-commands/container.md#remove) command for
         information about the arguments.
         """
         return ContainerCLI(self.client_config).remove(
-            self, force=force, volumes=volumes
+            self, force=force, volumes=volumes, link=link
         )
 
     @overload
@@ -572,6 +616,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> None: ...
 
@@ -583,6 +629,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         stream: Literal[False] = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str: ...
 
@@ -594,6 +642,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         *,
         stream: Literal[True],
         detach_keys: str | None = None,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> ProcessStream: ...
 
@@ -605,6 +655,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream | None: ...
 
@@ -615,6 +667,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream | None:
         """Start this container.
@@ -627,6 +681,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             interactive: Attach stdin (ensure it is open).
             stream: Return an owned output stream; requires `attach=True`.
             detach_keys: Override the key sequence for detaching a container.
+            checkpoint: Restore from this checkpoint. Requires an experimental
+                daemon with CRIU support.
+            checkpoint_dir: Custom checkpoint storage directory.
             timeout: Positive finite seconds from the start CLI's own launch,
                 replacing the client default; `None` inherits it.
 
@@ -642,20 +699,89 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
                 killed and reaped; the container is not stopped.
         """
         return ContainerCLI(self.client_config).start(
-            self, attach, interactive, stream, detach_keys, timeout=timeout
+            self,
+            attach,
+            interactive,
+            stream,
+            detach_keys,
+            checkpoint=checkpoint,
+            checkpoint_dir=checkpoint_dir,
+            timeout=timeout,
         )
 
-    def stop(self, time: int | timedelta | None = None) -> None:
+    def stop(
+        self,
+        time: int | timedelta | None = None,
+        *,
+        signal: int | str | None = None,
+    ) -> None:
         """Stop this container.
 
         See the [`docker.container.stop`](../sub-commands/container.md#stop) command for
         information about the arguments.
         """
-        return ContainerCLI(self.client_config).stop(self, time)
+        return ContainerCLI(self.client_config).stop(self, time, signal=signal)
 
 
 ContainerPath = tuple[Container | str, ValidPath]
 ValidContainer = Container | str
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedPort:
+    """One published port parsed from the text output of `docker container port`.
+
+    Attributes:
+        container_port: Container port with its protocol, such as `80/tcp`.
+        host_ip: Host address without IPv6 brackets, such as `0.0.0.0` or `::`.
+        host_port: Published host port.
+    """
+
+    container_port: str
+    host_ip: str
+    host_port: int
+
+
+def _grace_seconds(time: int | timedelta | None) -> int | None:
+    """Return whole seconds for an integer-valued stop or restart grace period.
+
+    Docker parses `--timeout` as an integer, so a duration suffix is rejected.
+    Integers pass through unchanged and fractional timedelta seconds truncate
+    toward zero.
+    """
+    if isinstance(time, timedelta):
+        return int(time.total_seconds())
+    return time
+
+
+def _parse_port_bindings(output: str, requested: str | None) -> list[PublishedPort]:
+    """Parse `docker container port` output into published port bindings.
+
+    Without a requested port every line reads `<port>/<proto> -> <ip>:<port>`.
+    With one, Docker prints only `<ip>:<port>`, so the request supplies the
+    container side, defaulting to TCP as Docker does.
+
+    Raises:
+        ParsingError: A line is not a port mapping.
+    """
+    bindings: list[PublishedPort] = []
+    for line in output.splitlines():
+        if requested is None:
+            container_port, separator, address = line.partition(" -> ")
+        else:
+            container_port = requested if "/" in requested else f"{requested}/tcp"
+            separator, address = " -> ", line
+        host_ip, colon, host_port = address.rpartition(":")
+        if not (separator and colon and host_port.isascii() and host_port.isdigit()):
+            raise ParsingError("Unexpected container port output")
+        bindings.append(
+            PublishedPort(
+                container_port,
+                host_ip.removeprefix("[").removesuffix("]"),
+                int(host_port),
+            )
+        )
+    return bindings
 
 
 def _health_start_interval_seconds(value: int | timedelta | None) -> int | None:
@@ -673,6 +799,8 @@ def _health_start_interval_seconds(value: int | timedelta | None) -> int | None:
 
 class RunArgs(TypedDict, total=False, closed=True):
     add_hosts: Iterable[tuple[str, str]]
+    annotations: Mapping[str, str]
+    attach: AttachStream | Iterable[AttachStream]
     blkio_weight: int | None
     blkio_weight_device: Iterable[str]
     cap_add: Iterable[str]
@@ -680,6 +808,8 @@ class RunArgs(TypedDict, total=False, closed=True):
     cgroup_parent: str | None
     cgroupns: str | None
     cidfile: ValidPath | None
+    cpu_count: int | None
+    cpu_percent: int | None
     cpu_period: int | None
     cpu_quota: int | None
     cpu_rt_period: int | None
@@ -688,13 +818,13 @@ class RunArgs(TypedDict, total=False, closed=True):
     cpus: float | None
     cpuset_cpus: list[int] | str | None
     cpuset_mems: list[int] | str | None
+    detach_keys: str | None
     devices: Iterable[str]
     device_cgroup_rules: Iterable[str]
     device_read_bps: Iterable[str]
     device_read_iops: Iterable[str]
     device_write_bps: Iterable[str]
     device_write_iops: Iterable[str]
-    content_trust: bool
     dns: Iterable[str]
     dns_options: Iterable[str]
     dns_search: Iterable[str]
@@ -715,11 +845,12 @@ class RunArgs(TypedDict, total=False, closed=True):
     hostname: str | None
     init: bool
     interactive: bool
+    io_maxbandwidth: int | str | None
+    io_maxiops: int | None
     ip: str | None
     ip6: str | None
     ipc: str | None
     isolation: str | None
-    kernel_memory: int | str | None
     labels: Mapping[str, str]
     label_files: Iterable[ValidPath]
     link: Iterable[ValidContainer]
@@ -744,12 +875,12 @@ class RunArgs(TypedDict, total=False, closed=True):
     publish: Iterable[ValidPortMapping]
     publish_all: bool
     pull: str
+    quiet: bool
     read_only: bool
     restart: str | None
     remove: bool
     runtime: str | None
     security_options: Iterable[str]
-    service_ports: bool
     shm_size: int | str | None
     sig_proxy: bool
     stop_signal: int | str | None
@@ -759,6 +890,8 @@ class RunArgs(TypedDict, total=False, closed=True):
     tmpfs: Iterable[ValidPath]
     tty: bool
     ulimit: Iterable[str]
+    umask: str | None
+    use_api_socket: bool
     user: str | None
     userns: str | None
     uts: str | None
@@ -810,6 +943,8 @@ class ContainerCLI(DockerCLICaller):
         author: str | None = None,
         message: str | None = None,
         pause: bool = True,
+        *,
+        changes: str | Iterable[str] = (),
     ) -> pywhales.components.image.cli_wrapper.Image:
         """Create a new image from a container's changes.
 
@@ -818,8 +953,10 @@ class ContainerCLI(DockerCLICaller):
             tag: tag to apply on the image produced
             author: Author (e.g., "John Hannibal Smith <hannibal@a-team.com>")
             message: Commit message
-            pause: Accepted but currently not forwarded; Docker's pause default
-                applies regardless of this value.
+            pause: Pause the container during the commit. `False` passes
+                `--no-pause`; `True` leaves Docker's default.
+            changes: Dockerfile instructions to apply to the created image, such
+                as `"ENV A=1"`; one `--change` is passed for each.
 
         Returns:
             The committed image using the originating client configuration.
@@ -827,10 +964,9 @@ class ContainerCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "container", "commit"])
 
         full_cmd.add_simple_arg("--author", author)
+        full_cmd.add_args_iterable_or_single("--change", changes)
         full_cmd.add_simple_arg("--message", message)
-
-        # TODO: fixme
-        # full_cmd += ["--pause", str(pause).lower()]
+        full_cmd.add_flag("--no-pause", not pause)
 
         full_cmd.append(str(container))
         if tag is not None:
@@ -845,6 +981,9 @@ class ContainerCLI(DockerCLICaller):
         source: ValidPath | ContainerPath,
         destination: ValidPath | ContainerPath,
         *,
+        archive: bool = False,
+        follow_link: bool = False,
+        quiet: bool = False,
         timeout: float | None = None,
     ) -> None:
         """Copy files or folders between a container and the local filesystem.
@@ -859,6 +998,9 @@ class ContainerCLI(DockerCLICaller):
             destination: Local destination path on the Python host, or a
                 `(container_reference, path_in_container)` endpoint. Docker
                 requires exactly one container endpoint.
+            archive: Copy all uid/gid information.
+            follow_link: Always follow symlinks in the source path.
+            quiet: Suppress progress output during the copy.
             timeout: Positive finite seconds from local copy CLI launch, or `None`
                 to inherit the configured default. Validated before the CLI is
                 resolved or launched.
@@ -870,6 +1012,9 @@ class ContainerCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "container", "cp"])
+        full_cmd.add_flag("--archive", archive)
+        full_cmd.add_flag("--follow-link", follow_link)
+        full_cmd.add_flag("--quiet", quiet)
         target = destination[0] if isinstance(destination, tuple) else None
 
         if isinstance(source, tuple):
@@ -894,6 +1039,7 @@ class ContainerCLI(DockerCLICaller):
         command: Sequence[str] = (),
         *,
         add_hosts: Iterable[tuple[str, str]] = (),
+        annotations: Mapping[str, str] = {},
         blkio_weight: int | None = None,
         blkio_weight_device: Iterable[str] = (),
         cap_add: Iterable[str] = (),
@@ -901,6 +1047,8 @@ class ContainerCLI(DockerCLICaller):
         cgroup_parent: str | None = None,
         cgroupns: str | None = None,
         cidfile: ValidPath | None = None,
+        cpu_count: int | None = None,
+        cpu_percent: int | None = None,
         cpu_period: int | None = None,
         cpu_quota: int | None = None,
         cpu_rt_period: int | None = None,
@@ -916,7 +1064,6 @@ class ContainerCLI(DockerCLICaller):
         device_read_iops: Iterable[str] = (),
         device_write_bps: Iterable[str] = (),
         device_write_iops: Iterable[str] = (),
-        content_trust: bool = False,
         dns: Iterable[str] = (),
         dns_options: Iterable[str] = (),
         dns_search: Iterable[str] = (),
@@ -937,11 +1084,12 @@ class ContainerCLI(DockerCLICaller):
         hostname: str | None = None,
         init: bool = False,
         interactive: bool = False,
+        io_maxbandwidth: int | str | None = None,
+        io_maxiops: int | None = None,
         ip: str | None = None,
         ip6: str | None = None,
         ipc: str | None = None,
         isolation: str | None = None,
-        kernel_memory: int | str | None = None,
         labels: Mapping[str, str] = {},
         label_files: Iterable[ValidPath] = (),
         link: Iterable[ValidContainer] = (),
@@ -966,6 +1114,7 @@ class ContainerCLI(DockerCLICaller):
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
         pull: str = "missing",
+        quiet: bool = False,
         read_only: bool = False,
         restart: str | None = None,
         remove: bool = False,
@@ -980,6 +1129,8 @@ class ContainerCLI(DockerCLICaller):
         tmpfs: Iterable[ValidPath] = (),
         tty: bool = False,
         ulimit: Iterable[str] = (),
+        umask: str | None = None,
+        use_api_socket: bool = False,
         user: str | None = None,
         userns: str | None = None,
         uts: str | None = None,
@@ -1035,6 +1186,7 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable(
             "--add-host", (f"{host}:{ip}" for host, ip in add_hosts)
         )
+        full_cmd.add_args_mapping("--annotation", annotations)
 
         full_cmd.add_simple_arg("--blkio-weight", blkio_weight)
         full_cmd.add_args_iterable("--blkio-weight-device", blkio_weight_device)
@@ -1046,6 +1198,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--cgroupns", cgroupns)
         full_cmd.add_simple_arg("--cidfile", cidfile)
 
+        full_cmd.add_simple_arg("--cpu-count", cpu_count)
+        full_cmd.add_simple_arg("--cpu-percent", cpu_percent)
         full_cmd.add_simple_arg("--cpu-period", cpu_period)
         full_cmd.add_simple_arg("--cpu-quota", cpu_quota)
         full_cmd.add_simple_arg("--cpu-rt-period", cpu_rt_period)
@@ -1063,9 +1217,6 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable("--device-read-iops", device_read_iops)
         full_cmd.add_args_iterable("--device-write-bps", device_write_bps)
         full_cmd.add_args_iterable("--device-write-iops", device_write_iops)
-
-        if content_trust:
-            full_cmd += ["--disable-content-trust", "false"]
 
         full_cmd.add_args_iterable("--dns", dns)
         full_cmd.add_args_iterable("--dns-option", dns_options)
@@ -1101,12 +1252,14 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_flag("--init", init)
         full_cmd.add_flag("--interactive", interactive)
 
+        full_cmd.add_simple_arg("--io-maxbandwidth", io_maxbandwidth)
+        full_cmd.add_simple_arg("--io-maxiops", io_maxiops)
+
         full_cmd.add_simple_arg("--ip", ip)
         full_cmd.add_simple_arg("--ip6", ip6)
         full_cmd.add_simple_arg("--ipc", ipc)
 
         full_cmd.add_simple_arg("--isolation", isolation)
-        full_cmd.add_simple_arg("--kernel-memory", kernel_memory)
 
         full_cmd.add_args_mapping("--label", labels)
         full_cmd.add_args_iterable("--label-file", label_files)
@@ -1144,6 +1297,7 @@ class ContainerCLI(DockerCLICaller):
 
         if pull == "never":
             full_cmd.add_simple_arg("--pull", "never")
+        full_cmd.add_flag("--quiet", quiet)
 
         full_cmd.add_flag("--read-only", read_only)
         full_cmd.add_simple_arg("--restart", restart)
@@ -1164,6 +1318,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable("--tmpfs", tmpfs)
         full_cmd.add_flag("--tty", tty)
         full_cmd.add_args_iterable("--ulimit", ulimit)
+        full_cmd.add_simple_arg("--umask", umask)
+        full_cmd.add_flag("--use-api-socket", use_api_socket)
 
         full_cmd.add_simple_arg("--user", user)
         full_cmd.add_simple_arg("--userns", userns)
@@ -1444,21 +1600,29 @@ class ContainerCLI(DockerCLICaller):
             run(full_cmd, timeout=timeout)
 
     @overload
-    def inspect(self, x: ValidContainer, /) -> Container: ...
+    def inspect(self, x: ValidContainer, /, *, size: bool = False) -> Container: ...
 
     @overload
-    def inspect(self, x: Iterable[ValidContainer], /) -> builtins.list[Container]: ...
+    def inspect(
+        self, x: Iterable[ValidContainer], /, *, size: bool = False
+    ) -> builtins.list[Container]: ...
 
     def inspect(
-        self, x: ValidContainer | Iterable[ValidContainer], /
+        self, x: ValidContainer | Iterable[ValidContainer], /, *, size: bool = False
     ) -> Container | builtins.list[Container]:
         """Inspect container references and return handles with stable IDs.
 
         Iterable input uses one CLI invocation and validates all snapshots before
         returning handles with seeded inspection caches. Empty input skips the CLI.
 
+        `size=True` passes `--size` for scalar and iterable input alike and pins
+        each snapshot: sizes are absent from ordinary inspection, so the pin keeps
+        `size_rw` and `size_root_fs` readable until `reload()` or a mutating call
+        releases it, after which they read as `None`.
+
         Args:
             x: A container name, ID, or handle, or an iterable of those references.
+            size: Display total file sizes, filling `size_rw` and `size_root_fs`.
 
         Returns:
             One handle for scalar input, or a list in request order for iterable
@@ -1472,11 +1636,17 @@ class ContainerCLI(DockerCLICaller):
         """
 
         if isinstance(x, str | Container):
-            return Container(self.client_config, str(x))
-        references = [str(reference) for reference in x]
+            if not size:
+                return Container(self.client_config, str(x))
+            references = [str(x)]
+        else:
+            references = [str(reference) for reference in x]
         if not references:
             return []
-        json_str = run([*self.docker_cmd, "container", "inspect", *references])
+        full_cmd = Command([*self.docker_cmd, "container", "inspect"])
+        full_cmd.add_flag("--size", size)
+        full_cmd.extend(references)
+        json_str = run(full_cmd)
         parser = Container(self.client_config, references[0], is_immutable_id=True)
         snapshots = parser._parse_inspect_results(json_str, references)
         containers = []
@@ -1495,9 +1665,12 @@ class ContainerCLI(DockerCLICaller):
                     else "Container inspect identity does not match the requested reference"
                 )
             container = Container(self.client_config, snapshot.id, is_immutable_id=True)
-            container._set_inspect_result(snapshot)
+            if size:
+                container._set_pinned_inspect_result(snapshot)
+            else:
+                container._set_inspect_result(snapshot)
             containers.append(container)
-        return containers
+        return containers[0] if isinstance(x, str | Container) else containers
 
     def kill(
         self,
@@ -1663,6 +1836,8 @@ class ContainerCLI(DockerCLICaller):
         filters: Iterable[ContainerListFilter] = (),
         *,
         hydrate: bool = False,
+        last: int | None = None,
+        latest: bool = False,
     ) -> builtins.list[Container]:
         """List containers on the selected daemon, which may be remote.
 
@@ -1677,6 +1852,9 @@ class ContainerCLI(DockerCLICaller):
                 `reload()` or a mutating call on the handle, and containers
                 that vanish before their inspect are omitted. If `False`, each
                 handle inspects lazily on first property access.
+            last: Show only the n most recently created containers, in any
+                state; `None` keeps Docker's default of no limit.
+            latest: Show only the most recently created container, in any state.
 
         Returns:
             Container handles in CLI order using the originating configuration.
@@ -1693,6 +1871,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable(
             "--filter", (f"{key}={value}" for key, value in filters)
         )
+        full_cmd.add_simple_arg("--last", last)
+        full_cmd.add_flag("--latest", latest)
 
         # TODO: add a test for the fix of is_immutable_id, without it, we get
         # race conditions (we read the attributes of a container but it might not exist.
@@ -1734,6 +1914,52 @@ class ContainerCLI(DockerCLICaller):
             run(full_cmd)
         finally:
             release_pins(container_list)
+
+    def port(
+        self,
+        container: ValidContainer,
+        private_port: int | str | None = None,
+        protocol: str | None = None,
+    ) -> builtins.list[PublishedPort]:
+        """List the published port mappings of a container.
+
+        Alias: `docker.port(...)`
+
+        Args:
+            container: The container whose published ports are listed.
+            private_port: Container port to look up; `None` lists every published
+                port. Docker assumes TCP unless a protocol is given.
+            protocol: Protocol of `private_port`, such as `"tcp"`, `"udp"` or
+                `"sctp"`. Requires `private_port`, which must not carry its own
+                `/protocol` suffix then.
+
+        Returns:
+            One binding per published address in CLI order, so a port published
+            on IPv4 and IPv6 yields two entries. Empty when nothing is published.
+            A looked-up port always reports its container side with a protocol
+            suffix, such as `80/tcp`.
+
+        Raises:
+            ValueError: `protocol` is given without `private_port` or alongside a
+                port that already names a protocol.
+            ParsingError: The CLI printed a line that is not a port mapping.
+            NoSuchContainer: The container does not exist.
+            DockerException: `private_port` is not published.
+        """
+        if private_port is None:
+            if protocol is not None:
+                raise ValueError("protocol requires private_port")
+            requested = None
+        else:
+            requested = str(private_port)
+            if protocol is not None:
+                if "/" in requested:
+                    raise ValueError("private_port already includes a protocol")
+                requested = f"{requested}/{protocol}"
+        full_cmd = Command([*self.docker_cmd, "container", "port", container])
+        if requested is not None:
+            full_cmd.append(requested)
+        return _parse_port_bindings(run(full_cmd), requested)
 
     @overload
     def prune(
@@ -1820,6 +2046,8 @@ class ContainerCLI(DockerCLICaller):
         self,
         containers: ValidContainer | Iterable[ValidContainer],
         time: int | timedelta | None = None,
+        *,
+        signal: int | str | None = None,
     ) -> None:
         """Restart one or more containers.
 
@@ -1827,8 +2055,10 @@ class ContainerCLI(DockerCLICaller):
 
         Args:
             containers: One or more containers to restart
-            time: Shutdown grace period in seconds or as a timedelta. `None`
-                leaves Docker's default unchanged; not a local CLI deadline.
+            time: Shutdown grace period in whole seconds or as a timedelta, whose
+                fractional seconds truncate. `None` leaves Docker's default
+                unchanged; not a local CLI deadline.
+            signal: Signal to send to the container, as a number or name.
 
         Raises:
             NoSuchContainer: A selected container does not exist.
@@ -1843,9 +2073,8 @@ class ContainerCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "restart"])
 
-        if time is not None:
-            seconds = time.total_seconds() if isinstance(time, timedelta) else time
-            full_cmd += ["--time", str(seconds)]
+        full_cmd.add_simple_arg("--signal", format_signal_arg(signal))
+        full_cmd.add_simple_arg("--timeout", _grace_seconds(time))
 
         full_cmd.extend(container_list)
 
@@ -1859,6 +2088,7 @@ class ContainerCLI(DockerCLICaller):
         containers: ValidContainer | Iterable[ValidContainer],
         *,
         force: bool = False,
+        link: bool = False,
         volumes: bool = False,
     ) -> None:
         """Remove one or more containers.
@@ -1868,6 +2098,7 @@ class ContainerCLI(DockerCLICaller):
         Args:
             containers: One or more containers.
             force: Force the removal of a running container (uses SIGKILL)
+            link: Remove the specified link instead of the container.
             volumes: Remove anonymous volumes associated with the container
 
         Raises:
@@ -1883,6 +2114,7 @@ class ContainerCLI(DockerCLICaller):
             return
         full_cmd = Command([*self.docker_cmd, "container", "rm"])
         full_cmd.add_flag("--force", force)
+        full_cmd.add_flag("--link", link)
         full_cmd.add_flag("--volumes", volumes)
 
         full_cmd.extend(container_list)
@@ -1942,6 +2174,8 @@ class ContainerCLI(DockerCLICaller):
         command: Sequence[str] = (),
         *,
         add_hosts: Iterable[tuple[str, str]] = (),
+        annotations: Mapping[str, str] = {},
+        attach: AttachStream | Iterable[AttachStream] = (),
         blkio_weight: int | None = None,
         blkio_weight_device: Iterable[str] = (),
         cap_add: Iterable[str] = (),
@@ -1949,6 +2183,8 @@ class ContainerCLI(DockerCLICaller):
         cgroup_parent: str | None = None,
         cgroupns: str | None = None,
         cidfile: ValidPath | None = None,
+        cpu_count: int | None = None,
+        cpu_percent: int | None = None,
         cpu_period: int | None = None,
         cpu_quota: int | None = None,
         cpu_rt_period: int | None = None,
@@ -1958,13 +2194,13 @@ class ContainerCLI(DockerCLICaller):
         cpuset_cpus: builtins.list[int] | str | None = None,
         cpuset_mems: builtins.list[int] | str | None = None,
         detach: bool = False,
+        detach_keys: str | None = None,
         devices: Iterable[str] = (),
         device_cgroup_rules: Iterable[str] = (),
         device_read_bps: Iterable[str] = (),
         device_read_iops: Iterable[str] = (),
         device_write_bps: Iterable[str] = (),
         device_write_iops: Iterable[str] = (),
-        content_trust: bool = False,
         dns: Iterable[str] = (),
         dns_options: Iterable[str] = (),
         dns_search: Iterable[str] = (),
@@ -1985,11 +2221,12 @@ class ContainerCLI(DockerCLICaller):
         hostname: str | None = None,
         init: bool = False,
         interactive: bool = False,
+        io_maxbandwidth: int | str | None = None,
+        io_maxiops: int | None = None,
         ip: str | None = None,
         ip6: str | None = None,
         ipc: str | None = None,
         isolation: str | None = None,
-        kernel_memory: int | str | None = None,
         labels: Mapping[str, str] = {},
         label_files: Iterable[ValidPath] = (),
         link: Iterable[ValidContainer] = (),
@@ -2014,12 +2251,12 @@ class ContainerCLI(DockerCLICaller):
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
         pull: str = "missing",
+        quiet: bool = False,
         read_only: bool = False,
         restart: str | None = None,
         remove: bool = False,
         runtime: str | None = None,
         security_options: Iterable[str] = (),
-        service_ports: bool = False,
         shm_size: int | str | None = None,
         sig_proxy: bool = True,
         stop_signal: int | str | None = None,
@@ -2030,6 +2267,8 @@ class ContainerCLI(DockerCLICaller):
         tmpfs: Iterable[ValidPath] = (),
         tty: bool = False,
         ulimit: Iterable[str] = (),
+        umask: str | None = None,
+        use_api_socket: bool = False,
         user: str | None = None,
         userns: str | None = None,
         uts: str | None = None,
@@ -2054,6 +2293,11 @@ class ContainerCLI(DockerCLICaller):
                 command. A shell command string is not accepted.
             add_hosts: Hostname/address pairs to add to the container's hosts file,
                 such as `[("build.example", "192.0.2.1")]`.
+            annotations: Annotations passed through to the OCI runtime, forwarded as
+                one `--annotation key=value` option per entry.
+            attach: Stream name, or names, to attach to (`"stdin"`, `"stdout"` or
+                `"stderr"`), forwarded as repeated `--attach` options. Omission
+                keeps Docker's default.
             blkio_weight: Relative block-I/O weight; None leaves Docker's default.
             blkio_weight_device: Per-device block-I/O weights in Docker syntax.
             cap_add: Linux capabilities to add.
@@ -2061,6 +2305,8 @@ class ContainerCLI(DockerCLICaller):
             cgroup_parent: Parent cgroup; None omits the option.
             cgroupns: Cgroup namespace mode to use, one of 'host' or 'private'.
             cidfile: Local file in which the CLI writes the container ID.
+            cpu_count: CPU count (Windows only).
+            cpu_percent: CPU percent (Windows only).
             cpu_period: Limit CPU CFS (Completely Fair Scheduler) period
             cpu_quota: Limit CPU CFS (Completely Fair Scheduler) quota
             cpu_rt_period: Limit CPU real-time period in microseconds
@@ -2073,13 +2319,13 @@ class ContainerCLI(DockerCLICaller):
             cpuset_mems: Allowed NUMA memory-node indices, using the same notation
                 as `cpuset_cpus`; None omits the option.
             detach: Return a container handle without waiting for container exit.
+            detach_keys: Override the key sequence for detaching a container.
             devices: Host device mappings in Docker syntax.
             device_cgroup_rules: Device cgroup permission rules.
             device_read_bps: Per-device read limits in bytes per second.
             device_read_iops: Per-device read limits in operations per second.
             device_write_bps: Per-device write limits in bytes per second.
             device_write_iops: Per-device write limits in operations per second.
-            content_trust: Enable content-trust verification when true.
             dns: DNS server addresses.
             dns_options: Resolver options.
             dns_search: Set custom DNS search domains
@@ -2106,11 +2352,13 @@ class ContainerCLI(DockerCLICaller):
                 to allow communication with the parent process.
                 Currently only works with `tty=True` for interactive use
                 on the terminal.
+            io_maxbandwidth: Maximum IO bandwidth limit for the system drive in bytes
+                or Docker size notation (Windows only).
+            io_maxiops: Maximum IOps limit for the system drive (Windows only).
             ip: IPv4 address (e.g., 172.30.100.104)
             ip6: IPv6 address (e.g., 2001:db8::33)
             ipc: IPC mode to use
             isolation: Container isolation technology
-            kernel_memory: Kernel-memory limit in bytes or Docker size notation.
             labels: Container metadata names mapped to their values.
             label_files: Local files containing labels.
             link: Containers to link using Docker's legacy linking mechanism.
@@ -2140,12 +2388,12 @@ class ContainerCLI(DockerCLICaller):
                 `publish=[(80,)]`.
             publish_all: Publish all exposed ports to random ports.
             pull: Pull image before running ("always"|"missing"|"never") (default "missing").
+            quiet: Suppress the Docker CLI's pull output.
             read_only: Mount the container's root filesystem as read only.
             restart: Docker restart policy; None omits the option.
             remove: Automatically remove the container when it exits.
             runtime: Runtime to use for this container.
             security_options: Security options
-            service_ports: Enable service's ports to be created and mapped to the host (disabled by default)
             shm_size: Shared-memory size in bytes or Docker size notation.
             sig_proxy: Disable signal proxying when false.
             stop_signal: Signal Docker uses to stop the container.
@@ -2158,6 +2406,8 @@ class ContainerCLI(DockerCLICaller):
             tty: Allocate a pseudo-TTY. Allow the process to access your terminal
                 to write on it.
             ulimit: Resource-limit specifications in Docker syntax.
+            umask: Umask for the container, such as `"022"`.
+            use_api_socket: Bind mount the Docker API socket and required auth.
             user: Username or UID (format: `<name|uid>[:<group|gid>]`)
             userns:  User namespace to use
             uts:  UTS namespace to use
@@ -2206,6 +2456,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable(
             "--add-host", (f"{host}:{ip}" for host, ip in add_hosts)
         )
+        full_cmd.add_args_mapping("--annotation", annotations)
+        full_cmd.add_args_iterable_or_single("--attach", attach)
 
         full_cmd.add_simple_arg("--blkio-weight", blkio_weight)
         full_cmd.add_args_iterable("--blkio-weight-device", blkio_weight_device)
@@ -2217,6 +2469,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--cgroupns", cgroupns)
         full_cmd.add_simple_arg("--cidfile", cidfile)
 
+        full_cmd.add_simple_arg("--cpu-count", cpu_count)
+        full_cmd.add_simple_arg("--cpu-percent", cpu_percent)
         full_cmd.add_simple_arg("--cpu-period", cpu_period)
         full_cmd.add_simple_arg("--cpu-quota", cpu_quota)
         full_cmd.add_simple_arg("--cpu-rt-period", cpu_rt_period)
@@ -2227,6 +2481,7 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--cpuset-mems", format_cpuset(cpuset_mems))
 
         full_cmd.add_flag("--detach", detach)
+        full_cmd.add_simple_arg("--detach-keys", detach_keys)
 
         full_cmd.add_args_iterable("--device", devices)
         full_cmd.add_args_iterable("--device-cgroup-rule", device_cgroup_rules)
@@ -2234,9 +2489,6 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable("--device-read-iops", device_read_iops)
         full_cmd.add_args_iterable("--device-write-bps", device_write_bps)
         full_cmd.add_args_iterable("--device-write-iops", device_write_iops)
-
-        if content_trust:
-            full_cmd += ["--disable-content-trust", "false"]
 
         full_cmd.add_args_iterable("--dns", dns)
         full_cmd.add_args_iterable("--dns-option", dns_options)
@@ -2273,12 +2525,14 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_flag("--interactive", interactive)
 
+        full_cmd.add_simple_arg("--io-maxbandwidth", io_maxbandwidth)
+        full_cmd.add_simple_arg("--io-maxiops", io_maxiops)
+
         full_cmd.add_simple_arg("--ip", ip)
         full_cmd.add_simple_arg("--ip6", ip6)
         full_cmd.add_simple_arg("--ipc", ipc)
 
         full_cmd.add_simple_arg("--isolation", isolation)
-        full_cmd.add_simple_arg("--kernel-memory", kernel_memory)
 
         full_cmd.add_args_mapping("--label", labels)
         full_cmd.add_args_iterable("--label-file", label_files)
@@ -2316,6 +2570,7 @@ class ContainerCLI(DockerCLICaller):
 
         if pull == "never":
             full_cmd.add_simple_arg("--pull", "never")
+        full_cmd.add_flag("--quiet", quiet)
 
         full_cmd.add_flag("--read-only", read_only)
         full_cmd.add_simple_arg("--restart", restart)
@@ -2323,8 +2578,6 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_simple_arg("--runtime", runtime)
         full_cmd.add_args_iterable("--security-opt", security_options)
-
-        full_cmd.add_flag("--service-ports", service_ports)
 
         full_cmd.add_simple_arg("--shm-size", shm_size)
         if sig_proxy is False:
@@ -2338,6 +2591,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_args_iterable("--tmpfs", tmpfs)
         full_cmd.add_flag("--tty", tty)
         full_cmd.add_args_iterable("--ulimit", ulimit)
+        full_cmd.add_simple_arg("--umask", umask)
+        full_cmd.add_flag("--use-api-socket", use_api_socket)
 
         full_cmd.add_simple_arg("--user", user)
         full_cmd.add_simple_arg("--userns", userns)
@@ -2392,6 +2647,8 @@ class ContainerCLI(DockerCLICaller):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> None: ...
 
@@ -2404,6 +2661,8 @@ class ContainerCLI(DockerCLICaller):
         stream: Literal[False] = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str: ...
 
@@ -2416,6 +2675,8 @@ class ContainerCLI(DockerCLICaller):
         *,
         stream: Literal[True],
         detach_keys: str | None = None,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> ProcessStream: ...
 
@@ -2428,6 +2689,8 @@ class ContainerCLI(DockerCLICaller):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream | None: ...
 
@@ -2439,6 +2702,8 @@ class ContainerCLI(DockerCLICaller):
         stream: bool = False,
         detach_keys: str | None = None,
         *,
+        checkpoint: str | None = None,
+        checkpoint_dir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream | None:
         """Start one or more created or stopped containers.
@@ -2456,6 +2721,9 @@ class ContainerCLI(DockerCLICaller):
             interactive: Attach stdin (ensure it is open).
             stream: Return an owned output stream; requires attach=True.
             detach_keys: Override the key sequence for detaching a container.
+            checkpoint: Restore from this checkpoint. Requires an experimental
+                daemon with CRIU support.
+            checkpoint_dir: Custom checkpoint storage directory.
             timeout: Positive finite seconds from the start CLI's own launch,
                 replacing the client default; `None` inherits it. Timing
                 advances while stream consumption pauses. Validated before
@@ -2491,6 +2759,8 @@ class ContainerCLI(DockerCLICaller):
             )
         full_cmd = Command([*self.docker_cmd, "container", "start"])
         full_cmd.add_flag("--attach", attach)
+        full_cmd.add_simple_arg("--checkpoint", checkpoint)
+        full_cmd.add_simple_arg("--checkpoint-dir", checkpoint_dir)
         full_cmd.add_simple_arg("--detach-keys", detach_keys)
         full_cmd.add_flag("--interactive", interactive)
         full_cmd += container_list
@@ -2552,6 +2822,8 @@ class ContainerCLI(DockerCLICaller):
         self,
         containers: ValidContainer | Iterable[ValidContainer],
         time: int | timedelta | None = None,
+        *,
+        signal: int | str | None = None,
     ) -> None:
         """Stop one or more running containers.
 
@@ -2562,8 +2834,11 @@ class ContainerCLI(DockerCLICaller):
 
         Args:
             containers: Containers to stop; empty input skips execution.
-            time: Shutdown grace period in seconds before Docker kills the
-                container; None leaves the option unset for Docker to decide.
+            time: Shutdown grace period in whole seconds, or a timedelta whose
+                fractional seconds truncate, before Docker kills the container;
+                None leaves the option unset for Docker to decide.
+            signal: Signal to send to the container, as a number or name; `None`
+                keeps the container's stop signal.
 
         Raises:
             NoSuchContainer: If a selected container does not exist.
@@ -2577,9 +2852,8 @@ class ContainerCLI(DockerCLICaller):
             # nothing to do
             return
         full_cmd = Command([*self.docker_cmd, "container", "stop"])
-        full_cmd.add_simple_arg(
-            "--time", format_time_arg(time) if isinstance(time, timedelta) else time
-        )
+        full_cmd.add_simple_arg("--signal", format_signal_arg(signal))
+        full_cmd.add_simple_arg("--timeout", _grace_seconds(time))
         full_cmd.extend(container_list)
 
         try:
@@ -2679,7 +2953,6 @@ class ContainerCLI(DockerCLICaller):
         cpus: float | None = None,
         cpuset_cpus: str | None = None,
         cpuset_mems: str | None = None,
-        kernel_memory: int | str | None = None,
         memory: int | str | None = None,
         memory_reservation: int | str | None = None,
         memory_swap: int | str | None = None,
@@ -2705,7 +2978,6 @@ class ContainerCLI(DockerCLICaller):
                 `"0-3"`, `"0,2"`, or `"0-3,7"`.
             cpuset_mems: Allowed NUMA memory nodes in the same notation as
                 `cpuset_cpus`; None omits the option.
-            kernel_memory: Kernel-memory limit in bytes or Docker size notation.
             memory: Memory limit in bytes or Docker size notation, such as `"43m"`.
             memory_reservation: Memory soft limit
             memory_swap: Swap limit equal to memory plus swap: '-1'
@@ -2730,7 +3002,6 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--cpus", cpus)
         full_cmd.add_simple_arg("--cpuset-cpus", cpuset_cpus)
         full_cmd.add_simple_arg("--cpuset-mems", cpuset_mems)
-        full_cmd.add_simple_arg("--kernel-memory", kernel_memory)
         full_cmd.add_simple_arg("--memory", memory)
         full_cmd.add_simple_arg("--memory-reservation", memory_reservation)
         full_cmd.add_simple_arg("--memory-swap", memory_swap)

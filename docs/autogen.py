@@ -24,8 +24,19 @@ pages: Final[dict[str, list[str]]] = {
     "sub-commands/buildx.md": [
         "pywhales.components.buildx.cli_wrapper.BuildxCLI",
         "pywhales.components.buildx.imagetools.cli_wrapper.ImagetoolsCLI",
+        "pywhales.components.buildx.history.BuildxHistoryCLI",
+        "pywhales.components.buildx.policy.BuildxPolicyCLI",
+        "pywhales.components.buildx.replay.BuildxReplayCLI",
+        "pywhales.components.buildx.dap.BuildxDapCLI",
     ],
-    "sub-commands/compose.md": ["pywhales.components.compose.cli_wrapper.ComposeCLI"],
+    "sub-commands/checkpoint.md": [
+        "pywhales.components.checkpoint.cli_wrapper.CheckpointCLI"
+    ],
+    "sub-commands/compose.md": [
+        "pywhales.components.compose.cli_wrapper.ComposeCLI",
+        "pywhales.components.compose.bridge.ComposeBridgeCLI",
+        "pywhales.components.compose.bridge.ComposeTransformationsCLI",
+    ],
     "sub-commands/config.md": ["pywhales.components.config.cli_wrapper.ConfigCLI"],
     "sub-commands/container.md": [
         "pywhales.components.container.cli_wrapper.ContainerCLI"
@@ -44,7 +55,6 @@ pages: Final[dict[str, list[str]]] = {
     "sub-commands/swarm.md": ["pywhales.components.swarm.cli_wrapper.SwarmCLI"],
     "sub-commands/system.md": ["pywhales.components.system.cli_wrapper.SystemCLI"],
     "sub-commands/task.md": ["pywhales.components.task.cli_wrapper.TaskCLI"],
-    "sub-commands/trust.md": ["pywhales.components.trust.cli_wrapper.TrustCLI"],
     "sub-commands/volume.md": ["pywhales.components.volume.cli_wrapper.VolumeCLI"],
     "objects/builders.md": ["pywhales.Builder"],
     "objects/containers.md": ["pywhales.Container"],

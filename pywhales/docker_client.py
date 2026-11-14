@@ -7,13 +7,14 @@ operations require their corresponding external CLI support when invoked.
 
 import base64
 from collections.abc import Collection, Mapping, Sequence
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pydantic
 
 from pywhales._json import loads_compat
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
+from pywhales.components.checkpoint.cli_wrapper import CheckpointCLI
 from pywhales.components.compose.cli_wrapper import ComposeCLI
 from pywhales.components.config.cli_wrapper import ConfigCLI
 from pywhales.components.container.cli_wrapper import ContainerCLI
@@ -29,7 +30,6 @@ from pywhales.components.stack.cli_wrapper import StackCLI
 from pywhales.components.swarm.cli_wrapper import SwarmCLI
 from pywhales.components.system.cli_wrapper import SystemCLI
 from pywhales.components.task.cli_wrapper import TaskCLI
-from pywhales.components.trust.cli_wrapper import TrustCLI
 from pywhales.components.volume.cli_wrapper import VolumeCLI
 from pywhales.enums import ClientTypeInput, ComposeProgressInput
 from pywhales.telemetry import TelemetryObserver
@@ -161,6 +161,8 @@ class DockerClient(DockerCLICaller):
         inherit_environment: bool = True,
         strict_workload_errors: bool = False,
         inherited_environment_names: Collection[str] | None = None,
+        compose_all_resources: bool = False,
+        compose_ansi: Literal["never", "always", "auto"] | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -232,6 +234,10 @@ class DockerClient(DockerCLICaller):
                 collection selects none; None preserves the legacy inheritance mode.
                 Explicit client and operation overlays still apply. Executable lookup,
                 configuration files and credential helpers are not confined by this.
+            compose_all_resources: Emit Compose `--all-resources`, including
+                resources no service uses, only when true.
+            compose_ansi: Compose control-character mode (`"never"`, `"always"`
+                or `"auto"`); `None` omits `--ansi`.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -273,10 +279,13 @@ class DockerClient(DockerCLICaller):
                 inherit_environment=inherit_environment,
                 strict_workload_errors=strict_workload_errors,
                 inherited_environment_names=inherited_environment_names,
+                compose_all_resources=compose_all_resources,
+                compose_ansi=compose_ansi,
             )
         super().__init__(client_config)
 
         self.buildx = BuildxCLI(self.client_config)
+        self.checkpoint = CheckpointCLI(self.client_config)
         self.compose = ComposeCLI(self.client_config)
         self.config = ConfigCLI(self.client_config)
         self.container = ContainerCLI(self.client_config)
@@ -292,7 +301,6 @@ class DockerClient(DockerCLICaller):
         self.swarm = SwarmCLI(self.client_config)
         self.system = SystemCLI(self.client_config)
         self.task = TaskCLI(self.client_config)
-        self.trust = TrustCLI(self.client_config)
         self.volume = VolumeCLI(self.client_config)
 
         # aliases
@@ -302,9 +310,10 @@ class DockerClient(DockerCLICaller):
         self.copy = self.container.copy
         self.create = self.container.create
         self.diff = self.container.diff
-        self.events = None
+        self.events = self.system.events
         self.execute = self.container.execute
         self.export = self.container.export
+        self.history = self.image.history
         self.images = self.image.list
         self.import_ = self.image.import_
         self.info = self.system.info
@@ -313,6 +322,7 @@ class DockerClient(DockerCLICaller):
         self.load = self.image.load
         self.logs = self.container.logs
         self.pause = self.container.pause
+        self.port = self.container.port
         self.ps = self.container.list
         self.pull = self.image.pull
         self.push = self.image.push
@@ -322,7 +332,7 @@ class DockerClient(DockerCLICaller):
         # self.rmi -> doesn't make much sense since it would be docker.remove_image
         self.run = self.container.run
         self.save = self.image.save
-        # self.search -> Is anybody going to use it in python?
+        self.search = self.image.search
         self.start = self.container.start
         self.stats = self.container.stats
         self.stop = self.container.stop

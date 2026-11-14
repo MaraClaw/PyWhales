@@ -2,9 +2,12 @@
 
 ## Navigation
 
-- `cli_wrapper.py`: `Container`, `ContainerCLI`, launch/execute overloads, and `ContainerStats`.
+- `cli_wrapper.py`: `Container`, `ContainerCLI`, launch/execute overloads, `ContainerStats`, and `PublishedPort`.
 - `models.py`: inspect snapshots, including state, host config, mounts, and network settings.
 - `top.py`: Docker `ps` option grammar used by `ContainerCLI.top()`.
+- `../checkpoint/cli_wrapper.py`: `CheckpointCLI` (`create`, `list`, `remove`), which has no child guide. Docker checkpoints
+  need an experimental daemon with CRIU; without it every command raises `DockerException`. `create` takes the keyword-only
+  local `timeout` (validated first) and releases a supplied handle's pin even on failure; `list` skips the table heading.
 
 ## Cleanup And Launch
 
@@ -21,6 +24,10 @@
   don't add version probes or silent fallback. Profile approval lives in [the profiles guide](../../profiles/AGENTS.md).
 - `run()`, `create()`, and `execute()` require an argv sequence for `command`.
   A shell command string raises `TypeError`; don't split it implicitly.
+- Docker CLI 29 options on both builders: `annotations` (repeated `--annotation k=v`), `cpu_count`, `cpu_percent`,
+  `io_maxbandwidth`, `io_maxiops`, `quiet`, `umask` and `use_api_socket`; zero values are kept. `attach` (stream names,
+  repeated `--attach`) and `detach_keys` exist only on `run()`. `content_trust`, `kernel_memory` and `service_ports` were removed,
+  as was `update(kernel_memory=)`: they emitted flags Docker 29 rejects, so callers get `TypeError`. Keep `RunArgs` aligned.
 - Their `envs` share the [runtime environment transport](../../AGENTS.md#container-environment-transport); keep that policy out of separate builders.
 
 ## Output Modes
@@ -49,7 +56,8 @@
 - `start()` validates `timeout` first in every mode (unattached, captured, streamed) and entry point, before the
   container iterable is consumed or the empty-request return. An invalid value raises `ValueError` even for `[]`;
   a valid one with `[]` returns `None` without a launch. The multi-container attach and unattached-stream errors
-  come after it. The handle forwards positional `attach`, `interactive`, `stream`, and `detach_keys` unchanged.
+  come after it. The handle forwards positional `attach`, `interactive`, `stream`, and `detach_keys` unchanged, plus keyword-only
+  `checkpoint` and `checkpoint_dir` (restoring needs an experimental daemon).
 - Preflights stay outside the selected per-launch deadline. `run()` completes `ImageCLI` lookup or pulling and
   `logs()` completes inspection first; `execute()`, `copy()`, and `export()` finish validation, argv assembly, and
   executable lookup first. A detached `run()` doesn't budget the returned handle's lookup.
@@ -64,10 +72,21 @@
 
 - `list(hydrate=True)`, including `docker.ps`, keeps CLI order and pins exact full-ID snapshots through the shared `_hydration.py` helper. Default listings remain lazy; see the parent guide for chunking and disappearance handling.
 - Mutating launches (`execute`, start/stop/kill, pause/unpause, restart, rename, remove, update, and copy into a container) release the targeted handle's pin in `finally`, including failed launches and streamed returns. Other handles stay pinned; the next property read on the released handle inspects again.
+- `inspect(size=True)` passes `--size` for scalar and iterable input and pins its snapshots, because later inspections
+  omit `size_rw` and `size_root_fs`; the pin ends at `reload()` or a mutating launch.
 - Batch `inspect()` uses one command and preserves request order and duplicates.
   Validate response count, model data, and reference identity before caching snapshots:
   accept matching ID prefixes or names with an optional leading slash.
   An empty batch returns `[]` without resolving the executable.
+- `stop()` and `restart()` pass `--timeout <whole seconds>`, since Docker 29 deprecates `--time` and rejects duration suffixes;
+  a `timedelta` truncates toward zero. Both take keyword-only `signal` (`--signal`). The grace period is Docker data, not a local deadline.
+- `commit(changes=...)` repeats `--change`; `pause=False` passes `--no-pause` and `--pause` is never emitted. `copy`,
+  `copy_from` and `copy_to` take `archive`, `follow_link` and `quiet`; `remove(link=True)` passes `--link`; `list(last=, latest=)`
+  pass `--last`/`--latest` after the filters.
+- `port()` parses the text of `docker container port` into frozen `PublishedPort(container_port, host_ip, host_port)`, not the
+  inspect model `PortBinding` in `models.py`. Without a port each line is `<port>/<proto> -> <ip>:<port>`; with one, Docker
+  prints only `<ip>:<port>`, so the request supplies the container side (TCP by default). IPv6 brackets are stripped, a port on
+  both families gives two entries, and any other line raises `ParsingError`.
 - `top()` returns `ContainerTopResult` by default; `raw=True` returns CLI text.
   Docker `ps` tokens follow the container argument; don't apply the Compose grammar.
   Parsed mode supports explicit `-o`/`--format` fields, including heading aliases.
@@ -79,6 +98,9 @@
 Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
   eager-log decoding cleanup, streaming-log ownership, and fake-CLI hydrated listings, pin release and cleanup refresh; also contains live component tests.
+- `tests/pywhales/components/test_container_cli29.py`, `test_checkpoint.py` and `test_container_removed_options.py`: Docker 29
+  option argv, `port()` parsing, sized inspect pins, checkpoint commands and removed keywords, all with the recording fake CLI.
+- `tests/pywhales/test_container_cli29_types.py` and `test_checkpoint_types.py`: static contracts for those options and `CheckpointCLI`.
 - `tests/pywhales/components/test_container_health_interval.py`: fake-CLI whole-second forwarding and
   invalid-value rejection before preflight across create/run modes and root aliases, without Docker.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.

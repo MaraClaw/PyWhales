@@ -19,7 +19,6 @@ from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     Literal,
-    Never,
     Self,
     overload,
     override,
@@ -35,6 +34,7 @@ from pywhales._execution_policy import (
     execution_timeout,
     get_execution_policy,
 )
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -44,14 +44,17 @@ from pywhales.client_config import (
 )
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._hydration import hydrate_handles, release_pins
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.container.cli_wrapper import (
     ContainerCLI,
     ContainerConfig,
 )
 from pywhales.components.image.models import (
     ImageGraphDriver,
+    ImageHistoryLayer,
     ImageInspectResult,
     ImageRootFS,
+    ImageSearchResult,
 )
 from pywhales.components.image.streams import (
     EmptyImageStream,
@@ -66,6 +69,7 @@ from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    format_filters_for_cli,
     run,
     stream_stdout_and_stderr,
     to_list,
@@ -89,6 +93,38 @@ type ImageListFilter = (
     | tuple[Literal["manifest"], str]
     | tuple[Literal["readonly"], str]
 )
+type ImageSearchFilter = tuple[Literal["is-official", "stars"], str]
+
+
+def _add_platforms(command: Command, platform: str | Iterable[str] | None) -> None:
+    """Append one repeated `--platform` option per requested platform.
+
+    Args:
+        command: Command receiving the options.
+        platform: A platform string (Docker also accepts a comma-separated list
+            in one value), an iterable of platforms, or `None` to add nothing.
+    """
+    if platform is not None:
+        command.add_args_iterable_or_single("--platform", platform)
+
+
+def _validate_all_tags_repository(x: object) -> str:
+    """Return the repository selected by an `all_tags` transfer.
+
+    Args:
+        x: The caller's pull or push reference.
+
+    Returns:
+        The repository name.
+
+    Raises:
+        ValueError: `x` is not one string, or it carries a tag or digest.
+    """
+    if not isinstance(x, str):
+        raise ValueError("all_tags requires a single repository string")
+    if "@" in x or ":" in x.rsplit("/", 1)[-1]:
+        raise ValueError("all_tags requires a repository without a tag or digest")
+    return x
 
 
 def _select_archive_timeout(
@@ -220,6 +256,14 @@ def _own_archive(
         raise
 
 
+def _parse_history_layer(line: str) -> ImageHistoryLayer:
+    return ImageHistoryLayer.model_validate(loads_compat(line))
+
+
+def _parse_search_result(line: str) -> ImageSearchResult:
+    return ImageSearchResult.model_validate(loads_compat(line))
+
+
 class Image(ReloadableObjectFromJson[ImageInspectResult]):
     """Reloadable local image handle retaining its originating configuration.
 
@@ -347,29 +391,65 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     def __repr__(self) -> str:
         return f"pywhales.Image(id='{self.id[:20]}', tags={self.repo_tags})"
 
-    def remove(self, force: bool = False, prune: bool = True) -> None:
+    def remove(
+        self,
+        force: bool = False,
+        prune: bool = True,
+        *,
+        platform: str | Iterable[str] | None = None,
+    ) -> None:
         """Remove this Docker image.
 
         See the [`docker.image.remove`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.remove) command for
         information about the arguments.
         """
-        ImageCLI(self.client_config).remove(self, force, prune)
+        ImageCLI(self.client_config).remove(self, force, prune, platform=platform)
+
+    def history(
+        self, *, platform: str | None = None, timeout: float | None = None
+    ) -> builtins.list[ImageHistoryLayer]:
+        """Return the layers of this image, newest first.
+
+        See the [`docker.image.history`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.history) command for
+        information about the arguments.
+        """
+        return ImageCLI(self.client_config).history(
+            self, platform=platform, timeout=timeout
+        )
 
     @overload
     def save(
-        self, output: None = None, *, timeout: float | None = None
+        self,
+        output: None = None,
+        *,
+        timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes]: ...
 
     @overload
-    def save(self, output: ValidPath, *, timeout: float | None = None) -> None: ...
+    def save(
+        self,
+        output: ValidPath,
+        *,
+        timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
+    ) -> None: ...
 
     @overload
     def save(
-        self, output: ValidPath | None, *, timeout: float | None = None
+        self,
+        output: ValidPath | None,
+        *,
+        timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes] | None: ...
 
     def save(
-        self, output: ValidPath | None = None, *, timeout: float | None = None
+        self,
+        output: ValidPath | None = None,
+        *,
+        timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes] | None:
         """Save this image as a Docker tar archive.
 
@@ -382,6 +462,8 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
                 inspection and the save), replacing the client default; `None`
                 inherits it. Each launch gets its own deadline, and a lazy
                 archive starts its save clock on first iteration.
+            platform: Save only these platforms of this image, each as
+                `os[/arch[/variant]]`; `None` saves every platform.
 
         Returns:
             An archive-byte generator when `output=None`; otherwise `None` after
@@ -399,7 +481,9 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
                 iterates (or when a path save runs) expired first.
             ObservationCancelled: A token of that observation was set.
         """
-        return ImageCLI(self.client_config).save(self, output, timeout=timeout)
+        return ImageCLI(self.client_config).save(
+            self, output, timeout=timeout, platform=platform
+        )
 
     def tag(self, new_tag: str) -> None:
         """Add a tag to a Docker image.
@@ -494,13 +578,55 @@ class ImageCLI(DockerCLICaller):
             client_config
         ).build
 
-    def history(self) -> Never:
-        """Raise NotImplementedError because image history is not implemented.
+    def history(
+        self,
+        image: ValidImage,
+        *,
+        platform: str | None = None,
+        timeout: float | None = None,
+    ) -> builtins.list[ImageHistoryLayer]:
+        """Return the layers of a local image, newest first.
+
+        Alias: `docker.history(...)`
+
+        Args:
+            image: Image handle, tag, digest, or ID in the selected daemon.
+            platform: Show the history of one platform of a multi-platform
+                image, as `os[/arch[/variant]]` (for example `"linux/amd64"`).
+                `None` omits the option.
+            timeout: Positive finite seconds for the local CLI launch, replacing
+                the client default; `None` inherits it. Expiry kills and reaps
+                the CLI.
+
+        Returns:
+            One record per layer in CLI order, with sizes in bytes.
 
         Raises:
-            NotImplementedError: This operation has no implementation.
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before any CLI is resolved.
+            NoSuchImage: The image does not exist in the selected daemon.
+            ParsingError: The CLI output is not the expected JSON records.
+            DockerTimeout: The CLI exceeds its deadline.
         """
-        raise NotImplementedError
+        validate_timeout(timeout)
+        full_cmd = Command(
+            [
+                *self.docker_cmd,
+                "image",
+                "history",
+                "--format",
+                "{{json .}}",
+                "--no-trunc",
+                "--human=false",
+            ]
+        )
+        full_cmd.add_simple_arg("--platform", platform)
+        full_cmd.append(str(image))
+        parser = JsonOutputParser("image history", self.client_config.raw_diagnostics)
+        output = run(full_cmd, timeout=timeout)
+        return [
+            parser.parse(_parse_history_layer, line) for line in output.splitlines()
+        ]
 
     def import_(
         self,
@@ -534,24 +660,62 @@ class ImageCLI(DockerCLICaller):
         return Image(self.client_config, run(full_cmd))
 
     @overload
-    def inspect(self, x: str) -> Image: ...
+    def inspect(self, x: str, *, platform: None = None) -> Image: ...
 
     @overload
-    def inspect(self, x: Iterable[str]) -> builtins.list[Image]: ...
+    def inspect(
+        self, x: Iterable[str], *, platform: None = None
+    ) -> builtins.list[Image]: ...
 
-    def inspect(self, x: str | Iterable[str]) -> Image | builtins.list[Image]:
-        """Inspect one or more local image references and return image handles.
+    @overload
+    def inspect(self, x: str, *, platform: str) -> ImageInspectResult: ...
 
-        Iterable input uses one batch inspection and validates every snapshot's
-        identity before returning handles with seeded inspection caches.
+    @overload
+    def inspect(
+        self, x: Iterable[str], *, platform: str
+    ) -> builtins.list[ImageInspectResult]: ...
+
+    @overload
+    def inspect(
+        self, x: str, *, platform: str | None
+    ) -> Image | ImageInspectResult: ...
+
+    @overload
+    def inspect(
+        self, x: Iterable[str], *, platform: str | None
+    ) -> builtins.list[Image] | builtins.list[ImageInspectResult]: ...
+
+    def inspect(
+        self, x: str | Iterable[str], *, platform: str | None = None
+    ) -> (
+        Image
+        | ImageInspectResult
+        | builtins.list[Image]
+        | builtins.list[ImageInspectResult]
+    ):
+        """Inspect one or more local image references.
+
+        Without `platform`, return image handles. Iterable input uses one batch
+        inspection and validates every snapshot's identity before returning
+        handles with seeded inspection caches.
+
+        With `platform`, return typed snapshots of that platform's variant
+        instead, from one inspection that is validated the same way. A platform
+        manifest has its own ID that the daemon cannot inspect again, so no
+        handle is built; tags and digests still identify the requested image,
+        and an image-ID reference fails that validation.
 
         Args:
             x: A reference, or references in the desired result order. Tags,
                 digests, and IDs are accepted; an empty iterable skips the CLI.
+            platform: Inspect this platform of a multi-platform image, as
+                `os[/arch[/variant]]` (for example `"linux/arm64"`). `None`
+                omits the option.
 
         Returns:
-            One image for a string, or a list preserving iterable order and
-            duplicates as separate handles. Empty iterable input returns `[]`.
+            One image (or snapshot with `platform`) for a string, or a list
+            preserving iterable order and duplicates. Empty iterable input
+            returns `[]`.
 
         Raises:
             NoSuchImage: A requested image does not exist in the selected daemon.
@@ -559,11 +723,43 @@ class ImageCLI(DockerCLICaller):
                 requested image reference.
         """
         if isinstance(x, str):
-            return Image(self.client_config, x)
+            if platform is None:
+                return Image(self.client_config, x)
+            ((_, snapshot),) = self._inspect_snapshots([x], platform)
+            return snapshot
         references = list(x)
         if not references:
             return []
-        json_str = run([*self.docker_cmd, "image", "inspect", *references])
+        inspected = self._inspect_snapshots(references, platform)
+        if platform is not None:
+            return [snapshot for _, snapshot in inspected]
+        images = []
+        for snapshot_id, snapshot in inspected:
+            image = Image(self.client_config, snapshot_id, is_immutable_id=True)
+            image._set_inspect_result(snapshot)
+            images.append(image)
+        return images
+
+    def _inspect_snapshots(
+        self, references: builtins.list[str], platform: str | None
+    ) -> builtins.list[tuple[str, ImageInspectResult]]:
+        """Batch-inspect references and verify each snapshot against its request.
+
+        Args:
+            references: Non-empty requested references in result order.
+            platform: Platform to inspect, or `None` for the daemon's default.
+
+        Returns:
+            Each snapshot's ID with the snapshot, in request order.
+
+        Raises:
+            ParsingError: The batch cannot be parsed, or a snapshot's ID or
+                normalized tag/digest aliases do not match its request.
+        """
+        full_cmd = Command([*self.docker_cmd, "image", "inspect"])
+        full_cmd.add_simple_arg("--platform", platform)
+        full_cmd.extend(references)
+        json_str = run(full_cmd)
         parser = Image(self.client_config, references[0], is_immutable_id=True)
         snapshots = parser._parse_inspect_results(json_str, references)
 
@@ -581,7 +777,7 @@ class ImageCLI(DockerCLICaller):
                 return reference + ":latest"
             return reference
 
-        images = []
+        inspected = []
         for reference, snapshot in zip(references, snapshots, strict=True):
             aliases = [*(snapshot.repo_tags or []), *(snapshot.repo_digests or [])]
             normalized_aliases = {normalized(alias) for alias in aliases}
@@ -598,10 +794,8 @@ class ImageCLI(DockerCLICaller):
                     if self.client_config.raw_diagnostics
                     else "Image inspect identity does not match the requested reference"
                 )
-            image = Image(self.client_config, snapshot.id, is_immutable_id=True)
-            image._set_inspect_result(snapshot)
-            images.append(image)
-        return images
+            inspected.append((snapshot.id, snapshot))
+        return inspected
 
     def exists(self, x: str) -> bool:
         """Return whether a local image reference can be inspected.
@@ -626,6 +820,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> builtins.list[str]:
         """Load images eagerly from an archive path or archive bytes.
 
@@ -648,6 +843,10 @@ class ImageCLI(DockerCLICaller):
             timeout: Positive finite seconds from the load CLI's own launch,
                 replacing the client default; `None` inherits it. It is
                 validated before `input` is consumed.
+            platform: Load only these platforms of a multi-platform archive,
+                each as `os[/arch[/variant]]`: one string (Docker also accepts
+                a comma-separated list in it) or an iterable emitted as
+                repeated options. `None` loads every platform.
 
         Returns:
             Image tags or IDs extracted from `Loaded image` output lines, in
@@ -671,6 +870,8 @@ class ImageCLI(DockerCLICaller):
 
         if quiet:
             full_cmd.append("--quiet")
+
+        _add_platforms(full_cmd, platform)
 
         if isinstance(input, (str, Path)):
             all_tags = []
@@ -756,6 +957,7 @@ class ImageCLI(DockerCLICaller):
                 )
             return stdout.decode().splitlines()
 
+    @overload
     def list(
         self,
         repository_or_tag: str | None = None,
@@ -763,7 +965,39 @@ class ImageCLI(DockerCLICaller):
         all: bool = False,
         *,
         hydrate: bool = False,
-    ) -> builtins.list[Image]:
+        tree: Literal[False] = False,
+    ) -> builtins.list[Image]: ...
+
+    @overload
+    def list(
+        self,
+        repository_or_tag: str | None = None,
+        filters: Iterable[ImageListFilter] = (),
+        all: bool = False,
+        *,
+        tree: Literal[True],
+    ) -> str: ...
+
+    @overload
+    def list(
+        self,
+        repository_or_tag: str | None = None,
+        filters: Iterable[ImageListFilter] = (),
+        all: bool = False,
+        *,
+        hydrate: bool = False,
+        tree: bool,
+    ) -> builtins.list[Image] | str: ...
+
+    def list(
+        self,
+        repository_or_tag: str | None = None,
+        filters: Iterable[ImageListFilter] = (),
+        all: bool = False,
+        *,
+        hydrate: bool = False,
+        tree: bool = False,
+    ) -> builtins.list[Image] | str:
         """Return unique image IDs present in the selected Docker daemon.
 
         Alias: `docker.images()`
@@ -780,25 +1014,33 @@ class ImageCLI(DockerCLICaller):
                 `reload()` or a mutating call on the handle, and images that
                 vanish before their inspect are omitted. If `False`, each
                 handle inspects lazily on first property access.
+            tree: If `True`, return the CLI's experimental multi-platform tree
+                as unparsed text instead of handles; the text layout is
+                Docker's and may change between CLI versions. It builds no
+                handles and seeds no caches, so it can't be combined with
+                `hydrate`.
 
         Returns:
             One handle per distinct image ID, retaining the originating client
             configuration. Order is unspecified unless `hydrate` is `True`,
-            which keeps first-seen CLI order.
+            which keeps first-seen CLI order. With `tree=True`, the CLI's text.
 
         Raises:
+            TypeError: `filters` is a mapping.
+            ValueError: `tree` and `hydrate` are both `True`.
             ParsingError: A hydration response is malformed or does not match
                 the listed IDs.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
+        if tree and hydrate:
+            raise ValueError("tree cannot be combined with hydrate")
         full_cmd = Command(
             [
                 *self.docker_cmd,
                 "image",
                 "list",
-                "--quiet",
-                "--no-trunc",
+                *(("--tree",) if tree else ("--quiet", "--no-trunc")),
             ]
         )
         full_cmd.add_flag("--all", all)
@@ -809,6 +1051,8 @@ class ImageCLI(DockerCLICaller):
         if repository_or_tag is not None:
             full_cmd.append(repository_or_tag)
 
+        if tree:
+            return run(full_cmd)
         ids = run(full_cmd).splitlines()
         if hydrate:
             return hydrate_handles(
@@ -940,6 +1184,31 @@ class ImageCLI(DockerCLICaller):
         timeout: float | None = None,
     ) -> builtins.list[Image] | ImageStream | EmptyImageStream: ...
 
+    @overload
+    def pull(
+        self,
+        x: str,
+        quiet: bool = False,
+        stream_logs: Literal[False] = False,
+        platform: str | None = None,
+        *,
+        all_tags: Literal[True],
+        timeout: float | None = None,
+    ) -> None: ...
+
+    @overload
+    def pull(
+        self,
+        x: str,
+        quiet: bool = False,
+        *,
+        stream_logs: Literal[True],
+        platform: str | None = None,
+        all_tags: Literal[True],
+        timeout: float | None = None,
+    ) -> ImageStream: ...
+
+    @overload
     def pull(
         self,
         x: str | Iterable[str],
@@ -947,8 +1216,20 @@ class ImageCLI(DockerCLICaller):
         stream_logs: bool = False,
         platform: str | None = None,
         *,
+        all_tags: bool,
         timeout: float | None = None,
-    ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream:
+    ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream | None: ...
+
+    def pull(
+        self,
+        x: str | Iterable[str],
+        quiet: bool = False,
+        stream_logs: bool = False,
+        platform: str | None = None,
+        *,
+        all_tags: bool = False,
+        timeout: float | None = None,
+    ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream | None:
         """Pull one or more image references into the selected Docker daemon.
 
         Alias: `docker.pull(...)`
@@ -977,6 +1258,10 @@ class ImageCLI(DockerCLICaller):
             stream_logs: Return owned `(image_reference, bytes)` progress records
                 instead of waiting for transfers and returning image handles.
             platform: If you want to enforce a platform.
+            all_tags: Download every tagged image of one repository. `x` must
+                then be a single string naming the repository, without a tag or
+                digest. No image handle is returned, because the set of tags
+                pulled is only known to the registry.
             timeout: Positive finite seconds from each transfer subprocess's own
                 launch, replacing the client default; `None` inherits it. Image
                 inspection and executor queueing do not consume this budget, and
@@ -988,12 +1273,16 @@ class ImageCLI(DockerCLICaller):
             return an owned stream of `(image_reference, bytes)` progress records,
             without global ordering across images or stdout/stderr. Empty
             iterable input returns `[]`, or a closeable empty stream when streaming.
+            With `all_tags=True`, `None` after the pull completes, or the stream
+            when streaming.
 
         Raises:
             ValueError: `quiet=True` is combined with `stream_logs=True`, or
                 `timeout` is not positive and finite. Booleans are rejected
                 before consuming references, even for an empty request. Inside
                 an observation, `quiet=False` without streaming is rejected too.
+                With `all_tags=True`, `x` is not one string or names a tag or
+                digest; this is raised before any CLI is resolved.
             DockerException: A transfer or subsequent image inspection fails.
             DockerTimeout: A transfer subprocess exceeds its own deadline; it is
                 killed and reaped without undoing the pull or guaranteeing that
@@ -1007,10 +1296,22 @@ class ImageCLI(DockerCLICaller):
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
                 "Only one can be activated at a time."
             )
+        repository = _validate_all_tags_repository(x) if all_tags else None
 
         buffer_bytes = self.client_config.image_stream_buffer_bytes
         if buffer_bytes is None:
             buffer_bytes = self.client_config.stream_buffer_bytes
+
+        if repository is not None:
+            return self._pull_single_tag(
+                image_name=repository,
+                quiet=quiet,
+                stream_logs=stream_logs,
+                platform=platform,
+                buffer_bytes=buffer_bytes,
+                timeout=timeout,
+                all_tags=True,
+            )
 
         if isinstance(x, str):
             result = self._pull_single_tag(
@@ -1124,6 +1425,7 @@ class ImageCLI(DockerCLICaller):
         *,
         buffer_bytes: int | None = None,
         timeout: float | None = None,
+        all_tags: bool = False,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "pull"])
 
@@ -1133,6 +1435,7 @@ class ImageCLI(DockerCLICaller):
         if platform is not None and platform != "":
             full_cmd.append(f"--platform={platform}")
 
+        full_cmd.add_flag("--all-tags", all_tags)
         full_cmd.append(image_name)
 
         if stream_logs:
@@ -1153,6 +1456,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: Literal[False] = False,
         *,
+        platform: str | None = None,
         timeout: float | None = None,
     ) -> None: ...
 
@@ -1163,6 +1467,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
+        platform: str | None = None,
         timeout: float | None = None,
     ) -> ImageStream: ...
 
@@ -1173,6 +1478,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         *,
+        platform: str | None = None,
         timeout: float | None = None,
     ) -> ImageStream: ...
 
@@ -1183,6 +1489,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
+        platform: str | None = None,
         timeout: float | None = None,
     ) -> ImageStream | None: ...
 
@@ -1193,6 +1500,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         *,
+        platform: str | None = None,
         timeout: float | None = None,
     ) -> ImageStream | None: ...
 
@@ -1203,6 +1511,43 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         *,
+        platform: str | None = None,
+        timeout: float | None = None,
+    ) -> ImageStream | None: ...
+
+    @overload
+    def push(
+        self,
+        x: str,
+        quiet: bool = False,
+        stream_logs: Literal[False] = False,
+        *,
+        platform: str | None = None,
+        all_tags: Literal[True],
+        timeout: float | None = None,
+    ) -> None: ...
+
+    @overload
+    def push(
+        self,
+        x: str,
+        quiet: bool = False,
+        *,
+        stream_logs: Literal[True],
+        platform: str | None = None,
+        all_tags: Literal[True],
+        timeout: float | None = None,
+    ) -> ImageStream: ...
+
+    @overload
+    def push(
+        self,
+        x: str | Iterable[str],
+        quiet: bool = False,
+        stream_logs: bool = False,
+        *,
+        platform: str | None = None,
+        all_tags: bool,
         timeout: float | None = None,
     ) -> ImageStream | None: ...
 
@@ -1212,6 +1557,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         *,
+        platform: str | None = None,
+        all_tags: bool = False,
         timeout: float | None = None,
     ) -> ImageStream | None:
         """Push image references to a registry after local inspection.
@@ -1240,6 +1587,14 @@ class ImageCLI(DockerCLICaller):
             quiet: Don't print anything.
             stream_logs: Return owned `(image_reference, bytes)` progress records
                 instead of waiting for all transfers to complete.
+            platform: Push only this platform's manifest as a single-platform
+                image, as `os[/arch[/variant]]`; the image index and any other
+                manifests, attestations included, are not pushed. Applies to
+                every reference. `None` omits the option.
+            all_tags: Push every local tag of one repository. `x` must then be a
+                single string naming the repository, without a tag or digest.
+                The local batch inspection is skipped, because a bare repository
+                is not an image reference; the CLI reports a missing repository.
             timeout: Positive finite seconds from each transfer subprocess's own
                 launch, replacing the client default; `None` inherits it. The
                 batch image inspection and executor queueing do not consume this
@@ -1256,6 +1611,8 @@ class ImageCLI(DockerCLICaller):
                 `timeout` is not positive and finite. Booleans are rejected
                 before consuming references, even for an empty request. An
                 observation is active and `quiet=False` without streaming.
+                With `all_tags=True`, `x` is not one string or names a tag or
+                digest; this is raised before any CLI is resolved.
             NoSuchImage: A locally inspected reference does not exist.
             DockerException: Inspection or a push command fails.
             DockerTimeout: A transfer subprocess exceeds its own deadline; it is
@@ -1270,10 +1627,22 @@ class ImageCLI(DockerCLICaller):
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
                 "Only one can be activated at a time."
             )
+        repository = _validate_all_tags_repository(x) if all_tags else None
 
         buffer_bytes = self.client_config.image_stream_buffer_bytes
         if buffer_bytes is None:
             buffer_bytes = self.client_config.stream_buffer_bytes
+
+        if repository is not None:
+            return self._push_single_tag(
+                tag_or_repo=repository,
+                quiet=quiet,
+                stream_logs=stream_logs,
+                buffer_bytes=buffer_bytes,
+                timeout=timeout,
+                platform=platform,
+                all_tags=True,
+            )
 
         images = list(OrderedDict.fromkeys(to_list(x)))
 
@@ -1290,6 +1659,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
                 timeout=timeout,
+                platform=platform,
             )
         else:
             return self._push_multiple_tags(
@@ -1298,6 +1668,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
                 timeout=timeout,
+                platform=platform,
             )
 
     def _push_multiple_tags(
@@ -1308,6 +1679,7 @@ class ImageCLI(DockerCLICaller):
         *,
         buffer_bytes: int | None,
         timeout: float | None = None,
+        platform: str | None = None,
     ) -> ImageStream | None:
         if stream_logs:
             return self._push_multiple_tags_stream(
@@ -1316,11 +1688,18 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
                 timeout=timeout,
+                platform=platform,
             )
         else:
 
             def push_one(tag_or_repo: str) -> None:
-                self._push_single_tag(tag_or_repo, quiet, stream_logs, timeout=timeout)
+                self._push_single_tag(
+                    tag_or_repo,
+                    quiet,
+                    stream_logs,
+                    timeout=timeout,
+                    platform=platform,
+                )
 
             map_in_contexts(push_one, tags_or_repos)
             return None
@@ -1333,6 +1712,7 @@ class ImageCLI(DockerCLICaller):
         *,
         buffer_bytes: int | None,
         timeout: float | None = None,
+        platform: str | None = None,
     ) -> MultiImageStream:
         def start(tag_or_repo: str) -> MappedProcessStream[tuple[str, bytes]]:
             child = self._push_single_tag(
@@ -1341,6 +1721,7 @@ class ImageCLI(DockerCLICaller):
                 True,
                 buffer_bytes=buffer_bytes,
                 timeout=timeout,
+                platform=platform,
             )
             assert child is not None
             return child
@@ -1359,9 +1740,13 @@ class ImageCLI(DockerCLICaller):
         *,
         buffer_bytes: int | None = None,
         timeout: float | None = None,
+        platform: str | None = None,
+        all_tags: bool = False,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "push"])
         full_cmd.add_flag("--quiet", quiet)
+        full_cmd.add_simple_arg("--platform", platform)
+        full_cmd.add_flag("--all-tags", all_tags)
         full_cmd.append(tag_or_repo)
         if stream_logs:
             stream = stream_stdout_and_stderr(
@@ -1379,6 +1764,8 @@ class ImageCLI(DockerCLICaller):
         x: ValidImage | Iterable[ValidImage],
         force: bool = False,
         prune: bool = True,
+        *,
+        platform: str | Iterable[str] | None = None,
     ) -> None:
         """Remove one or more docker images.
 
@@ -1387,6 +1774,9 @@ class ImageCLI(DockerCLICaller):
                 `pywhales.Image` objects.
             force: Force removal of the image(s).
             prune: Delete untagged parents.
+            platform: Remove only these platform variants of a multi-platform
+                image, each as `os[/arch[/variant]]`: one string or an iterable
+                emitted as repeated options. `None` removes the whole image.
 
         Raises:
             NoSuchImage: A selected image does not exist.
@@ -1397,6 +1787,7 @@ class ImageCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "image", "rm"])
         full_cmd.add_flag("--force", force)
         full_cmd.add_flag("--no-prune", not prune)
+        _add_platforms(full_cmd, platform)
         full_cmd.extend(images)
         try:
             run(full_cmd)
@@ -1410,6 +1801,7 @@ class ImageCLI(DockerCLICaller):
         output: None = None,
         *,
         timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes]: ...
 
     @overload
@@ -1419,6 +1811,7 @@ class ImageCLI(DockerCLICaller):
         output: ValidPath,
         *,
         timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> None: ...
 
     @overload
@@ -1428,6 +1821,7 @@ class ImageCLI(DockerCLICaller):
         output: ValidPath | None,
         *,
         timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes] | None: ...
 
     def save(
@@ -1436,6 +1830,7 @@ class ImageCLI(DockerCLICaller):
         output: ValidPath | None = None,
         *,
         timeout: float | None = None,
+        platform: str | Iterable[str] | None = None,
     ) -> Iterator[bytes] | None:
         """Save one or more images as a Docker tar archive.
 
@@ -1469,6 +1864,11 @@ class ImageCLI(DockerCLICaller):
                 archive the save clock starts on first iteration, using the
                 client default as configured at that moment when `timeout` is
                 omitted.
+            platform: Save only these platforms of multi-platform images, each
+                as `os[/arch[/variant]]`: one string (Docker also accepts a
+                comma-separated list in it) or an iterable emitted as repeated
+                options. `None` saves every platform. The eager inspection does
+                not use it.
 
         Returns:
             An iterator of archive-byte chunks when `output=None`; these are
@@ -1500,6 +1900,7 @@ class ImageCLI(DockerCLICaller):
 
         full_cmd = Command([*self.docker_cmd, "image", "save"])
         full_cmd.add_simple_arg("--output", output)
+        _add_platforms(full_cmd, platform)
         full_cmd.extend(image_list)
         if output is None:
             # we stream the bytes
@@ -1596,6 +1997,58 @@ class ImageCLI(DockerCLICaller):
                     telemetry.stdin_bytes = owner.stdin_bytes
                     telemetry.stdout_bytes = owner.stdout_bytes
                     telemetry.stderr_bytes = owner.stderr_bytes
+
+    def search(
+        self,
+        term: str,
+        *,
+        filters: Mapping[str, str] | Iterable[ImageSearchFilter] | None = None,
+        limit: int | None = None,
+        timeout: float | None = None,
+    ) -> builtins.list[ImageSearchResult]:
+        """Search Docker Hub for images matching a term.
+
+        Alias: `docker.search(...)`
+
+        The CLI queries the registry the selected daemon is configured for, so
+        the call needs network access and its results change over time.
+
+        Args:
+            term: Search term; passed to the CLI unchanged.
+            filters: Result filters, as a mapping or an iterable of
+                `(key, value)` string pairs, for example
+                `[("is-official", "true"), ("stars", "100")]`. Pairs keep their
+                order and repeated keys. `None` adds none.
+            limit: Maximum number of results (Docker Hub accepts 1 to 100);
+                `None` leaves Docker's default.
+            timeout: Positive finite seconds for the local CLI launch, replacing
+                the client default; `None` inherits it. Expiry kills and reaps
+                the CLI.
+
+        Returns:
+            One record per result in CLI order; empty when nothing matches.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before any CLI is resolved.
+            TypeError: `filters` is a string, bytes, or contains an item that is
+                not a pair of strings. Raised before any CLI is resolved.
+            ParsingError: The CLI output is not the expected JSON records.
+            DockerTimeout: The CLI exceeds its deadline.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command(
+            [*self.docker_cmd, "search", "--format", "{{json .}}", "--no-trunc"]
+        )
+        if filters is not None:
+            full_cmd.add_args_iterable("--filter", format_filters_for_cli(filters))
+        full_cmd.add_simple_arg("--limit", limit)
+        full_cmd.append(term)
+        parser = JsonOutputParser("image search", self.client_config.raw_diagnostics)
+        output = run(full_cmd, timeout=timeout)
+        return [
+            parser.parse(_parse_search_result, line) for line in output.splitlines()
+        ]
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:
         """Add a tag to a Docker image.

@@ -1,5 +1,6 @@
 """Docker CLI commands for Swarm membership, manager state, and join tokens."""
 
+from collections.abc import Iterable
 from datetime import timedelta
 
 from pywhales.client_config import Command, DockerCLICaller
@@ -75,6 +76,16 @@ class SwarmCLI(DockerCLICaller):
         data_path_address: str | None = None,
         data_path_port: int | None = None,
         listen_address: str | None = None,
+        *,
+        default_addr_pools: str | Iterable[str] = (),
+        default_addr_pool_mask_length: int | None = None,
+        force_new_cluster: bool = False,
+        cert_expiry: int | timedelta | None = None,
+        dispatcher_heartbeat: int | timedelta | None = None,
+        external_ca: str | Iterable[str] = (),
+        max_snapshots: int | None = None,
+        snapshot_interval: int | None = None,
+        task_history_limit: int | None = None,
     ) -> None:
         """Initialize a Swarm.
 
@@ -94,6 +105,26 @@ class SwarmCLI(DockerCLICaller):
             data_path_port: UDP port for data-path traffic, or None to omit it.
             listen_address: address upon which the node listens for inbound
                 swarm manager traffic (format: `<ip|interface>[:port]`)
+            default_addr_pools: Default address pool in CIDR format. One value or
+                an iterable of values, each sent as its own repeated option;
+                the default sends none.
+            default_addr_pool_mask_length: Subnet mask length of the default
+                address pools, or None to omit the option. Zero is sent.
+            force_new_cluster: Force creation of a new cluster from the daemon's
+                current state.
+            cert_expiry: Validity period for node certificates, as seconds or a
+                `timedelta`; None omits the option.
+            dispatcher_heartbeat: Dispatcher heartbeat period, as seconds or a
+                `timedelta`; None omits the option.
+            external_ca: Specification of a certificate signing endpoint. One
+                value or an iterable of values, each sent as its own repeated
+                option; the default sends none.
+            max_snapshots: Additional Raft snapshots to retain; None omits the
+                option. Zero is sent.
+            snapshot_interval: Log entries between Raft snapshots; None omits the
+                option. Zero is sent.
+            task_history_limit: Task history retention limit; None omits the
+                option. Zero is sent.
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "init"])
         full_cmd.add_simple_arg("--advertise-addr", advertise_address)
@@ -102,6 +133,22 @@ class SwarmCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--data-path-addr", data_path_address)
         full_cmd.add_simple_arg("--data-path-port", data_path_port)
         full_cmd.add_simple_arg("--listen-addr", listen_address)
+        full_cmd.add_simple_arg(
+            "--cert-expiry", stringify_timedelta_for_docker_cli(cert_expiry)
+        )
+        full_cmd.add_args_iterable_or_single("--default-addr-pool", default_addr_pools)
+        full_cmd.add_simple_arg(
+            "--default-addr-pool-mask-length", default_addr_pool_mask_length
+        )
+        full_cmd.add_simple_arg(
+            "--dispatcher-heartbeat",
+            stringify_timedelta_for_docker_cli(dispatcher_heartbeat),
+        )
+        full_cmd.add_args_iterable_or_single("--external-ca", external_ca)
+        full_cmd.add_flag("--force-new-cluster", force_new_cluster)
+        full_cmd.add_simple_arg("--max-snapshots", max_snapshots)
+        full_cmd.add_simple_arg("--snapshot-interval", snapshot_interval)
+        full_cmd.add_simple_arg("--task-history-limit", task_history_limit)
         run(full_cmd)
 
     def join(
@@ -217,8 +264,8 @@ class SwarmCLI(DockerCLICaller):
             autolock: Enable or disable manager autolocking; None leaves it unchanged.
             cert_expiry: Node certificate validity duration; None leaves it unchanged.
             dispatcher_heartbeat: Dispatcher heartbeat duration; None leaves it unchanged.
-            external_ca: Certificate-signing endpoint specification. Currently
-                forwarded as --external-ci; None omits the option.
+            external_ca: Certificate-signing endpoint specification, forwarded
+                as `--external-ca`; None omits the option.
             max_snapshots: Additional Raft snapshots to retain; None omits the option.
             snapshot_interval: Log entries between Raft snapshots; None omits the option.
             task_history_limit: Task history retention limit; None omits the option.
@@ -234,7 +281,7 @@ class SwarmCLI(DockerCLICaller):
             "--dispatcher-heartbeat",
             stringify_timedelta_for_docker_cli(dispatcher_heartbeat),
         )
-        full_cmd.add_simple_arg("--external-ci", external_ca)
+        full_cmd.add_simple_arg("--external-ca", external_ca)
         full_cmd.add_simple_arg("--max-snapshots", max_snapshots)
         full_cmd.add_simple_arg("--snapshot-interval", snapshot_interval)
         full_cmd.add_simple_arg("--task-history-limit", task_history_limit)

@@ -10,7 +10,11 @@ Registry imagetools has a separate contract in [the Buildx guide](../buildx/AGEN
   Context exit removes the local list through shared resource cleanup; see [the components guide](../AGENTS.md).
 - Public `inspect()` constructs a handle through the existing lenient parsing path.
   Do not silently route it through strict inventory validation or change accepted wire values.
+- `inspect(..., verbose=True)` is a keyword-only `Literal` overload: one `manifest inspect <ref> [--insecure] --verbose` launch
+  returning the CLI's JSON-formatted text unparsed. It builds no `ManifestList`, so no cache is seeded; the default keeps the handle.
 - `create()` retains its public `ammend` spelling, mapped to Docker's `--amend` flag.
+- `push(..., insecure=True)` is keyword-only. It emits `--insecure` on the push and keeps it on the preflight inspection;
+  the default argv of both launches is unchanged.
 - Empty `remove()` remains a no-op. Push preflight and per-launch deadline semantics stay in the parent guide.
 
 ## Strict Inventory Inspection

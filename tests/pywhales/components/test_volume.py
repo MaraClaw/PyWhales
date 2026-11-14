@@ -2,7 +2,7 @@ import inspect
 import json
 import math
 from collections.abc import Callable, Iterable, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Literal
@@ -486,6 +486,11 @@ def test_volume_clone_keeps_destination_volume_when_copy_fails(
 def test_load_json(json_file: Path) -> None:
     json_as_txt = json_file.read_text()
     a = VolumeInspectResult(**json.loads(json_as_txt))
+    if json_file.name == "5.json":
+        assert a.created_at == datetime(2026, 11, 14, 13, 6, 4, 961510, tzinfo=UTC)
+        assert a.mountpoint is None
+        assert a.cluster_volume is not None
+        assert a.cluster_volume["ID"] == "8r0nfpsau6z9bkmfipkrwtlmy"
     if json_file.name == "0.json":
         assert a.created_at == datetime(
             year=2020,

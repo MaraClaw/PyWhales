@@ -1,0 +1,56 @@
+{
+  "Name": "ctx2 (final)",
+  "Ref": "daltj5mlj48xvyn9sho7w9z3i",
+  "Context": "/work/ctx2",
+  "Dockerfile": "Dockerfile",
+  "Target": "final",
+  "Platform": [
+    "linux/arm64"
+  ],
+  "StartedAt": "2026-11-14T18:53:48.935528379+07:00",
+  "CompletedAt": "2026-11-14T18:53:49.397079212+07:00",
+  "Duration": 461550833,
+  "Status": "completed",
+  "NumCompletedSteps": 7,
+  "NumTotalSteps": 7,
+  "NumCachedSteps": 1,
+  "BuildArgs": [
+    {
+      "Name": "GREETING",
+      "Value": "hello"
+    }
+  ],
+  "Labels": [
+    {
+      "Name": "pyw130.g2",
+      "Value": "1"
+    }
+  ],
+  "Config": {
+    "ImageResolveMode": "local",
+    "NoCache": true
+  },
+  "Materials": [
+    {
+      "URI": "pkg:docker/alpine@latest?platform=linux%2Farm64",
+      "Digests": [
+        "sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"
+      ]
+    }
+  ],
+  "Attachments": [
+    {
+      "Digest": "sha256:ea6ce099e53a47de2711d3d764f8c00b29c1131561bc5b7e3d9d506bf83f84cb",
+      "Type": "application/vnd.oci.image.index.v1+json"
+    },
+    {
+      "Digest": "sha256:d2352a23974171b47885ad23ee330e53d8f8c5e70855fe1573e81507ecd977b2",
+      "Type": "https://slsa.dev/provenance/v1"
+    },
+    {
+      "Digest": "sha256:ae4a8d297d8a9bd1f3470c70bb6c1e16f462b4e168bc6ed13f9e03fd8793d38b",
+      "Platform": "linux/arm64",
+      "Type": "application/vnd.oci.image.manifest.v1+json"
+    }
+  ]
+}

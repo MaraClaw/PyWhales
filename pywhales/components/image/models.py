@@ -1,11 +1,18 @@
-"""Typed local-image inspection snapshots using shared container config models."""
+"""Typed local-image inspection snapshots, history layers, and search results.
+
+Inspection snapshots reuse the shared container config models.
+"""
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import JsonValue
+from pydantic import Field, JsonValue, field_validator
 
 import pywhales.components.container.models
 from pywhales.utils import DockerCamelModel
+
+MISSING_LAYER_ID = "<missing>"
+"""Docker's placeholder for a history layer without a local image ID."""
 
 
 class ImageHealthcheck(DockerCamelModel):
@@ -48,3 +55,44 @@ class ImageInspectResult(DockerCamelModel):
     graph_driver: ImageGraphDriver | None = None
     root_fs: ImageRootFS | None = None
     metadata: dict[str, str] | None = None
+
+
+class ImageHistoryLayer(DockerCamelModel):
+    """One layer of an image's history, newest first as the CLI reports it.
+
+    Attributes:
+        id: Image ID that introduced the layer, or `None` when Docker reports
+            the `<missing>` placeholder (layers pulled without their own image).
+        created_at: Time the layer was created.
+        created_by: Instruction that created the layer; may be empty.
+        size: Layer size in bytes; zero for metadata-only instructions.
+        comment: Layer comment; may be empty.
+    """
+
+    id: Annotated[str | None, Field(alias="ID")]
+    created_at: datetime
+    created_by: str
+    size: int
+    comment: str
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _missing_id_is_none(cls, value: object) -> object:
+        """Map Docker's `<missing>` placeholder to `None`."""
+        return None if value == MISSING_LAYER_ID else value
+
+
+class ImageSearchResult(DockerCamelModel):
+    """One Docker Hub search result.
+
+    Attributes:
+        name: Repository name, including its namespace when it has one.
+        description: Repository description; may be empty.
+        is_official: Whether Docker Hub marks the repository as official.
+        star_count: Number of stars the repository has.
+    """
+
+    name: str
+    description: str
+    is_official: bool
+    star_count: int

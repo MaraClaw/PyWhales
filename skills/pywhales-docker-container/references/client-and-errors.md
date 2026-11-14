@@ -39,6 +39,8 @@ source paths refer to the daemon host, not automatically to the Python machine.
 Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
 Environment files are applied in order, with later files overriding earlier ones.
+Two newer globals are `compose_all_resources` (a bool, default `False`) and
+`compose_ansi` (`"never"`, `"always"`, `"auto"`, or `None`, which emits nothing).
 
 `environment={"KEY": "value"}` overlays the child's selected base environment for
 every launch from that client. By default, `inherited_environment_names=None`
@@ -291,6 +293,75 @@ stderr. `DockerTimeout`, observation cancellation/limit errors, and telemetry
 outcomes are unchanged. The originating config is snapshotted per launch, so
 later mutations don't change a stream already running. Check installed support
 as described in [Usage validation](validation.md).
+
+## Docker CLI 29 Surface Changes
+
+### Root aliases and groups
+
+`DockerClient` has the root aliases `docker.events` (`system.events`, a
+`MappedProcessStream[DockerEvent]`), `docker.port` (`container.port`),
+`docker.history` (`image.history`), and `docker.search` (`image.search`). It also
+has a `checkpoint` command group; see
+[Checkpoints](containers-and-output.md#checkpoints).
+
+### Removed and rejected options
+
+The `trust` command group is gone, so `DockerClient.trust` doesn't exist: Docker
+CLI 29 removed `docker trust`. Container `create` and `run` lost `content_trust`
+and `kernel_memory`, `update` lost `kernel_memory`, and `run` lost
+`service_ports`; passing one raises `TypeError`. Plugin `install`, `push`, and `upgrade` still accept
+`disable_content_trust`, but the default `True` is a no-op and `False` raises
+`ValueError`.
+
+`context.create(...)` keeps `kubernetes` and `default_stack_orchestrator` for
+positional compatibility and raises `ValueError` before any launch unless both
+are `None`, because CLI 29 removed Kubernetes contexts. Context handling also
+has `context.show()` (a `str`), `context.export(context, output=None, *,
+timeout=None)`, `context.import_(name, source, *, timeout=None)` (a `Context`),
+and `context.update(context, description=None, docker=None)` (a `Context`), with
+the handle method `Context.update(description=None, docker=None)`. Export and
+import need a real file; a path of `-` raises `ValueError`.
+
+### Raw-text option results
+
+Some options return the CLI's human-readable text as `str` instead of parsed
+objects. Each is a keyword-only flag with `Literal` overloads, and the text is
+never parsed or cached:
+
+- `pretty=True` on config, secret, node, and service `inspect`.
+- `verbose=True` on `system.disk_free`, `network.inspect`, `manifest.inspect`,
+  and `buildx.disk_usage`.
+- `tree=True` on `image.list`, which rejects `hydrate=True`.
+- Buildx `debug=True` on `list`, `inspect`, `disk_usage`, `history.list`,
+  `history.inspect`, and `imagetools.inspect`, which returns stdout, a newline,
+  then the stderr debug log.
+
+Omitted or `False` keeps the usual typed result. Check the overload before
+assuming a handle or model comes back.
+
+### Other command groups
+
+The remaining groups gained CLI 29 options too. Confirm each against the installed
+signature; notable entry points are:
+
+- `volume.update(volume, *, availability, timeout=None)` and `Volume.update`,
+  cluster options on `volume.create`, `volume.list(cluster=True)`, and `force` on
+  `volume.remove`. Cluster volume handles keep their `cluster_volume` payload.
+- Network `connect(gw_priority=..., link_local_ips=...)`, `create(config_from=...,
+  config_only=..., ingress=..., ipv4=..., scope=...)`, and `remove(force=...)`.
+- `service.create` and `service.update` cover the CLI 29 option set, including
+  long-form `publish` mappings and `--*-add`/`--*-rm` pairs such as `env_add`,
+  `label_add`, and `publish_rm`. `task.logs(task, ...)` has the `service.logs`
+  overloads and returns `str` or an owned `ProcessStream`.
+- `filters` on `node.list`, and keyword-only `filters` on `service.ps`, `node.ps`, `stack.ps`, and
+  `stack.services`; `stack.config(compose_files, *, skip_interpolation=False)`
+  returns `str`; `stack.deploy` takes `detach` (`None`, `True`, or `False`) and `quiet`, and
+  `stack.remove` takes `detach`.
+- `swarm.init` takes `default_addr_pools`, `default_addr_pool_mask_length`,
+  `force_new_cluster`, `cert_expiry`, `dispatcher_heartbeat`, `external_ca`,
+  `max_snapshots`, `snapshot_interval`, and `task_history_limit`, and
+  `swarm.update(external_ca=...)` now emits `--external-ca`.
+- `manifest.push(..., insecure=...)` and `plugin.list(filters=None)`.
 
 ## Troubleshooting Without Credential Leaks
 

@@ -25,6 +25,8 @@ from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.buildx.imagetools.models import Manifest
 from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.config.cli_wrapper import ConfigListFilter
+from pywhales.components.container.cli_wrapper import PublishedPort
+from pywhales.components.image.models import ImageHistoryLayer, ImageSearchResult
 from pywhales.components.image.streams import EmptyImageStream, ImageStream
 from pywhales.components.system.cli_wrapper import SystemPruneFilter
 from pywhales.components.system.models import DockerEvent
@@ -61,6 +63,12 @@ def _check_resource_inspection_contracts(client: DockerClient) -> None:
     assert_type(client.secret.inspect("secret"), Secret)
     assert_type(client.secret.inspect(["secret"]), list[Secret])
     assert_type(client.secret.inspect(iter(["secret"])), list[Secret])
+
+
+def _check_root_alias_contracts(client: DockerClient) -> None:
+    assert_type(client.port("container"), list[PublishedPort])
+    assert_type(client.port("container", 80, "tcp"), list[PublishedPort])
+    assert_type(client.events(), MappedProcessStream[DockerEvent])
 
 
 def _check_process_contracts(client: DockerClient, raw: bool) -> None:
@@ -162,6 +170,15 @@ def _check_image_return_contracts(
     assert_type(client.image.save("busybox", output=Path("image.tar")), None)
     assert_type(client.image.save("busybox", output=output), Iterator[bytes] | None)
     assert_type(client.image.load(iter([b"archive"])), list[str])
+    assert_type(client.history("alpine"), list[ImageHistoryLayer])
+    assert_type(
+        client.history("alpine", platform="linux/arm64"), list[ImageHistoryLayer]
+    )
+    assert_type(client.search("alpine", limit=3), list[ImageSearchResult])
+    assert_type(
+        client.search("alpine", filters=[("is-official", "true")]),
+        list[ImageSearchResult],
+    )
 
 
 def _check_buildx_return_contracts(client: DockerClient, stream: bool) -> None:

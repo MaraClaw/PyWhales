@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 from types import TracebackType
-from typing import Self, override
+from typing import Literal, Self, overload, override
 
 from pydantic import JsonValue, TypeAdapter
 
@@ -21,11 +21,16 @@ from pywhales.utils import custom_parse_object_as, run, to_list, validate_timeou
 
 
 def _inspect_command(
-    client_config: ClientConfig, reference: str, insecure: bool
+    client_config: ClientConfig,
+    reference: str,
+    insecure: bool,
+    *,
+    verbose: bool = False,
 ) -> Command:
     """Build the one-reference `manifest inspect` argv, keeping `--insecure`."""
     cmd = Command([*client_config.docker_cmd, "manifest", "inspect", reference])
     cmd.add_flag("--insecure", insecure)
+    cmd.add_flag("--verbose", verbose)
     return cmd
 
 
@@ -206,16 +211,40 @@ class ManifestCLI(DockerCLICaller):
             self.client_config, run(full_cmd)[22:], is_immutable_id=True
         )
 
-    def inspect(self, x: str, insecure: bool = False) -> ManifestList:
+    @overload
+    def inspect(
+        self, x: str, insecure: bool = False, *, verbose: Literal[False] = False
+    ) -> ManifestList: ...
+
+    @overload
+    def inspect(
+        self, x: str, insecure: bool = False, *, verbose: Literal[True]
+    ) -> str: ...
+
+    @overload
+    def inspect(
+        self, x: str, insecure: bool = False, *, verbose: bool
+    ) -> ManifestList | str: ...
+
+    def inspect(
+        self, x: str, insecure: bool = False, *, verbose: bool = False
+    ) -> ManifestList | str:
         """Inspect a Docker manifest list.
 
         Args:
             x: Manifest-list reference to inspect.
             insecure: Allow inspection through an insecure registry.
+            verbose: If `True`, return the CLI's detailed output, including
+                layers and platforms, as unparsed text. It is JSON-formatted
+                but never parsed, builds no handle and seeds no cache. If
+                `False`, return a handle.
 
         Returns:
-            A handle with the inspected manifest-list data.
+            A handle with the inspected manifest-list data, or the CLI's text
+            with `verbose=True`.
         """
+        if verbose:
+            return run(_inspect_command(self.client_config, x, insecure, verbose=True))
         return ManifestList(self.client_config, x, insecure=insecure)
 
     def push(
@@ -225,6 +254,7 @@ class ManifestCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         timeout: float | None = None,
+        insecure: bool = False,
     ) -> None:
         """Push a manifest list to a repository.
 
@@ -235,6 +265,8 @@ class ManifestCLI(DockerCLICaller):
             timeout: Positive finite seconds from the push CLI's own launch,
                 replacing the client default; `None` inherits it. The local
                 manifest-list preflight inspection does not consume this budget.
+            insecure: Allow pushing to an insecure registry. The preflight
+                inspection also keeps this setting.
 
         Raises:
             ValueError: `timeout` is not positive and finite. Booleans are
@@ -245,9 +277,10 @@ class ManifestCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         # this is just to raise a correct exception if the manifest list doesn't exist
-        self.inspect(x)
+        self.inspect(x, insecure)
 
         full_cmd = Command([*self.docker_cmd, "manifest", "push"])
+        full_cmd.add_flag("--insecure", insecure)
         full_cmd.add_flag("--purge", purge)
         full_cmd.append(x)
         run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
