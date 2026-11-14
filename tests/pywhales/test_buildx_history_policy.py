@@ -355,7 +355,7 @@ def test_export_validates_before_launch(tmp_path: Path) -> None:
 
 def test_import_repeats_the_file_option(tmp_path: Path) -> None:
     client, log = make_fake_cli(tmp_path)
-    history(client).import_([tmp_path / "a.dockerbuild", "b.dockerbuild"])
+    assert history(client).import_([tmp_path / "a.dockerbuild", "b.dockerbuild"]) == []
     history(client).import_("c.dockerbuild", builder="b1", debug=True, timeout=30)
     assert calls(log) == [
         [
@@ -377,6 +377,21 @@ def test_import_repeats_the_file_option(tmp_path: Path) -> None:
             "--file",
             "c.dockerbuild",
         ],
+    ]
+
+
+def test_import_returns_the_dashboard_urls_from_stderr(tmp_path: Path) -> None:
+    # Buildx v0.39.0 prints one URL per imported record on stderr; debug log lines
+    # share the stream and are skipped.
+    stderr = (
+        'time="2026-11-14T13:50:00Z" level=debug msg="uploading bundle"\n'
+        "docker-desktop://dashboard/build/.imported/_/fj87ohhpkjtq30f62q3sup2oz\n"
+        "docker-desktop://dashboard/build/.imported/_/k60u07hj2c16uipgg3jou7hn2\n"
+    )
+    client, _ = make_fake_cli(tmp_path, [Rule(("import",), stderr=stderr)])
+    assert history(client).import_("a.dockerbuild", debug=True) == [
+        "docker-desktop://dashboard/build/.imported/_/fj87ohhpkjtq30f62q3sup2oz",
+        "docker-desktop://dashboard/build/.imported/_/k60u07hj2c16uipgg3jou7hn2",
     ]
 
 

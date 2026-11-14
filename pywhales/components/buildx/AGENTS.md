@@ -81,8 +81,10 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
 - `history.trace()` returns an owned stream. A local deadline or `close()` reaps only the local `docker` CLI;
   in `compare` mode the `docker-buildx` plugin can keep serving, as live checks showed. Keep that caveat in
   the docstring.
-- `history.open()` launches Docker Desktop's build UI and `history.import_()` writes to Desktop's build history.
-  Only fake-CLI tests cover them; don't add live tests that run either one.
+- `history.open()` resolves a record in the builder's history and opens its `docker-desktop://` URL in the browser;
+  it prints nothing. `history.import_()` uploads bundles to Desktop's `.imported` store (invisible to `list()` and
+  `open()`), opens the first URL, and returns the `docker-desktop://` lines Buildx prints on stderr. Both were
+  checked live once against v0.39.0; keep automated tests fake-only because they change the desktop session.
 
 ## Builder snapshots
 

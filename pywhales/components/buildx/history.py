@@ -340,23 +340,33 @@ class BuildxHistoryCLI(DockerCLICaller):
         builder: str | None = None,
         debug: bool = False,
         timeout: float | None = None,
-    ) -> None:
+    ) -> builtins.list[str]:
         """Import build records from bundle files into Docker Desktop.
+
+        Imported records land in Docker Desktop's `.imported` store, not in a
+        builder's history, so `list()` and `open()` don't see them. Buildx also
+        tries to open the first record in the default browser.
 
         Args:
             files: Bundle file path or an iterable of paths; must not be empty.
-            builder: Builder name; `None` leaves selection to Buildx.
-            debug: Pass `--debug`; the log is written to stderr, which this call
-                does not return.
+            builder: Builder name, forwarded as `--builder`; Buildx v0.39.0
+                accepts it but uploads to Docker Desktop regardless.
+            debug: Pass `--debug`; the debug log lines on stderr are discarded.
             timeout: Positive finite seconds for the local CLI, replacing the
                 client default; `None` inherits it. The local CLI is killed and
                 reaped on expiry.
+
+        Returns:
+            One `docker-desktop://` dashboard URL per imported record, in the
+            order Buildx printed them on stderr.
 
         Raises:
             ValueError: `timeout` is not positive and finite, or `files` is empty.
                 Raised before the CLI is looked up.
             DockerTimeout: The local CLI exceeds its deadline.
-            DockerException: The Buildx command fails.
+            DockerException: The Buildx command fails. If only the browser launch
+                fails, the upload has already succeeded and the URLs are in the
+                exception's `stderr`.
         """
         validate_timeout(timeout)
         paths = to_list(files)
@@ -364,7 +374,12 @@ class BuildxHistoryCLI(DockerCLICaller):
             raise ValueError("files must not be empty")
         full_cmd = self._command("import", builder=builder, debug=debug)
         full_cmd.add_args_iterable("--file", paths)
-        run(full_cmd, timeout=timeout)
+        _, stderr = run(full_cmd, return_stderr=True, timeout=timeout)
+        return [
+            line.strip()
+            for line in stderr.splitlines()
+            if line.strip().startswith("docker-desktop://")
+        ]
 
     def open(
         self,
@@ -376,8 +391,9 @@ class BuildxHistoryCLI(DockerCLICaller):
     ) -> None:
         """Open a build record in Docker Desktop.
 
-        The call waits for the local CLI to exit. It needs Docker Desktop and
-        fails without it.
+        Buildx resolves the record in the builder's history (imported records
+        aren't found) and opens its `docker-desktop://` URL in the default
+        browser. The call waits for the local CLI to exit and prints nothing.
 
         Args:
             ref: Bare record ID or `^N` offset. `None` lets Buildx pick its
@@ -393,8 +409,8 @@ class BuildxHistoryCLI(DockerCLICaller):
             ValueError: `timeout` is not positive and finite. Raised before the
                 CLI is looked up.
             DockerTimeout: The local CLI exceeds its deadline.
-            DockerException: The Buildx command fails, for example outside Docker
-                Desktop.
+            DockerException: The Buildx command fails: no matching record, or
+                no handler can open the `docker-desktop://` URL.
         """
         validate_timeout(timeout)
         full_cmd = self._command("open", builder=builder, debug=debug)

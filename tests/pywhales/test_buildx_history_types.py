@@ -40,8 +40,8 @@ def _check_history_reads(history: BuildxHistoryCLI, debug: bool) -> None:
 def _check_history_actions(history: BuildxHistoryCLI, bundle: Path) -> None:
     assert_type(history.export(["a", "b"], finalize=True, output=bundle), None)
     assert_type(history.export(all=True, output="h.dockerbuild"), None)
-    assert_type(history.import_([bundle, "b.dockerbuild"], timeout=5), None)
-    assert_type(history.import_(bundle), None)
+    assert_type(history.import_([bundle, "b.dockerbuild"], timeout=5), list[str])
+    assert_type(history.import_(bundle), list[str])
     assert_type(history.open("abc", timeout=5), None)
     assert_type(history.remove(["a"], builder="b"), None)
     assert_type(history.remove(all=True), None)
