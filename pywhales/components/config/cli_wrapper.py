@@ -167,17 +167,25 @@ class ConfigCLI(DockerCLICaller):
     @overload
     def inspect(self, x: builtins.list[str]) -> builtins.list[Config]: ...
 
-    def inspect(self, x: str | builtins.list[str]) -> Config | builtins.list[Config]:
+    @overload
+    def inspect(self, x: str | builtins.list[str], *, pretty: Literal[True]) -> str: ...
+
+    def inspect(
+        self, x: str | builtins.list[str], *, pretty: bool = False
+    ) -> Config | builtins.list[Config] | str:
         """Inspect one or more Swarm configs by name or ID.
 
         Args:
             x: A name or ID, or a list of references. An empty list does not invoke
                 the CLI.
+            pretty: Return Docker's human-friendly text instead of handles. The
+                text isn't parsed, and no handle or cache snapshot is created.
 
         Returns:
             One handle for a string, otherwise handles in request order with
             duplicates retained as distinct handles. All snapshots are validated
-            before any returned handle is hydrated.
+            before any returned handle is hydrated. With `pretty=True`, the CLI
+            text for all references, or an empty string for an empty list.
 
         Raises:
             ParsingError: If the response cannot be associated unambiguously with
@@ -185,7 +193,9 @@ class ConfigCLI(DockerCLICaller):
         """
         references = to_list(x)
         if not references:
-            return []
+            return "" if pretty else []
+        if pretty:
+            return run([*self.docker_cmd, "config", "inspect", "--pretty", *references])
         json_str = run([*self.docker_cmd, "config", "inspect", *references])
         parser = Config(self.client_config, references[0], is_immutable_id=True)
         snapshots = parse_swarm_inspect_results(parser, json_str, references)

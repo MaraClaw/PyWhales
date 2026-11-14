@@ -2,9 +2,9 @@
 
 ## Local Navigation
 
-The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`,
-`manifest`, `network`, `node`, `plugin`, `secret`, `service`, `stack`, `swarm`,
-`system`, `task`, `trust`, and `volume`.
+The 18 groups are `buildx`, `checkpoint`, `compose`, `config`, `container`, `context`,
+`image`, `manifest`, `network`, `node`, `plugin`, `secret`, `service`, `stack`, `swarm`,
+`system`, `task`, and `volume`.
 
 - Each group's `cli_wrapper.py` holds its CLI class and resource wrappers where present.
   Its `models.py`, when present, defines typed Docker wire data.
@@ -18,6 +18,12 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Preserve resource-or-string `Valid*` aliases and shared conversion, not ad hoc name/ID extraction.
 - Forward modern options directly; no version probes or fallbacks that silently drop options.
 - Model changes need wire fixtures and static contracts; preserve existing wire aliases.
+- New options are keyword-only after `*`; never insert or reorder positionals. Drop a removed keyword-only Docker
+  option; keep a removed positional one and reject non-default values with a value-free `ValueError` before lookup.
+- Human-readable output is a keyword-only raw-text flag with `Literal` overloads (`pretty`, `verbose`, `tree`, Buildx
+  `debug`): `True` returns CLI stdout as `str`, drops the internal `--format`, and never seeds or pins caches.
+- Never name a Docker duration option `timeout`; that name is the local deadline. Use names such as `status_timeout`,
+  `shutdown_timeout` or `wait_timeout`.
 - Container, Compose and service `envs` forwarding follows the
   [runtime environment transport contract](../AGENTS.md#container-environment-transport); keep it centralized.
 
@@ -33,7 +39,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - `_hydration.py::hydrate_handles` uses chunks of at most `HYDRATION_CHUNK_SIZE` (100), one listing plus one inspect per healthy chunk. Validate the whole response and exact identity set, map by identity, then pin that chunk's handles. Only the kind's missing-resource exception bisects the affected chunk and drops missing singletons; malformed data and other errors propagate. Ordinary batch `inspect()` seeds unpinned snapshots.
 - `service list` prints truncated IDs, so hydrated service listings first expand them through `_hydration.py::resolve_identities` (`service inspect --format {{.ID}}`): same chunk bound, bisection on `NoSuchService` only, and every returned ID must begin with its request. Then `hydrate_handles` runs on full IDs.
 - Nodes have no `NoSuchNode`, and `exceptions.py` must keep classifying a missing node as plain `DockerException` for convergence's `NodeMissing`. Hydrated node listings translate locally: only a plain `DockerException` whose every stderr line is `Error response from daemon: node <requested ID> not found` bisects; timeouts, `NotASwarmManager` and other failures propagate. Never pass `DockerException` itself as the missing type.
-- Mutation launches release supplied handles' pins even on failure: image tag/remove, network connect/disconnect/remove, volume remove, service update/scale/rollback/remove, node update/promote/demote/remove, and config and secret remove. Release is local to those handle instances; plain names don't invalidate other handles. Container mutation and cleanup rules live in its child guide.
+- Mutation launches release supplied handles' pins even on failure: image tag/remove, network connect/disconnect/remove, volume remove/update, service update/scale/rollback/remove, node update/promote/demote/remove, and config and secret remove. Release is local to those handle instances; plain names don't invalidate other handles. Container mutation and cleanup rules live in its child guide.
 - Eleven scalar JSON hooks retain module-local `run()` and `-> dict[str, JsonValue]`, calling `_parse_single_inspect_json()`.
   Singleton shape and reload identity rules live in [the runtime guide](../AGENTS.md#configuration-and-policy); Builder and ManifestList keep distinct response shapes.
 - Config, Node, Secret, and Service inspect use `_swarm_inspect.py::parse_swarm_inspect_results`.
@@ -64,6 +70,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   (stdout-only JSON mapping, transport ownership). There's no `Service.logs()` handle API.
 - `manifest.push()` and `plugin.push()` budget only the push CLI; the manifest-list inspect preflight is
   outside it. `volume.copy()`/`clone()` apply `timeout` to each helper launch, not as one total.
+  `volume.update()` and `Volume.update()` take `timeout` for the cluster-volume update launch.
 - Swarm and plugin calls that wait on the daemon take keyword-only `timeout`, appended after `*` so earlier
   positionals keep their binding: `service.create/update/rollback/scale` (plus `Service.update`/`scale`),
   `swarm.ca`/`join`, `stack.deploy`, and `plugin.install`/`upgrade` (plus `Plugin.upgrade`). Validation precedes

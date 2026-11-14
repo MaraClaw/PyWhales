@@ -1,0 +1,6 @@
+{
+  "Description": "A  simple git container running in alpine linux, especially for tiny linux distro.",
+  "IsOfficial": "false",
+  "Name": "alpine/git",
+  "StarCount": "252"
+}

@@ -15,7 +15,7 @@ from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Literal, override
 
 import pydantic
 
@@ -174,6 +174,10 @@ class ClientConfig:
             equality. A supplied collection replaces inherit_environment selection;
             empty inherits nothing and None preserves legacy inheritance. Explicit
             overlays still apply. This does not confine configuration-file access.
+        compose_all_resources: Whether to emit the Compose option that includes
+            resources no service uses; only true emits it.
+        compose_ansi: Compose control-character mode (``"never"``, ``"always"``
+            or ``"auto"``); ``None`` omits the option.
     """
 
     config: ValidPath | None = None
@@ -209,6 +213,8 @@ class ClientConfig:
     inherit_environment: bool = True
     strict_workload_errors: bool = False
     inherited_environment_names: Collection[str] | None = None
+    compose_all_resources: bool = False
+    compose_ansi: Literal["never", "always", "auto"] | None = None
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.
@@ -338,6 +344,8 @@ class ClientConfig:
         base_cmd.add_simple_arg(
             "--progress", self.compose_progress if progress is None else progress
         )
+        base_cmd.add_flag("--all-resources", self.compose_all_resources)
+        base_cmd.add_simple_arg("--ansi", self.compose_ansi)
         return base_cmd
 
 

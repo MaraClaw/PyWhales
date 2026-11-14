@@ -3,7 +3,7 @@
 import datetime
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, overload
 
 from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
@@ -76,19 +76,37 @@ class DiskFreeResult:
 class SystemCLI(DockerCLICaller):
     """System commands using the configured CLI, daemon, and execution policy."""
 
-    def disk_free(self) -> DiskFreeResult:
-        """Return the selected Docker daemon's disk usage summaries.
+    @overload
+    def disk_free(self, *, verbose: Literal[False] = False) -> DiskFreeResult: ...
+
+    @overload
+    def disk_free(self, *, verbose: Literal[True]) -> str: ...
+
+    @overload
+    def disk_free(self, *, verbose: bool) -> DiskFreeResult | str: ...
+
+    def disk_free(self, *, verbose: bool = False) -> DiskFreeResult | str:
+        """Return the selected Docker daemon's disk usage.
+
+        Args:
+            verbose: If `True`, return the CLI's detailed per-image, container,
+                volume and build-cache report as unparsed text. Its layout is
+                Docker's and may change between CLI versions. If `False`, parse
+                the summary table.
 
         Returns:
             Usage for images, containers, local volumes, and build cache. Byte
             values reflect the CLI's rounding rather than exact daemon totals.
+            With `verbose=True`, the CLI's text instead.
 
         Raises:
-            ParsingError: If the output is malformed or has an unexpected shape.
-                Safe mode withholds the payload and chains no cause; a client
-                with `raw_diagnostics=True` chains the original error.
+            ParsingError: If the summary output is malformed or has an
+                unexpected shape. Safe mode withholds the payload and chains no
+                cause; a client with `raw_diagnostics=True` chains the original
+                error. Verbose text is never parsed.
         """
-
+        if verbose:
+            return run(Command([*self.docker_cmd, "system", "df", "--verbose"]))
         full_cmd = Command([*self.docker_cmd, "system", "df", "--format", "{{json .}}"])
         parser = JsonOutputParser(
             "system disk usage", self.client_config.raw_diagnostics

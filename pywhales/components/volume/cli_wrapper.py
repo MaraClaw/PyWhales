@@ -54,6 +54,7 @@ type VolumeListFilter = (
     | tuple[Literal["until"], str]
     | tuple[Literal["dangling"], str]
 )
+type VolumeAvailability = Literal["active", "pause", "drain"]
 
 
 class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
@@ -130,9 +131,28 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
     def __repr__(self) -> str:
         return f"pywhales.Volume(name='{self.name}', driver={self.driver})"
 
-    def remove(self) -> None:
-        """Remove this volume through the configured Docker CLI."""
-        VolumeCLI(self.client_config).remove(self)
+    def remove(self, *, force: bool = False) -> None:
+        """Remove this volume through the configured Docker CLI.
+
+        Args:
+            force: Pass `--force` to Docker's removal command.
+        """
+        VolumeCLI(self.client_config).remove(self, force=force)
+
+    def update(
+        self,
+        *,
+        availability: VolumeAvailability,
+        timeout: float | None = None,
+    ) -> None:
+        """Update this cluster volume.
+
+        See [`docker.volume.update`](../sub-commands/volume.md#update) for
+        information about the arguments.
+        """
+        VolumeCLI(self.client_config).update(
+            self, availability=availability, timeout=timeout
+        )
 
     def clone(
         self,
@@ -170,14 +190,46 @@ class VolumeCLI(DockerCLICaller):
         driver: str | None = None,
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
+        *,
+        type: Literal["mount", "block"] | None = None,
+        scope: Literal["single", "multi"] | None = None,
+        sharing: Literal["none", "readonly", "onewriter", "all"] | None = None,
+        availability: VolumeAvailability | None = None,
+        group: str | None = None,
+        secrets: Mapping[str, str] = MappingProxyType({}),
+        limit_bytes: int | str | None = None,
+        required_bytes: int | str | None = None,
+        topology_preferred: Iterable[str] = (),
+        topology_required: Iterable[str] = (),
     ) -> Volume:
         """Create and inspect a Docker volume.
+
+        Any of the keyword-only options makes Docker create a Swarm cluster
+        volume, which needs a Swarm manager and a cluster volume plugin.
 
         Args:
             volume_name: Requested name, or None to let Docker generate one.
             driver: Volume driver, or None to use Docker's default.
             labels: Metadata labels; the default adds none.
             options: Driver-specific options; the default adds none.
+            type: Cluster volume access type, `"mount"` or `"block"`.
+            scope: Cluster volume access scope, `"single"` or `"multi"`.
+            sharing: Cluster volume access sharing: `"none"`, `"readonly"`,
+                `"onewriter"` or `"all"`.
+            availability: Cluster volume availability: `"active"`, `"pause"` or
+                `"drain"`.
+            group: Cluster volume group.
+            secrets: Cluster volume secrets, sent as repeated `--secret key=value`
+                with the value naming a Swarm secret; the default adds none.
+            limit_bytes: Minimum size in bytes, as an integer or a Docker size
+                such as `"1g"`. Zero is sent; None omits the option.
+            required_bytes: Maximum size in bytes, in the same forms as
+                `limit_bytes`.
+            topology_preferred: Topologies the volume is preferred in, one
+                `segment=value[,segment=value]` string per repeated option; the
+                default adds none.
+            topology_required: Topologies the volume must be accessible from, in
+                the same form as `topology_preferred`.
 
         Returns:
             An inspected handle to the volume Docker created or returned.
@@ -189,6 +241,16 @@ class VolumeCLI(DockerCLICaller):
             full_cmd += ["--label", f"{key}={value}"]
         for key, value in options.items():
             full_cmd += ["--opt", f"{key}={value}"]
+        full_cmd.add_simple_arg("--availability", availability)
+        full_cmd.add_simple_arg("--group", group)
+        full_cmd.add_simple_arg("--limit-bytes", limit_bytes)
+        full_cmd.add_simple_arg("--required-bytes", required_bytes)
+        full_cmd.add_simple_arg("--scope", scope)
+        full_cmd.add_args_mapping("--secret", secrets)
+        full_cmd.add_simple_arg("--sharing", sharing)
+        full_cmd.add_args_iterable_or_single("--topology-preferred", topology_preferred)
+        full_cmd.add_args_iterable_or_single("--topology-required", topology_required)
+        full_cmd.add_simple_arg("--type", type)
 
         if volume_name is not None:
             full_cmd.append(volume_name)
@@ -255,7 +317,11 @@ class VolumeCLI(DockerCLICaller):
             return True
 
     def list(
-        self, filters: Iterable[VolumeListFilter] = (), *, hydrate: bool = False
+        self,
+        filters: Iterable[VolumeListFilter] = (),
+        *,
+        hydrate: bool = False,
+        cluster: bool = False,
     ) -> builtins.list[Volume]:
         """List Docker volumes.
 
@@ -269,6 +335,7 @@ class VolumeCLI(DockerCLICaller):
                 or a mutating call on the handle, and volumes that vanish
                 before their inspect are omitted. If `False`, each handle
                 inspects lazily on first property access.
+            cluster: List only Swarm cluster volumes (`--cluster`).
 
         Returns:
             Volume handles in CLI output order.
@@ -280,6 +347,7 @@ class VolumeCLI(DockerCLICaller):
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "volume", "list", "--quiet"])
+        full_cmd.add_flag("--cluster", cluster)
         full_cmd.add_args_iterable(
             "--filter", (f"{key}={value}" for key, value in filters)
         )
@@ -325,17 +393,21 @@ class VolumeCLI(DockerCLICaller):
 
         run(full_cmd, timeout=timeout)
 
-    def remove(self, x: ValidVolume | Iterable[ValidVolume]) -> None:
+    def remove(
+        self, x: ValidVolume | Iterable[ValidVolume], *, force: bool = False
+    ) -> None:
         """Remove one or more volumes.
 
         Args:
             x: A volume or an iterable of volumes. An empty selection means
                 nothing is done.
+            force: Pass `--force` to Docker's removal command.
         """
         volumes = to_list(x)
         if not volumes:
             return
         full_cmd = Command([*self.docker_cmd, "volume", "remove"])
+        full_cmd.add_flag("--force", force)
         for v in volumes:
             full_cmd.append(str(v))
 
@@ -343,6 +415,38 @@ class VolumeCLI(DockerCLICaller):
             run(full_cmd)
         finally:
             release_pins(volumes)
+
+    def update(
+        self,
+        volume: ValidVolume,
+        *,
+        availability: VolumeAvailability,
+        timeout: float | None = None,
+    ) -> None:
+        """Update a cluster volume.
+
+        Docker accepts this only for Swarm cluster volumes. The call blocks until
+        the CLI exits and any pin on a supplied handle is released afterwards,
+        even on failure.
+
+        Args:
+            volume: Volume name or handle.
+            availability: New availability: `"active"`, `"pause"` or `"drain"`.
+            timeout: Positive finite seconds from local CLI launch; `None` inherits
+                the client default. Expiry cannot undo a daemon-side update.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command([*self.docker_cmd, "volume", "update"])
+        full_cmd.add_simple_arg("--availability", availability)
+        full_cmd.append(str(volume))
+        try:
+            run(full_cmd, timeout=timeout)
+        finally:
+            release_pins([volume])
 
     def clone(
         self,

@@ -135,8 +135,8 @@ def test_stop_dispatch_is_unchanged_when_root_and_component_are_used(
     client.container.stop("second", time=1)
 
     assert run_mock.call_args_list == [
-        call([sys.executable, "engine", "container", "stop", "--time", 0, "first"]),
-        call([sys.executable, "engine", "container", "stop", "--time", 1, "second"]),
+        call([sys.executable, "engine", "container", "stop", "--timeout", 0, "first"]),
+        call([sys.executable, "engine", "container", "stop", "--timeout", 1, "second"]),
     ]
 
 

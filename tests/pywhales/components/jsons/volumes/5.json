@@ -1,0 +1,30 @@
+{
+    "ClusterVolume": {
+        "ID": "8r0nfpsau6z9bkmfipkrwtlmy",
+        "Version": {
+            "Index": 11
+        },
+        "CreatedAt": "2026-11-14T13:06:04.961510094Z",
+        "UpdatedAt": "2026-11-14T13:06:04.961510094Z",
+        "Spec": {
+            "AccessMode": {
+                "Scope": "single",
+                "Sharing": "none",
+                "MountVolume": {}
+            },
+            "AccessibilityRequirements": {},
+            "CapacityRange": {
+                "RequiredBytes": 536870912,
+                "LimitBytes": 1073741824
+            },
+            "Availability": "active"
+        }
+    },
+    "CreatedAt": "2026-11-14 13:06:04.961510094 +0000 UTC",
+    "Driver": "pyw130-missing-csi",
+    "Labels": null,
+    "Mountpoint": "",
+    "Name": "cluster-volume",
+    "Options": null,
+    "Scope": "global"
+}

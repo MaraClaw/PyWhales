@@ -1,0 +1,13 @@
+{
+  "CreatedAt": "2026-11-13 12:44:37.849148339 +0000 UTC",
+  "Description": "pulled from docker.io/docker/dockerfile:1@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "ID": "inazx34amumjfv2apb3frn69d",
+  "LastUsedAt": "23 hours ago",
+  "Mutable": false,
+  "Parents": null,
+  "Reclaimable": true,
+  "Shared": false,
+  "Size": "11.5MB",
+  "Type": "frontend",
+  "UsageCount": 2
+}

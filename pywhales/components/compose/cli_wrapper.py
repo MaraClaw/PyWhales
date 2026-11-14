@@ -6,34 +6,43 @@ originating configuration; returned output is not diagnostic redaction output.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, Unpack, assert_never, overload
+from typing import Literal, Unpack, assert_never, get_args, overload
 
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
+import pywhales.components.image.cli_wrapper
 import pywhales.components.volume.cli_wrapper
 from pywhales._environment import container_environment
 from pywhales._json import loads_compat
-from pywhales.client_config import Command, DockerCLICaller
+from pywhales.client_config import ClientConfig, Command, DockerCLICaller, ParsingError
 from pywhales.components._json_output import JsonOutputParser
+from pywhales.components.compose.bridge import ComposeBridgeCLI
 from pywhales.components.compose.models import (
     ComposeConfig,
     ComposeEvent,
+    ComposeImage,
     ComposeProject,
+    ComposeStats,
+    ComposeVariable,
+    ComposeVolume,
 )
 from pywhales.components.top import ComposeTopResult, parse_compose_top
 from pywhales.enums import (
     ComposeCreatePullPolicy,
     ComposeUpPullPolicy,
 )
+from pywhales.exceptions import DockerException, DockerTimeout
 from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
+    ValidPath,
     custom_parse_object_as,
     format_filters_for_cli,
     format_mapping_for_cli,
@@ -47,6 +56,17 @@ from pywhales.utils import (
 )
 
 type ComposeLsFilter = tuple[Literal["name"], str]
+type ComposeServicePath = tuple[str, ValidPath]
+type ComposePsStatus = Literal[
+    "paused", "restarting", "removing", "running", "dead", "created", "exited"
+]
+type ComposeConfigNames = Literal[
+    "services", "volumes", "profiles", "images", "networks", "models"
+]
+type ComposePullPolicyInput = Literal["missing", "always"]
+
+_CONFIG_NAMES = get_args(ComposeConfigNames.__value__)
+_COMMITTED_IMAGE = re.compile(r"Committed as (sha256:[0-9a-f]{64})")
 
 
 def _parse_config(output: str) -> ComposeConfig:
@@ -55,6 +75,60 @@ def _parse_config(output: str) -> ComposeConfig:
 
 def _parse_config_json(output: str) -> dict[str, JsonValue]:
     return custom_parse_object_as(dict[str, JsonValue], loads_compat(output))
+
+
+def _parse_config_hashes(output: str) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for line in output.splitlines():
+        name, separator, digest = line.partition(" ")
+        if not (name and separator and digest):
+            raise ParsingError("Unexpected compose config hash output")
+        hashes[name] = digest
+    return hashes
+
+
+def _parse_config_environment(output: str) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for line in output.splitlines():
+        name, separator, value = line.partition("=")
+        if not (name and separator):
+            raise ParsingError("Unexpected compose config environment output")
+        environment[name] = value
+    return environment
+
+
+def _parse_config_variables(output: str) -> list[ComposeVariable]:
+    return list(
+        custom_parse_object_as(
+            dict[str, ComposeVariable], loads_compat(output)
+        ).values()
+    )
+
+
+def _parse_images(output: str) -> list[ComposeImage]:
+    decoded = loads_compat(output)
+    return custom_parse_object_as(
+        list[ComposeImage], [] if decoded is None else decoded
+    )
+
+
+def _parse_json_lines[ModelT: BaseModel](
+    model: type[ModelT], output: str
+) -> list[ModelT]:
+    return [model.model_validate(loads_compat(line)) for line in output.splitlines()]
+
+
+def _add_optional_bool(command: Command, name: str, value: bool | None) -> None:
+    """Append `name`, or `name=false`, for a tri-state option; omit it for `None`."""
+    if value is not None:
+        command.append(name if value else f"{name}=false")
+
+
+def _whole_seconds(duration: int | timedelta | None) -> int | None:
+    """Return integer seconds for a Compose `--timeout`, truncating a timedelta."""
+    if isinstance(duration, timedelta):
+        return int(duration.total_seconds())
+    return duration
 
 
 def _parse_projects(output: str) -> list[ComposeProject]:
@@ -97,6 +171,16 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
     user: str | None
     volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition]
     workdir: str | Path | None
+    cap_add: Iterable[str]
+    cap_drop: Iterable[str]
+    env_from_files: ValidPath | Iterable[ValidPath]
+    interactive: bool | None
+    no_recreate: bool
+    pull: ComposeUpPullPolicy | None
+    quiet: bool
+    quiet_build: bool
+    quiet_pull: bool
+    remove_orphans: bool
     timeout: float | None
 
 
@@ -108,8 +192,63 @@ class ComposeCLI(DockerCLICaller):
     loop break does not release it. Closing kills and reaps the local CLI, not
     daemon-managed services, and does not undo completed changes. Byte-output
     streams yield records with `"stdout"` or `"stderr"` source labels and byte
-    payloads; `events()` returns a stream of parsed `ComposeEvent` objects.
+    payloads; `events()` returns a stream of parsed `ComposeEvent` objects, and
+    `stats(stream=True)` returns raw byte records.
+
+    Attributes:
+        bridge: The Compose Bridge command group, `docker.compose.bridge`.
     """
+
+    def __init__(self, client_config: ClientConfig) -> None:
+        """Retain the shared config and wire the Bridge command group.
+
+        Args:
+            client_config: Settings shared with the originating client.
+        """
+        super().__init__(client_config)
+        self.bridge = ComposeBridgeCLI(client_config)
+
+    def attach(
+        self,
+        service: str,
+        *,
+        detach_keys: str | None = None,
+        index: int | None = None,
+        stdin: bool = True,
+        sig_proxy: bool = True,
+        timeout: float | None = None,
+    ) -> None:
+        """Attach the caller's terminal streams to a service's running container.
+
+        The local CLI inherits stdin, stdout and stderr and blocks until the
+        container stops or the attachment detaches.
+
+        Args:
+            service: The service whose running container is attached.
+            detach_keys: Override the key sequence for detaching.
+            index: Container index when the service has several replicas;
+                `None` leaves the CLI default (the first).
+            stdin: Attach stdin. `False` passes `--no-stdin`.
+            sig_proxy: Proxy received signals to the container process. `True`
+                passes `--sig-proxy` and `False` passes `--sig-proxy=false`.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before the CLI is resolved.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; the container keeps running, and the Compose plugin
+                process the CLI started may outlive it.
+            DockerException: The local Compose CLI exits unsuccessfully.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command([*self.docker_compose_cmd, "attach"])
+        full_cmd.add_simple_arg("--detach-keys", detach_keys)
+        full_cmd.add_simple_arg("--index", index)
+        full_cmd.add_flag("--no-stdin", not stdin)
+        _add_optional_bool(full_cmd, "--sig-proxy", sig_proxy)
+        full_cmd.append(service)
+        run(full_cmd, tty=True, timeout=timeout)
 
     @overload
     def build(
@@ -130,6 +269,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = ...,
         sbom: bool | str | None = ...,
         push: bool = ...,
+        memory: int | str | None = ...,
         timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
@@ -152,6 +292,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = ...,
         sbom: bool | str | None = ...,
         push: bool = ...,
+        memory: int | str | None = ...,
         timeout: float | None = None,
     ) -> None: ...
 
@@ -174,6 +315,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
+        memory: int | str | None = None,
         timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
@@ -195,6 +337,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
+        memory: int | str | None = None,
         timeout: float | None = None,
     ) -> ProcessStream | None:
         """Build services declared in the configured Compose project.
@@ -231,6 +374,9 @@ class ComposeCLI(DockerCLICaller):
             sbom: Add an SBOM attestation (`True`), disable it (`False`), or pass
                 attestation parameters. `None` leaves the CLI default unchanged.
             push: Push the built service images.
+            memory: Memory limit for the build container, in bytes or as a size
+                such as `"512m"`. The CLI doesn't support it with BuildKit.
+                `None` omits the option.
             timeout: Positive finite seconds from local CLI launch, or `None` to
                 inherit the client default. Validated even for an empty selection.
                 A stream's deadline advances while consumption pauses.
@@ -268,6 +414,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--ssh", ssh)
         full_cmd.add_flag("--with-dependencies", with_dependencies)
         full_cmd.add_simple_arg("--builder", builder)
+        full_cmd.add_simple_arg("--memory", memory)
         full_cmd.add_flag("--check", check)
         full_cmd.add_flag("--print", print)
         full_cmd.add_flag("--push", push)
@@ -292,39 +439,251 @@ class ComposeCLI(DockerCLICaller):
             run(full_cmd, env=child_env, capture_stdout=False, timeout=timeout)
 
     @overload
-    def config(self, return_json: Literal[False] = ...) -> ComposeConfig: ...
-
-    @overload
-    def config(self, return_json: Literal[True]) -> dict[str, JsonValue]: ...
+    def config(
+        self,
+        return_json: Literal[False] = ...,
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: None = ...,
+        quiet: Literal[False] = ...,
+    ) -> ComposeConfig: ...
 
     @overload
     def config(
-        self, return_json: bool = False
+        self,
+        return_json: Literal[True],
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: None = ...,
+        quiet: Literal[False] = ...,
+    ) -> dict[str, JsonValue]: ...
+
+    @overload
+    def config(
+        self,
+        return_json: bool = ...,
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: None = ...,
+        quiet: Literal[False] = ...,
     ) -> ComposeConfig | dict[str, JsonValue]: ...
 
-    def config(self, return_json: bool = False) -> ComposeConfig | dict[str, JsonValue]:
+    @overload
+    def config(
+        self,
+        return_json: bool = ...,
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: ValidPath | None = ...,
+        quiet: Literal[True],
+    ) -> None: ...
+
+    @overload
+    def config(
+        self,
+        return_json: bool = ...,
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: ValidPath,
+        quiet: bool = ...,
+    ) -> None: ...
+
+    @overload
+    def config(
+        self,
+        return_json: bool = ...,
+        *,
+        no_interpolate: bool = ...,
+        no_normalize: bool = ...,
+        no_path_resolution: bool = ...,
+        no_consistency: bool = ...,
+        no_env_resolution: bool = ...,
+        lock_image_digests: bool = ...,
+        resolve_image_digests: bool = ...,
+        output: ValidPath | None = ...,
+        quiet: bool = ...,
+    ) -> ComposeConfig | dict[str, JsonValue] | None: ...
+
+    def config(
+        self,
+        return_json: bool = False,
+        *,
+        no_interpolate: bool = False,
+        no_normalize: bool = False,
+        no_path_resolution: bool = False,
+        no_consistency: bool = False,
+        no_env_resolution: bool = False,
+        lock_image_digests: bool = False,
+        resolve_image_digests: bool = False,
+        output: ValidPath | None = None,
+        quiet: bool = False,
+    ) -> ComposeConfig | dict[str, JsonValue] | None:
         """Return the resolved Compose project configuration.
+
+        The typed model covers the fields of a normalized, interpolated
+        project. With render modifiers such as `no_interpolate` or
+        `no_normalize`, use `return_json=True`, because values can leave the
+        shapes the typed model declares.
 
         Args:
             return_json: Preserve all JSON fields in a dictionary when `True`;
                 otherwise parse the fields supported by the typed model.
+            no_interpolate: Don't interpolate environment variables.
+            no_normalize: Don't normalize the Compose model.
+            no_path_resolution: Don't resolve file paths.
+            no_consistency: Don't check model consistency. The output can be
+                invalid Compose.
+            no_env_resolution: Don't resolve service environment files.
+            lock_image_digests: Produce an override document holding image
+                digests rather than the full project.
+            resolve_image_digests: Pin image tags to digests, which needs
+                registry access.
+            output: Save the rendering to this file on the Python host instead
+                of returning it.
+            quiet: Only validate the configuration and print nothing.
 
         Returns:
             The typed configuration by default, or the complete decoded JSON
-            dictionary when `return_json=True`.
+            dictionary when `return_json=True`. `None` when `quiet=True` or
+            `output` is given: nothing is read back or parsed.
 
         Raises:
             ParsingError: If the output is malformed or has an unexpected shape.
                 Safe mode withholds the payload and chains no cause; a client
                 with `raw_diagnostics=True` chains the original error.
+            DockerException: The configuration is invalid, including when only
+                validating with `quiet=True`.
         """
         full_cmd = Command([*self.docker_compose_cmd, "config", "--format", "json"])
+        full_cmd.add_flag("--no-interpolate", no_interpolate)
+        full_cmd.add_flag("--no-normalize", no_normalize)
+        full_cmd.add_flag("--no-path-resolution", no_path_resolution)
+        full_cmd.add_flag("--no-consistency", no_consistency)
+        full_cmd.add_flag("--no-env-resolution", no_env_resolution)
+        full_cmd.add_flag("--lock-image-digests", lock_image_digests)
+        full_cmd.add_flag("--resolve-image-digests", resolve_image_digests)
+        full_cmd.add_simple_arg("--output", output)
+        full_cmd.add_flag("--quiet", quiet)
         result = run(full_cmd, capture_stdout=True)
+        if quiet or output is not None:
+            return None
         parser = JsonOutputParser("compose config", self.client_config.raw_diagnostics)
         if return_json:
             return parser.parse(_parse_config_json, result)
         else:
             return parser.parse(_parse_config, result)
+
+    def config_names(self, kind: ComposeConfigNames) -> list[str]:
+        """Return the names of one kind of project resource.
+
+        Args:
+            kind: Resource kind to list: `"services"`, `"volumes"`,
+                `"profiles"`, `"images"`, `"networks"` or `"models"`.
+
+        Returns:
+            One name per output line, in CLI order. Duplicates are kept: two
+            services using one image list it twice. Empty when there are none.
+
+        Raises:
+            ValueError: `kind` isn't one of the listed kinds. Raised before the
+                CLI is resolved.
+            DockerException: The project configuration is invalid.
+        """
+        if kind not in _CONFIG_NAMES:
+            raise ValueError("kind must be a supported Compose config listing")
+        return run(
+            Command([*self.docker_compose_cmd, "config", f"--{kind}"])
+        ).splitlines()
+
+    def config_hashes(
+        self, services: str | Sequence[str] | None = None
+    ) -> dict[str, str]:
+        """Return the configuration hash Compose computes for each service.
+
+        Args:
+            services: Services to hash. `None` and an empty sequence select every
+                service, as in `ps()`.
+
+        Returns:
+            Hashes keyed by service name, in CLI order.
+
+        Raises:
+            ParsingError: A line isn't `<service> <hash>`.
+            DockerException: The project configuration is invalid or a service
+                is unknown.
+        """
+        selected = [] if services is None else to_list(services)
+        full_cmd = Command([*self.docker_compose_cmd, "config"])
+        full_cmd.add_simple_arg("--hash", ",".join(selected) or "*")
+        return _parse_config_hashes(run(full_cmd))
+
+    def config_variables(self) -> list[ComposeVariable]:
+        """Return the interpolation variables the project references.
+
+        Returns:
+            One entry per variable, in CLI order, with its default, alternate
+            value and whether it is required. Empty when the project uses none.
+
+        Raises:
+            ParsingError: The output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
+        """
+        full_cmd = Command(
+            [*self.docker_compose_cmd, "config", "--variables", "--format", "json"]
+        )
+        parser = JsonOutputParser(
+            "compose config variables", self.client_config.raw_diagnostics
+        )
+        return parser.parse(_parse_config_variables, run(full_cmd))
+
+    def config_environment(self) -> dict[str, str]:
+        """Return the environment Compose uses for interpolation.
+
+        The result includes every ambient variable the CLI inherits (see
+        `inherited_environment_names`) as well as values from environment files,
+        so it can hold secrets. A value spanning several lines can't be told
+        apart from following variables: a continuation line without `=` raises
+        `ParsingError`, and one containing `=` is read as another variable.
+
+        Returns:
+            Variable names and values.
+
+        Raises:
+            ParsingError: A line has no `=` separator.
+        """
+        full_cmd = Command([*self.docker_compose_cmd, "config", "--environment"])
+        return _parse_config_environment(run(full_cmd))
 
     @overload
     def create(
@@ -337,6 +696,10 @@ class ComposeCLI(DockerCLICaller):
         pull: ComposeCreatePullPolicy | None = ...,
         *,
         stream_logs: Literal[True],
+        quiet_pull: bool = ...,
+        remove_orphans: bool = ...,
+        scales: Mapping[str, int] = ...,
+        yes: bool = ...,
     ) -> ProcessStream | None: ...
 
     @overload
@@ -349,6 +712,11 @@ class ComposeCLI(DockerCLICaller):
         no_recreate: bool = ...,
         pull: ComposeCreatePullPolicy | None = ...,
         stream_logs: Literal[False] = ...,
+        *,
+        quiet_pull: bool = ...,
+        remove_orphans: bool = ...,
+        scales: Mapping[str, int] = ...,
+        yes: bool = ...,
     ) -> None: ...
 
     @overload
@@ -361,6 +729,11 @@ class ComposeCLI(DockerCLICaller):
         no_recreate: bool = False,
         pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
+        *,
+        quiet_pull: bool = False,
+        remove_orphans: bool = False,
+        scales: Mapping[str, int] = MappingProxyType({}),
+        yes: bool = False,
     ) -> ProcessStream | None: ...
 
     def create(
@@ -372,6 +745,11 @@ class ComposeCLI(DockerCLICaller):
         no_recreate: bool = False,
         pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
+        *,
+        quiet_pull: bool = False,
+        remove_orphans: bool = False,
+        scales: Mapping[str, int] = MappingProxyType({}),
+        yes: bool = False,
     ) -> ProcessStream | None:
         """Create service containers without starting them.
 
@@ -391,6 +769,12 @@ class ComposeCLI(DockerCLICaller):
             pull: Pull image before running ("always"|"missing"|"never"|"build").
             stream_logs: Return an owned stdout/stderr byte stream instead of
                 waiting for command completion.
+            quiet_pull: Pull images without printing progress information.
+            remove_orphans: Remove containers for services not defined in the
+                Compose file.
+            scales: Instance counts overriding the Compose file, such as
+                `{"web": 2}`; emitted as one `--scale` per entry.
+            yes: Assume "yes" to all prompts and run non-interactively.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
@@ -402,6 +786,10 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--no-build", no_build)
         full_cmd.add_flag("--no-recreate", no_recreate)
         full_cmd.add_simple_arg("--pull", pull)
+        full_cmd.add_flag("--quiet-pull", quiet_pull)
+        full_cmd.add_flag("--remove-orphans", remove_orphans)
+        full_cmd.add_args_iterable("--scale", format_mapping_for_cli(scales))
+        full_cmd.add_flag("--yes", yes)
         if services == []:
             return
         elif services is not None:
@@ -557,7 +945,7 @@ class ComposeCLI(DockerCLICaller):
         env_arguments, child_env = container_environment(envs, self.client_config)
         full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--index", index)
-        full_cmd.add_flag("--no-TTY", not tty)
+        full_cmd.add_flag("--no-tty", not tty)
         full_cmd.add_flag("--privileged", privileged)
         full_cmd.add_simple_arg("--user", user)
         full_cmd.add_simple_arg("--workdir", workdir)
@@ -580,6 +968,8 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: str | list[str] | None = None,
         signal: int | str | None = None,
+        *,
+        remove_orphans: bool = False,
     ) -> None:
         """Send a signal to the containers of selected services.
 
@@ -590,9 +980,12 @@ class ComposeCLI(DockerCLICaller):
                 An empty list means that no services are going to be killed, the function is then
                 a no-op.
             signal: the signal to send to the container. Default is `"SIGKILL"`
+            remove_orphans: Remove containers for services not defined in the
+                Compose file.
         """
         full_cmd = Command([*self.docker_compose_cmd, "kill"])
         full_cmd.add_simple_arg("--signal", format_signal_arg(signal))
+        full_cmd.add_flag("--remove-orphans", remove_orphans)
         if services == []:
             return
         elif services is not None:
@@ -611,6 +1004,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         stream: Literal[False] = False,
         *,
+        index: int | None = None,
         timeout: float | None = None,
     ) -> str: ...
 
@@ -626,6 +1020,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         *,
         stream: Literal[True],
+        index: int | None = None,
         timeout: float | None = None,
     ) -> ProcessStream: ...
 
@@ -641,6 +1036,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         stream: bool = False,
         *,
+        index: int | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream: ...
 
@@ -655,6 +1051,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         stream: bool = False,
         *,
+        index: int | None = None,
         timeout: float | None = None,
     ) -> str | ProcessStream:
         """Collect or stream output from service containers.
@@ -677,6 +1074,8 @@ class ComposeCLI(DockerCLICaller):
             until: Show logs before a timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m for 42 minutes)
             stream: Return an owned stream of `("stdout", bytes)` and
                 `("stderr", bytes)` records instead of collecting text.
+            index: Replica index when a service has several containers; `None`
+                shows every replica.
             timeout: Positive finite seconds from local logs CLI launch, or `None`
                 to inherit the client default. Timing continues while consumption pauses.
                 Expiry raises `DockerTimeout` without stopping services or changing
@@ -700,6 +1099,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--timestamps", timestamps)
         full_cmd.add_simple_arg("--since", since)
         full_cmd.add_simple_arg("--until", until)
+        full_cmd.add_simple_arg("--index", index)
         full_cmd += to_list(services)
 
         iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
@@ -766,32 +1166,104 @@ class ComposeCLI(DockerCLICaller):
         host, port = str(result).split(":")
         return host, int(port)
 
+    @overload
+    def ps(
+        self,
+        services: list[str] | None = ...,
+        all: bool = ...,
+        *,
+        filters: Mapping[str, str] | Iterable[tuple[str, str]] = ...,
+        status: ComposePsStatus | Sequence[ComposePsStatus] = ...,
+        orphans: bool | None = ...,
+        service_names: Literal[False] = ...,
+    ) -> list[pywhales.components.container.cli_wrapper.Container]: ...
+
+    @overload
+    def ps(
+        self,
+        services: list[str] | None = ...,
+        all: bool = ...,
+        *,
+        filters: Mapping[str, str] | Iterable[tuple[str, str]] = ...,
+        status: ComposePsStatus | Sequence[ComposePsStatus] = ...,
+        orphans: bool | None = ...,
+        service_names: Literal[True],
+    ) -> list[str]: ...
+
+    @overload
+    def ps(
+        self,
+        services: list[str] | None = ...,
+        all: bool = ...,
+        *,
+        filters: Mapping[str, str] | Iterable[tuple[str, str]] = ...,
+        status: ComposePsStatus | Sequence[ComposePsStatus] = ...,
+        orphans: bool | None = ...,
+        service_names: bool = ...,
+    ) -> list[pywhales.components.container.cli_wrapper.Container] | list[str]: ...
+
     def ps(
         self,
         services: list[str] | None = None,
         all: bool = False,
-    ) -> list[pywhales.components.container.cli_wrapper.Container]:
-        """Return containers created by the current Compose project.
+        *,
+        filters: Mapping[str, str] | Iterable[tuple[str, str]] = MappingProxyType({}),
+        status: ComposePsStatus | Sequence[ComposePsStatus] = (),
+        orphans: bool | None = None,
+        service_names: bool = False,
+    ) -> list[pywhales.components.container.cli_wrapper.Container] | list[str]:
+        """Return containers created by the current Compose project, or its services.
 
         Args:
             services: Limit results to these services. `None` and `[]` both
                 select all services, rather than skipping execution.
             all: Include stopped containers.
+            filters: At most one filter, as a mapping or `(key, value)` pairs.
+                The CLI supports only `status`, such as `{"status": "running"}`;
+                it keeps just the last `--filter`, so more than one is rejected.
+            status: One status, or several, to keep. Each is passed as its own
+                `--status`. Known values are `paused`, `restarting`, `removing`,
+                `running`, `dead`, `created` and `exited`.
+            orphans: Include orphaned services, which the project doesn't declare.
+                `None` leaves the CLI default (included); `False` passes
+                `--orphans=false`.
+            service_names: Return service names instead of container handles.
 
         Returns:
             Container handles in CLI output order, retaining the originating
-            client configuration.
+            client configuration, or with `service_names=True` the service names
+            in CLI order.
 
         Raises:
-            ValueError: Dry-run output cannot be interpreted as container IDs.
+            ValueError: Dry-run output cannot be interpreted as container IDs or
+                service names, or more than one filter is given. Raised before
+                the CLI is resolved.
+            TypeError: `filters` is a string, bytes, or an iterable containing
+                anything but `(key, value)` tuples of strings.
         """
         if self.client_config.compose_dry_run:
-            raise ValueError("compose.ps() cannot return containers in dry-run mode.")
-        full_cmd = Command([*self.docker_compose_cmd, "ps", "--quiet"])
+            raise ValueError(
+                "compose.ps() cannot return containers or services in dry-run mode."
+            )
+        filter_args = format_filters_for_cli(filters)
+        if len(filter_args) > 1:
+            raise ValueError("compose ps accepts at most one filter")
+        full_cmd = Command(
+            [
+                *self.docker_compose_cmd,
+                "ps",
+                "--services" if service_names else "--quiet",
+            ]
+        )
         full_cmd.add_flag("--all", all)
+        full_cmd.add_args_iterable("--filter", filter_args)
+        full_cmd.add_args_iterable_or_single("--status", status)
+        _add_optional_bool(full_cmd, "--orphans", orphans)
         if services is not None:
             full_cmd += services
         result = run(full_cmd)
+        if service_names:
+            return result.splitlines()
         ids = result.splitlines()
         # The first line might be a warning for experimental
         # See https://github.com/docker/compose-cli/issues/1108
@@ -845,6 +1317,8 @@ class ComposeCLI(DockerCLICaller):
         resolve_image_digests: bool = False,
         with_env: bool = False,
         allow_publishing_sensitive_data: bool = False,
+        *,
+        app: bool = False,
     ) -> None:
         """Publish compose application.
 
@@ -854,8 +1328,10 @@ class ComposeCLI(DockerCLICaller):
             resolve_image_digests: Pin image tags to digests
             with_env: Include environment variables in the published OCI artifact
             allow_publishing_sensitive_data: Assume "yes" as answer to all prompts
+            app: Publish the application, including the images it references.
         """
         full_cmd = Command([*self.docker_compose_cmd, "publish"])
+        full_cmd.add_flag("--app", app)
         if oci_version is not None:
             full_cmd.add_simple_arg("--oci-version", oci_version)
         full_cmd.add_flag("--resolve-image-digests", resolve_image_digests)
@@ -873,6 +1349,8 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         *,
         stream_logs: Literal[True],
+        ignore_buildable: bool = ...,
+        policy: ComposePullPolicyInput | None = ...,
         timeout: float | None = ...,
     ) -> ProcessStream | None: ...
 
@@ -885,6 +1363,8 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         stream_logs: Literal[False] = ...,
         *,
+        ignore_buildable: bool = ...,
+        policy: ComposePullPolicyInput | None = ...,
         timeout: float | None = ...,
     ) -> None: ...
 
@@ -897,6 +1377,8 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         *,
+        ignore_buildable: bool = False,
+        policy: ComposePullPolicyInput | None = None,
         timeout: float | None = None,
     ) -> ProcessStream | None: ...
 
@@ -908,6 +1390,8 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         *,
+        ignore_buildable: bool = False,
+        policy: ComposePullPolicyInput | None = None,
         timeout: float | None = None,
     ) -> ProcessStream | None:
         """Pull images for selected Compose services.
@@ -923,6 +1407,9 @@ class ComposeCLI(DockerCLICaller):
                 To disable all output, use `quiet=True`
             stream_logs: Return an owned stdout/stderr byte stream instead of
                 waiting for command completion.
+            ignore_buildable: Skip images that can be built.
+            policy: Apply a pull policy, `"missing"` or `"always"`; `None`
+                leaves the CLI default.
             timeout: Positive finite seconds from local CLI launch, replacing the
                 client default; `None` inherits it. Booleans are rejected before
                 selecting services, even for an empty request.
@@ -948,6 +1435,8 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--ignore-pull-failures", ignore_pull_failures)
         full_cmd.add_flag("--include-deps", include_deps)
         full_cmd.add_flag("--quiet", quiet)
+        full_cmd.add_flag("--ignore-buildable", ignore_buildable)
+        full_cmd.add_simple_arg("--policy", policy)
         if services == []:
             return
         elif services is not None:
@@ -962,6 +1451,9 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | None = None,
         *,
+        ignore_missing: bool = False,
+        include_deps: bool = False,
+        quiet: bool = False,
         timeout: float | None = None,
     ) -> None:
         """Push service images.
@@ -971,6 +1463,11 @@ class ComposeCLI(DockerCLICaller):
                 services will be pushed. If no services are specified (`None`, the default
                 behavior) all images of all services are pushed.
                 If an empty list is provided, then the function call is a no-op.
+            ignore_missing: Skip images that aren't available locally instead of
+                failing to push them.
+            include_deps: Also push the images of services declared as
+                dependencies.
+            quiet: Push without printing progress information.
             timeout: Positive finite seconds from local CLI launch, replacing the
                 client default; `None` inherits it. Validated before selecting
                 services, even for an empty request.
@@ -983,6 +1480,9 @@ class ComposeCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         full_cmd = Command([*self.docker_compose_cmd, "push"])
+        full_cmd.add_flag("--ignore-missing", ignore_missing)
+        full_cmd.add_flag("--include-deps", include_deps)
+        full_cmd.add_flag("--quiet", quiet)
         if services == []:
             return
         elif services is not None:
@@ -993,6 +1493,8 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: str | list[str] | None = None,
         timeout: int | timedelta | None = None,
+        *,
+        no_deps: bool = False,
     ) -> None:
         """Restart containers for selected services.
 
@@ -1003,8 +1505,10 @@ class ComposeCLI(DockerCLICaller):
             timeout: Container shutdown grace period in seconds, or a duration
                 truncated to whole seconds. `None` leaves the CLI default unchanged;
                 this is not a local subprocess deadline.
+            no_deps: Don't restart the services the selection depends on.
         """
         full_cmd = Command([*self.docker_compose_cmd, "restart"])
+        full_cmd.add_flag("--no-deps", no_deps)
 
         if isinstance(timeout, timedelta):
             timeout = int(timeout.total_seconds())
@@ -1102,6 +1606,16 @@ class ComposeCLI(DockerCLICaller):
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
         *,
+        cap_add: Iterable[str] = (),
+        cap_drop: Iterable[str] = (),
+        env_from_files: ValidPath | Iterable[ValidPath] = (),
+        interactive: bool | None = None,
+        no_recreate: bool = False,
+        pull: ComposeUpPullPolicy | None = None,
+        quiet: bool = False,
+        quiet_build: bool = False,
+        quiet_pull: bool = False,
+        remove_orphans: bool = False,
         timeout: float | None = None,
     ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream: ...
 
@@ -1128,6 +1642,16 @@ class ComposeCLI(DockerCLICaller):
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
         *,
+        cap_add: Iterable[str] = (),
+        cap_drop: Iterable[str] = (),
+        env_from_files: ValidPath | Iterable[ValidPath] = (),
+        interactive: bool | None = None,
+        no_recreate: bool = False,
+        pull: ComposeUpPullPolicy | None = None,
+        quiet: bool = False,
+        quiet_build: bool = False,
+        quiet_pull: bool = False,
+        remove_orphans: bool = False,
         timeout: float | None = None,
     ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream:
         """Run a one-off command on a service.
@@ -1162,6 +1686,21 @@ class ComposeCLI(DockerCLICaller):
                 and optional mode. Bind sources refer to the daemon host, which
                 may differ from the Python host; avoid exposing sensitive paths.
             workdir: Working directory inside the container
+            cap_add: Linux capabilities to add, one `--cap-add` each.
+            cap_drop: Linux capabilities to drop, one `--cap-drop` each.
+            env_from_files: Environment files read by the CLI, one
+                `--env-from-file` each.
+            interactive: Keep stdin open even if not attached. `None` leaves the
+                CLI default (open); `False` passes `--interactive=false`.
+            no_recreate: Don't recreate dependency containers that already exist,
+                even if their configuration diverged.
+            pull: Image acquisition policy, `"always"`, `"missing"` or
+                `"never"`; `None` leaves the Compose default.
+            quiet: Don't print anything to stdout.
+            quiet_build: Suppress build progress output.
+            quiet_pull: Pull without printing progress information.
+            remove_orphans: Remove containers for services not defined in the
+                Compose file.
             timeout: Positive finite seconds from local CLI launch, or `None`
                 to inherit the client default. Timing advances even when a returned stream is
                 not consumed. This is not a Compose shutdown or health-wait timeout.
@@ -1210,7 +1749,7 @@ class ComposeCLI(DockerCLICaller):
         env_arguments, child_env = container_environment(envs, self.client_config)
         full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--name", name)
-        full_cmd.add_flag("--no-TTY", not tty)
+        full_cmd.add_flag("--no-tty", not tty)
         full_cmd.add_flag("--no-deps", not dependencies)
         for port_mapping in publish:
             full_cmd += ["--publish", format_port_arg(port_mapping)]
@@ -1224,6 +1763,16 @@ class ComposeCLI(DockerCLICaller):
             full_cmd += ["--volume", ":".join(volume_definition)]
         full_cmd.add_simple_arg("--workdir", workdir)
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
+        full_cmd.add_args_iterable("--cap-add", cap_add)
+        full_cmd.add_args_iterable("--cap-drop", cap_drop)
+        full_cmd.add_args_iterable_or_single("--env-from-file", env_from_files)
+        _add_optional_bool(full_cmd, "--interactive", interactive)
+        full_cmd.add_flag("--no-recreate", no_recreate)
+        full_cmd.add_simple_arg("--pull", pull)
+        full_cmd.add_flag("--quiet", quiet)
+        full_cmd.add_flag("--quiet-build", quiet_build)
+        full_cmd.add_flag("--quiet-pull", quiet_pull)
+        full_cmd.add_flag("--remove-orphans", remove_orphans)
         full_cmd.append(service)
         full_cmd += command
 
@@ -1251,6 +1800,8 @@ class ComposeCLI(DockerCLICaller):
         services: str | list[str] | None = ...,
         *,
         stream_logs: Literal[True],
+        wait: bool = ...,
+        wait_timeout: int | None = ...,
     ) -> ProcessStream | None: ...
 
     @overload
@@ -1258,15 +1809,28 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: str | list[str] | None = ...,
         stream_logs: Literal[False] = ...,
+        *,
+        wait: bool = ...,
+        wait_timeout: int | None = ...,
     ) -> None: ...
 
     @overload
     def start(
-        self, services: str | list[str] | None = None, stream_logs: bool = False
+        self,
+        services: str | list[str] | None = None,
+        stream_logs: bool = False,
+        *,
+        wait: bool = False,
+        wait_timeout: int | None = None,
     ) -> ProcessStream | None: ...
 
     def start(
-        self, services: str | list[str] | None = None, stream_logs: bool = False
+        self,
+        services: str | list[str] | None = None,
+        stream_logs: bool = False,
+        *,
+        wait: bool = False,
+        wait_timeout: int | None = None,
     ) -> ProcessStream | None:
         """Start the specified services.
 
@@ -1276,12 +1840,18 @@ class ComposeCLI(DockerCLICaller):
                 If an empty list is provided, this function call is a no-op.
             stream_logs: Return an owned stdout/stderr byte stream instead of
                 waiting for command completion.
+            wait: Have Compose wait until the services are running or healthy.
+                Implies detached mode.
+            wait_timeout: Maximum seconds for Compose to wait; `None` omits the
+                flag. This is not a local subprocess deadline.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
             and services are selected; otherwise `None`, including for `[]`.
         """
         full_cmd = Command([*self.docker_compose_cmd, "start"])
+        full_cmd.add_flag("--wait", wait)
+        full_cmd.add_simple_arg("--wait-timeout", wait_timeout)
         if services == []:
             return
         elif services is not None:
@@ -1398,6 +1968,8 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: Sequence[str] = (),
         *,
+        since: str | None = None,
+        until: str | None = None,
         timeout: float | None = None,
     ) -> MappedProcessStream[ComposeEvent]:
         """Return Docker Compose events for the specified services.
@@ -1410,6 +1982,8 @@ class ComposeCLI(DockerCLICaller):
 
         Args:
             services: Service names to filter events. Empty input selects all services.
+            since: Show events created since this timestamp.
+            until: Stream events until this timestamp.
             timeout: Positive finite seconds from local events CLI launch, or
                 `None` to inherit the client default. Timing advances while consumption pauses.
                 Expiry raises `DockerTimeout` without stopping services or changing
@@ -1431,7 +2005,10 @@ class ComposeCLI(DockerCLICaller):
                 original error.
         """
         validate_timeout(timeout)
-        full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
+        full_cmd = Command([*self.docker_compose_cmd, "events", "--json"])
+        full_cmd.add_simple_arg("--since", since)
+        full_cmd.add_simple_arg("--until", until)
+        full_cmd.extend(services)
 
         parser = JsonOutputParser("compose event", self.client_config.raw_diagnostics)
         stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
@@ -1489,6 +2066,13 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = ...,
         abort_on_container_failure: bool = ...,
         exit_code_from: str | None = ...,
+        always_recreate_deps: bool = ...,
+        attach_services: list[str] | str | None = ...,
+        menu: bool | None = ...,
+        quiet_build: bool = ...,
+        quiet_pull: bool = ...,
+        shutdown_timeout: int | timedelta | None = ...,
+        timestamps: bool = ...,
     ) -> ProcessStream | None: ...
 
     @overload
@@ -1520,6 +2104,13 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = ...,
         abort_on_container_failure: bool = ...,
         exit_code_from: str | None = ...,
+        always_recreate_deps: bool = ...,
+        attach_services: list[str] | str | None = ...,
+        menu: bool | None = ...,
+        quiet_build: bool = ...,
+        quiet_pull: bool = ...,
+        shutdown_timeout: int | timedelta | None = ...,
+        timestamps: bool = ...,
     ) -> None: ...
 
     @overload
@@ -1551,6 +2142,13 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = False,
         abort_on_container_failure: bool = False,
         exit_code_from: str | None = None,
+        always_recreate_deps: bool = False,
+        attach_services: list[str] | str | None = None,
+        menu: bool | None = None,
+        quiet_build: bool = False,
+        quiet_pull: bool = False,
+        shutdown_timeout: int | timedelta | None = None,
+        timestamps: bool = False,
     ) -> ProcessStream | None: ...
 
     def up(
@@ -1581,6 +2179,13 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = False,
         abort_on_container_failure: bool = False,
         exit_code_from: str | None = None,
+        always_recreate_deps: bool = False,
+        attach_services: list[str] | str | None = None,
+        menu: bool | None = None,
+        quiet_build: bool = False,
+        quiet_pull: bool = False,
+        shutdown_timeout: int | timedelta | None = None,
+        timestamps: bool = False,
     ) -> ProcessStream | None:
         """Start the containers.
 
@@ -1635,6 +2240,20 @@ class ComposeCLI(DockerCLICaller):
                 failure. Incompatible with detached mode.
             exit_code_from: Return the selected service's exit code through the CLI;
                 implies abort-on-container-exit. A nonzero exit raises `DockerException`.
+            always_recreate_deps: Recreate dependent containers. Incompatible with
+                `recreate=False`.
+            attach_services: The only services whose logs are attached. Incompatible
+                with `attach_dependencies=True`. `None` omits the option.
+            menu: Enable interactive shortcuts when running attached. `None`
+                leaves the CLI default and its `COMPOSE_MENU` setting; `False`
+                passes `--menu=false`. Incompatible with `detach=True`.
+            quiet_build: Suppress the build output.
+            quiet_pull: Pull without printing progress information.
+            shutdown_timeout: Seconds, or a duration truncated to whole seconds,
+                for container shutdown when attached or when containers are
+                already running. This is Compose's `--timeout`, not a local
+                subprocess deadline; `None` omits it.
+            timestamps: Show timestamps in the attached logs.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
@@ -1673,6 +2292,14 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--watch", watch)
         full_cmd.add_flag("--abort-on-container-failure", abort_on_container_failure)
         full_cmd.add_simple_arg("--exit-code-from", exit_code_from)
+        full_cmd.add_flag("--always-recreate-deps", always_recreate_deps)
+        _add_optional_bool(full_cmd, "--menu", menu)
+        full_cmd.add_flag("--quiet-build", quiet_build)
+        full_cmd.add_flag("--quiet-pull", quiet_pull)
+        full_cmd.add_simple_arg("--timeout", _whole_seconds(shutdown_timeout))
+        full_cmd.add_flag("--timestamps", timestamps)
+        if attach_services is not None:
+            full_cmd.add_args_iterable("--attach", to_list(attach_services))
 
         if no_attach_services is not None:
             no_attach_services = to_list(no_attach_services)
@@ -1739,9 +2366,391 @@ class ComposeCLI(DockerCLICaller):
             full_cmd += to_list(services)
         return stream_stdout_and_stderr(full_cmd, timeout=timeout)
 
-    def version(self) -> str:
-        """Return the Docker Compose version text reported by the CLI."""
-        return run([*self.docker_compose_cmd, "version"])
+    def version(self, *, short: bool = False) -> str:
+        """Return the Docker Compose version text reported by the CLI.
+
+        Args:
+            short: Show only the version number, such as `5.7.1`.
+        """
+        full_cmd = Command([*self.docker_compose_cmd, "version"])
+        full_cmd.add_flag("--short", short)
+        return run(full_cmd)
+
+    def commit(
+        self,
+        service: str,
+        repository: str | None = None,
+        *,
+        author: str | None = None,
+        changes: str | Iterable[str] = (),
+        index: int | None = None,
+        message: str | None = None,
+        pause: bool = True,
+        timeout: float | None = None,
+    ) -> pywhales.components.image.cli_wrapper.Image:
+        """Create an image from a service container's changes.
+
+        Compose prints the new image ID only as progress text, so the command
+        always runs with `--progress plain` and ignores `compose_progress`;
+        quiet, tty and truncated modes would hide or shorten the ID.
+
+        Args:
+            service: The service whose container is committed.
+            repository: Repository and optional tag for the image, such as
+                `"app:v2"`; `None` leaves the image untagged.
+            author: Author, such as `"Name <name@example.com>"`.
+            changes: Dockerfile instructions to apply, such as `"ENV A=1"`; one
+                `--change` is passed for each.
+            index: Container index when the service has several replicas; `None`
+                leaves the CLI default (the first).
+            message: Commit message.
+            pause: Pause the container during the commit. `False` passes
+                `--pause=false`; `True` leaves the CLI default.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before the CLI is resolved.
+
+        Returns:
+            The committed image, retaining the originating client configuration.
+
+        Raises:
+            ValueError: `compose_dry_run` is set, because a preview creates no
+                image, or `timeout` is not positive and finite.
+            ParsingError: The output doesn't report a full image ID.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; a commit already in progress isn't guaranteed to stop.
+            DockerException: The service isn't running or the CLI fails.
+        """
+        validate_timeout(timeout)
+        if self.client_config.compose_dry_run:
+            raise ValueError("compose.commit() cannot return an image in dry-run mode.")
+        full_cmd = Command(
+            [*self.client_config.get_compose_command(progress="plain"), "commit"]
+        )
+        full_cmd.add_simple_arg("--author", author)
+        full_cmd.add_args_iterable_or_single("--change", changes)
+        full_cmd.add_simple_arg("--index", index)
+        full_cmd.add_simple_arg("--message", message)
+        full_cmd.add_flag("--pause=false", not pause)
+        full_cmd.append(service)
+        if repository is not None:
+            full_cmd.append(repository)
+        _, progress = run(full_cmd, return_stderr=True, timeout=timeout)
+        committed = _COMMITTED_IMAGE.search(progress)
+        if committed is None:
+            raise ParsingError("Unexpected compose commit output")
+        return pywhales.components.image.cli_wrapper.Image(
+            self.client_config, committed.group(1), is_immutable_id=True
+        )
+
+    def cp(
+        self,
+        source: ValidPath | ComposeServicePath,
+        destination: ValidPath | ComposeServicePath,
+        *,
+        all: bool = False,
+        archive: bool = False,
+        follow_link: bool = False,
+        index: int | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        """Copy files or folders between a service container and the local filesystem.
+
+        Byte iterators and the `-` stream form are not supported. The call waits
+        for the local copy CLI.
+
+        Args:
+            source: Local source path on the Python host, or a
+                `(service, path_in_container)` endpoint.
+            destination: Local destination path on the Python host, or a
+                `(service, path_in_container)` endpoint. Compose requires exactly
+                one service endpoint.
+            all: Include containers created by `run()`.
+            archive: Copy all uid/gid information.
+            follow_link: Always follow symbolic links in the source path.
+            index: Container index when the service has several replicas; `None`
+                leaves the CLI default (the first).
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before the CLI is resolved.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; a partial copy isn't undone.
+            DockerException: The CLI fails, for example when the container is gone.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command([*self.docker_compose_cmd, "cp"])
+        full_cmd.add_flag("--all", all)
+        full_cmd.add_flag("--archive", archive)
+        full_cmd.add_flag("--follow-link", follow_link)
+        full_cmd.add_simple_arg("--index", index)
+        for endpoint in (source, destination):
+            if isinstance(endpoint, tuple):
+                full_cmd.append(f"{endpoint[0]}:{endpoint[1]}")
+            else:
+                full_cmd.append(str(endpoint))
+        run(full_cmd, timeout=timeout)
+
+    def export(
+        self,
+        service: str,
+        output: ValidPath,
+        *,
+        index: int | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        """Export a service container's filesystem to a local tar archive.
+
+        Args:
+            service: The service whose container is exported.
+            output: The path of the tar archive on the Python host. Returning the
+                bytes isn't supported.
+            index: Container index when the service has several replicas; `None`
+                leaves the CLI default (the first).
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before the CLI is resolved.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; a partial archive can remain.
+            DockerException: The CLI fails, for example when the service has no
+                container.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command([*self.docker_compose_cmd, "export"])
+        full_cmd.add_simple_arg("--index", index)
+        full_cmd.add_simple_arg("--output", output)
+        full_cmd.append(service)
+        run(full_cmd, timeout=timeout)
+
+    def images(self, services: str | Sequence[str] | None = None) -> list[ComposeImage]:
+        """List the images used by the project's created containers.
+
+        Args:
+            services: Services to list. `None` and an empty sequence select every
+                service, as in `ps()`.
+
+        Returns:
+            One entry per container, in CLI order, so an image shared by two
+            containers appears twice. Empty when no container exists.
+
+        Raises:
+            ParsingError: The output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
+        """
+        full_cmd = Command([*self.docker_compose_cmd, "images", "--format", "json"])
+        if services is not None:
+            full_cmd += to_list(services)
+        parser = JsonOutputParser(
+            "compose image list", self.client_config.raw_diagnostics
+        )
+        return parser.parse(_parse_images, run(full_cmd))
+
+    def scale(
+        self,
+        scales: Mapping[str, int],
+        *,
+        no_deps: bool = False,
+        timeout: float | None = None,
+    ) -> None:
+        """Set the number of containers of one or more services.
+
+        Args:
+            scales: Replica counts by service, such as `{"web": 2}`. An empty
+                mapping is a no-op that returns without resolving the CLI.
+            no_deps: Don't start linked services.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. Validated before the no-op return.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; containers already created or stopped stay that way.
+            DockerException: The CLI fails, for example for an unknown service.
+        """
+        validate_timeout(timeout)
+        if not scales:
+            return
+        full_cmd = Command([*self.docker_compose_cmd, "scale"])
+        full_cmd.add_flag("--no-deps", no_deps)
+        full_cmd += format_mapping_for_cli(scales)
+        run(full_cmd, timeout=timeout)
+
+    @overload
+    def stats(
+        self,
+        service: str | None = ...,
+        *,
+        all: bool = ...,
+        aggregate: bool = ...,
+        all_projects: bool = ...,
+        stream: Literal[False] = ...,
+        timeout: float | None = ...,
+    ) -> list[ComposeStats]: ...
+
+    @overload
+    def stats(
+        self,
+        service: str | None = ...,
+        *,
+        all: bool = ...,
+        aggregate: bool = ...,
+        all_projects: bool = ...,
+        stream: Literal[True],
+        timeout: float | None = ...,
+    ) -> ProcessStream: ...
+
+    @overload
+    def stats(
+        self,
+        service: str | None = ...,
+        *,
+        all: bool = ...,
+        aggregate: bool = ...,
+        all_projects: bool = ...,
+        stream: bool = ...,
+        timeout: float | None = ...,
+    ) -> list[ComposeStats] | ProcessStream: ...
+
+    def stats(
+        self,
+        service: str | None = None,
+        *,
+        all: bool = False,
+        aggregate: bool = False,
+        all_projects: bool = False,
+        stream: bool = False,
+        timeout: float | None = None,
+    ) -> list[ComposeStats] | ProcessStream:
+        """Return resource-usage samples for the project's containers.
+
+        By default the call takes one untruncated snapshot and waits for it.
+        With `stream=True` the local CLI starts during the call and keeps
+        sampling; close the returned stream, or use its context manager, on
+        early exit. A bare loop break doesn't release it.
+
+        Args:
+            service: Limit the samples to one service; `None` selects all.
+            all: Include containers that aren't running.
+            aggregate: Report one row per project, summing its containers.
+            all_projects: Report the containers of every project instead of the
+                current one. Compose rejects this together with a project name.
+            stream: Return the live table as an owned stream of
+                `("stdout", bytes)` and `("stderr", bytes)` records instead of
+                a parsed snapshot. Each frame redraws the screen, so records can
+                hold terminal control bytes, and nothing is parsed.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. A stream's deadline advances while
+                consumption pauses. Validated before the CLI is resolved.
+
+        Returns:
+            One `ComposeStats` per output line in snapshot mode, empty when there
+            is nothing to report, or the owned record stream.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            ParsingError: A snapshot line is malformed or has an unexpected
+                shape. Safe mode withholds the payload and chains no cause; a
+                client with `raw_diagnostics=True` chains the original error.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped.
+            DockerException: The CLI fails, for example for an unknown service.
+        """
+        validate_timeout(timeout)
+        full_cmd = Command([*self.docker_compose_cmd, "stats"])
+        full_cmd.add_flag("--all", all)
+        full_cmd.add_flag("--aggregate", aggregate)
+        full_cmd.add_flag("--all-projects", all_projects)
+        if not stream:
+            full_cmd += ["--no-stream", "--no-trunc", "--format", "json"]
+        if service is not None:
+            full_cmd.append(service)
+        if stream:
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
+        parser = JsonOutputParser("compose stats", self.client_config.raw_diagnostics)
+        return parser.parse(
+            lambda output: _parse_json_lines(ComposeStats, output),
+            run(full_cmd, timeout=timeout),
+        )
+
+    def volumes(
+        self, services: str | Sequence[str] | None = None
+    ) -> list[ComposeVolume]:
+        """List the volumes used by the project's created containers.
+
+        Args:
+            services: Services to list. `None` and an empty sequence select every
+                service, as in `ps()`.
+
+        Returns:
+            One entry per volume, in CLI order. Empty when none is in use.
+
+        Raises:
+            ParsingError: A line is malformed or has an unexpected shape. Safe
+                mode withholds the payload and chains no cause; a client with
+                `raw_diagnostics=True` chains the original error.
+        """
+        full_cmd = Command([*self.docker_compose_cmd, "volumes", "--format", "json"])
+        if services is not None:
+            full_cmd += to_list(services)
+        parser = JsonOutputParser(
+            "compose volume list", self.client_config.raw_diagnostics
+        )
+        return parser.parse(
+            lambda output: _parse_json_lines(ComposeVolume, output), run(full_cmd)
+        )
+
+    def wait(
+        self,
+        services: str | Sequence[str],
+        *,
+        down_project: bool = False,
+        timeout: float | None = None,
+    ) -> int:
+        """Block until the containers of the selected services stop.
+
+        Compose reports the stopped container's status as its own exit code and
+        prints a summary on stdout, so a nonzero container status is returned,
+        not raised, when stderr is empty. A failure that writes to stderr, such
+        as an unknown service, raises. With several services the status is the
+        one Compose reports.
+
+        Args:
+            services: One service, or several. Compose requires at least one.
+            down_project: Drop the project when the first container stops.
+            timeout: Positive finite seconds from local CLI launch, or `None` to
+                inherit the client default. The wait is unbounded without it.
+                Validated before the CLI is resolved.
+
+        Returns:
+            The exit status of the container that stopped; `0` for a clean stop.
+
+        Raises:
+            ValueError: `services` is empty, or `timeout` is not positive and
+                finite. Raised before the CLI is resolved.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped; the containers keep running.
+            DockerException: The CLI failed with output on stderr.
+        """
+        validate_timeout(timeout)
+        selected = to_list(services)
+        if not selected:
+            raise ValueError("services must name at least one service")
+        full_cmd = Command([*self.docker_compose_cmd, "wait"])
+        full_cmd.add_flag("--down-project", down_project)
+        full_cmd += selected
+        try:
+            run(full_cmd, timeout=timeout)
+        except DockerTimeout:
+            raise
+        except DockerException as error:
+            stderr = "" if error.stderr is None else error.stderr
+            if stderr or error.return_code < 1:
+                raise
+            return error.return_code
+        return 0
 
     def is_installed(self) -> bool:
         """Check whether successful Compose help output identifies the plugin.

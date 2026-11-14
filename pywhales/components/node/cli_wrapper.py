@@ -7,7 +7,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
-from typing import assert_never, overload, override
+from typing import Literal, assert_never, overload, override
 
 from pydantic import JsonValue
 
@@ -29,7 +29,22 @@ from pywhales.components.node.models import (
     NodeVersion,
 )
 from pywhales.exceptions import DockerException
-from pywhales.utils import run, to_list
+from pywhales.utils import format_filters_for_cli, run, to_list
+
+type NodeListFilter = (
+    tuple[Literal["id"], str]
+    | tuple[Literal["label"], str]
+    | tuple[Literal["membership"], str]
+    | tuple[Literal["name"], str]
+    | tuple[Literal["node.label"], str]
+    | tuple[Literal["role"], str]
+)
+type NodePsFilter = (
+    tuple[Literal["desired-state"], str]
+    | tuple[Literal["id"], str]
+    | tuple[Literal["label"], str]
+    | tuple[Literal["name"], str]
+)
 
 
 class Node(ReloadableObjectFromJson[NodeInspectResult]):
@@ -109,9 +124,15 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
             self, availability, labels_add, rm_labels, role
         )
 
-    def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
-        """Return task handles listed by Docker for this node."""
-        return NodeCLI(self.client_config).ps(self)
+    def ps(
+        self, *, filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None
+    ) -> list[pywhales.components.task.cli_wrapper.Task]:
+        """Return task handles listed by Docker for this node.
+
+        See [`docker.node.ps`](../sub-commands/node.md#ps) for the `filters`
+        argument.
+        """
+        return NodeCLI(self.client_config).ps(self, filters=filters)
 
 
 ValidNode = Node | str
@@ -179,17 +200,25 @@ class NodeCLI(DockerCLICaller):
     @overload
     def inspect(self, x: builtins.list[str]) -> builtins.list[Node]: ...
 
-    def inspect(self, x: str | builtins.list[str]) -> Node | builtins.list[Node]:
+    @overload
+    def inspect(self, x: str | builtins.list[str], *, pretty: Literal[True]) -> str: ...
+
+    def inspect(
+        self, x: str | builtins.list[str], *, pretty: bool = False
+    ) -> Node | builtins.list[Node] | str:
         """Inspect one or more Swarm nodes by ID or hostname.
 
         Args:
             x: One ID or hostname, or a list of references. An empty list does not
                 invoke the CLI.
+            pretty: Return Docker's human-friendly text instead of handles. The
+                text isn't parsed, and no handle or cache snapshot is created.
 
         Returns:
             One handle for a string, otherwise handles in request order with
             duplicates retained as distinct handles. All snapshots are validated
-            before any returned handle is hydrated.
+            before any returned handle is hydrated. With `pretty=True`, the CLI
+            text for all references, or an empty string for an empty list.
 
         Raises:
             ParsingError: If response identities cannot be associated unambiguously
@@ -197,7 +226,9 @@ class NodeCLI(DockerCLICaller):
         """
         references = to_list(x)
         if not references:
-            return []
+            return "" if pretty else []
+        if pretty:
+            return run([*self.docker_cmd, "node", "inspect", "--pretty", *references])
         json_str = run([*self.docker_cmd, "node", "inspect", *references])
         parser = Node(self.client_config, references[0], is_immutable_id=True)
         snapshots = parse_swarm_inspect_results(parser, json_str, references)
@@ -214,10 +245,21 @@ class NodeCLI(DockerCLICaller):
             case unreachable:
                 assert_never(unreachable)
 
-    def list(self, *, hydrate: bool = False) -> builtins.list[Node]:
+    def list(
+        self,
+        filters: Mapping[str, str] | Iterable[NodeListFilter] = (),
+        *,
+        hydrate: bool = False,
+    ) -> builtins.list[Node]:
         """List nodes in the selected Swarm.
 
         Args:
+            filters: Docker filter names and values, either as a mapping or as
+                an iterable of ``(key, value)`` pairs. Pairs keep their order
+                and repeated keys, and an iterator is read once. The documented
+                keys are `id`, `label`, `membership`, `name`, `node.label`, and
+                `role`. The default selects all nodes. The filters apply to the
+                listing launch; hydration inspects the listed IDs.
             hydrate: If `True`, inspect the listed IDs in bounded batches, so a
                 listing costs one launch plus one per chunk and reading
                 properties costs none. Snapshots stay pinned until `reload()`
@@ -229,10 +271,15 @@ class NodeCLI(DockerCLICaller):
             Node handles in CLI output order.
 
         Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
             ParsingError: A hydration response is malformed or does not match
                 the listed IDs.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "node", "list", "--quiet"])
+        full_cmd.add_args_iterable("--filter", filter_args)
         all_ids = run(full_cmd).splitlines()
         nodes = [Node(self.client_config, x, is_immutable_id=True) for x in all_ids]
         if not hydrate:
@@ -265,7 +312,10 @@ class NodeCLI(DockerCLICaller):
             release_pins(nodes)
 
     def ps(
-        self, x: ValidNode | Iterable[ValidNode] | None = None
+        self,
+        x: ValidNode | Iterable[ValidNode] | None = None,
+        *,
+        filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more nodes.
 
@@ -273,10 +323,21 @@ class NodeCLI(DockerCLICaller):
             x: One or more nodes (can be id, name or `pywhales.Node` object.).
                 If the argument is not provided, it defaults to the current node.
                 An empty selection means an empty list will also be returned.
+            filters: Docker task filter names and values, either as a mapping or
+                as an iterable of ``(key, value)`` pairs. Pairs keep their order
+                and repeated keys, and an iterator is read once. The documented
+                keys are `desired-state`, `id`, `label`, and `name`. None adds
+                no filter.
 
         Returns:
             Task handles in CLI output order, including any task history Docker lists.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up, even for an empty selection.
         """
+        filter_args = [] if filters is None else format_filters_for_cli(filters)
         if x is None:
             # this is the default, on the command line, nothing is provided, and then
             # it automatically defaults to the current node.
@@ -285,14 +346,9 @@ class NodeCLI(DockerCLICaller):
             command_args = to_list(x)
             if not command_args:
                 return []
-        full_cmd = [
-            *self.docker_cmd,
-            "node",
-            "ps",
-            "--quiet",
-            "--no-trunc",
-            *command_args,
-        ]
+        full_cmd = Command([*self.docker_cmd, "node", "ps", "--quiet", "--no-trunc"])
+        full_cmd.add_args_iterable("--filter", filter_args)
+        full_cmd += command_args
         ids = run(full_cmd).splitlines()
         return [
             pywhales.components.task.cli_wrapper.Task(

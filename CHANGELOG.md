@@ -1,5 +1,87 @@
 # Changelog
 
+## 1.3.0
+
+### Breaking Changes
+
+- The `trust` command group and `DockerClient.trust` are removed because Docker
+  CLI 29 no longer ships `docker trust`.
+- Container `create()` and `run()` no longer accept `content_trust` or
+  `kernel_memory`, `update()` no longer accepts `kernel_memory`, and `run()` no
+  longer accepts `service_ports`. Docker CLI 29 deprecates or rejects those flags.
+- `context.create()` raises `ValueError` before launch when `kubernetes` or
+  `default_stack_orchestrator` is set, because Docker CLI 29 removed Kubernetes
+  contexts. The positional parameters remain.
+- Plugin `install()`, `push()` and `upgrade()` treat `disable_content_trust=True`
+  as a no-op and reject `False` with `ValueError`, because the CLI dropped plugin
+  content trust.
+
+### New Features
+
+- Container: create and run take annotations, CPU count and percent, Windows IO
+  limits, umask, `use_api_socket` and `quiet`; run takes `attach` and
+  `detach_keys`; commit takes `changes`; copy takes `archive`, `follow_link` and
+  `quiet`; inspect takes `size`; list takes `last` and `latest`; remove takes
+  `link`; stop takes `signal`; start takes checkpoint options.
+  `container.port()`, `Container.port()` and `docker.port` return
+  `PublishedPort` values.
+- New `docker.checkpoint` group with create, list and remove for experimental
+  daemons with CRIU.
+- Image `history()` and `search()`, with the `docker.history` and
+  `docker.search` aliases; `list(tree=True)`; pull and push `all_tags`; and
+  `platform` on push, inspect, load, save and remove.
+- Raw-text options return CLI text without parsing or caching: `pretty=True` on
+  config, secret, node and service inspect; `verbose=True` on
+  `system.disk_free()`, network and manifest inspect and `buildx.disk_usage()`;
+  and Buildx `debug=True` on its typed reads.
+- Network connect `gw_priority` and `link_local_ips`; network create
+  `config_from`, `config_only`, `ingress`, `ipv4` and `scope`; and `force` on
+  network and volume remove.
+- Volume create takes Swarm cluster-volume options, `list(cluster=True)` lists
+  cluster volumes, and `volume.update()` and `Volume.update()` change their
+  availability.
+- Service create and update take every Docker CLI 29 option, including the
+  update `--*-add`/`--*-rm` pairs, and create accepts the rollout policies.
+  Service `ps()` takes filters, and `task.logs()` replaces its
+  `NotImplementedError` stub.
+- Swarm init takes the cluster options (address pools, certificate expiry,
+  dispatcher heartbeat, external CA, snapshots, task history and
+  `force_new_cluster`). Node `list()` and `ps()` take filters. `stack.config()`
+  is new; stack deploy takes `detach` and `quiet`, stack remove takes `detach`,
+  and stack `ps()` and `services()` take filters.
+- `context.show()`, `export()`, `import_()` and `update()` (plus
+  `Context.update()`), manifest push `insecure`, plugin list filters, and the
+  `docker.events` alias.
+- Buildx: new build, bake, create, prune, remove and imagetools create options;
+  `debug` on every command; `disk_usage()`; `dial_stdio()`; and the `dap`,
+  `history`, `policy` and `replay` sub-CLIs under `docker.buildx`. Buildx's own
+  `--timeout` is exposed as `status_timeout`.
+- Compose: attach, commit, cp, export, images, scale, stats, volumes, wait, and
+  `docker.compose.bridge`; config query methods and render modifiers; the
+  missing flags on build, create, events, kill, logs, ps, publish, pull, push,
+  restart, run, start, up and version; and the `compose_all_resources` and
+  `compose_ansi` client options.
+
+### Behavior Changes And Fixes
+
+- `swarm.update(external_ca=...)` emits `--external-ca`; it previously sent the
+  unknown flag `--external-ci`.
+- Container stop and restart emit `--timeout` instead of the deprecated
+  `--time`, and `commit(pause=False)` emits `--no-pause` instead of being
+  ignored.
+- `buildx.create(config=...)` emits `--buildkitd-config`, and Compose exec and
+  run emit `--no-tty`; both replace deprecated spellings.
+- Volume inspection accepts the Go-format `CreatedAt` and the empty mount point
+  that pending cluster volumes report, and keeps their `ClusterVolume` data.
+
+### Documentation
+
+- Added the checkpoint page, the Buildx and Compose sub-CLI classes, and the new
+  root aliases to the API documentation, and corrected alias links for
+  `docker.export`, `docker.remove`, `docker.restart` and `docker.run`. Updated
+  contributor guides and the consumer skill for Docker CLI 29.9.3, Buildx
+  v0.39.0 and Compose v5.7.1.
+
 ## 1.2.5
 
 ### New Features

@@ -5,7 +5,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType, TracebackType
-from typing import Self, overload, override
+from typing import Literal, Self, overload, override
 
 from pydantic import JsonValue
 
@@ -25,10 +25,28 @@ from pywhales.components.plugin.models import (
 from pywhales.exceptions import NoSuchPlugin
 from pywhales.utils import (
     ValidPath,
+    format_filters_for_cli,
     run,
     to_list,
     validate_timeout,
 )
+
+type PluginListFilter = (
+    tuple[Literal["capability"], str] | tuple[Literal["enabled"], str]
+)
+
+
+def _require_content_trust_skipped(disable_content_trust: bool) -> None:
+    """Reject enabling content trust, which Docker CLI 29 plugin commands lack.
+
+    The CLI no longer verifies or signs plugin images, so the former
+    `--disable-content-trust` option is gone and `True` is a no-op.
+
+    Raises:
+        ValueError: If `disable_content_trust` is false.
+    """
+    if not disable_content_trust:
+        raise ValueError("Docker CLI 29 plugin commands cannot enable content trust")
 
 
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
@@ -116,10 +134,11 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
     def push(
         self, disable_content_trust: bool = True, *, timeout: float | None = None
     ) -> None:
-        """Push this plugin, skipping content-trust signing by default.
+        """Push this plugin to a registry.
 
         Args:
-            disable_content_trust: Skip image signing (default `True`).
+            disable_content_trust: No-op kept for compatibility; `False` raises
+                `ValueError` (see `PluginCLI.push`).
             timeout: Positive finite seconds from the push CLI's own launch,
                 replacing the client default; `None` inherits it.
         """
@@ -149,8 +168,8 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
     ) -> None:
         """Upgrade this plugin while automatically granting all permissions.
 
-        See PluginCLI.upgrade for remote-selection, content-trust, and local
-        `timeout` deadline options.
+        See PluginCLI.upgrade for remote-selection, the content-trust no-op, and
+        local `timeout` deadline options.
         """
         self._docker_plugin.upgrade(
             self, remote, disable_content_trust, skip_remote_check, timeout=timeout
@@ -283,7 +302,9 @@ class PluginCLI(DockerCLICaller):
             configuration: Plugin-specific configuration names and values.
             alias: Local plugin name, or None to keep the requested name.
             disable: Do not enable the plugin on install
-            disable_content_trust: Skip image verification (default `True`)
+            disable_content_trust: No-op kept for compatibility. Docker CLI 29
+                has no content-trust option for plugins, so `True` (the default)
+                emits nothing and `False` is rejected.
             timeout: Positive finite seconds from the install CLI's own launch,
                 replacing the client default; None inherits it. This is a local
                 subprocess deadline, not Docker's own option.
@@ -294,19 +315,19 @@ class PluginCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or if `disable_content_trust` is false.
+                Raised before the Docker executable is looked up.
             DockerTimeout: If the install CLI exceeds its deadline. It is killed and
                 reaped, without undoing the install or guaranteeing daemon-side
                 work stops.
         """
         validate_timeout(timeout)
+        _require_content_trust_skipped(disable_content_trust)
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "install", "--grant-all-permissions"]
         )
         full_cmd.add_simple_arg("--alias", alias)
         full_cmd.add_flag("--disable", disable)
-        if not disable_content_trust:
-            full_cmd.append("--disable-content-trust=false")
         full_cmd.append(plugin_name)
         for key, value in configuration.items():
             full_cmd.append(f"{key}={value}")
@@ -315,8 +336,27 @@ class PluginCLI(DockerCLICaller):
             return Plugin(self.client_config, alias)
         return Plugin(self.client_config, plugin_name)
 
-    def list(self) -> builtins.list[Plugin]:
-        """Return handles for plugins installed on the selected daemon."""
+    def list(
+        self, filters: Mapping[str, str] | Iterable[PluginListFilter] | None = None
+    ) -> builtins.list[Plugin]:
+        """Return handles for plugins installed on the selected daemon.
+
+        Args:
+            filters: Docker filter names and values, either as a mapping or as
+                an iterable of ``(key, value)`` pairs, for example
+                `filters=[("enabled", "true")]`. Pairs keep their order and
+                repeated keys, and an iterator is read once. The documented
+                keys are `capability` and `enabled`. None selects all plugins.
+
+        Returns:
+            Plugin handles in CLI output order.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
+        """
+        filter_args = [] if filters is None else format_filters_for_cli(filters)
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -326,6 +366,7 @@ class PluginCLI(DockerCLICaller):
                 "--quiet",
             ]
         )
+        full_cmd.add_args_iterable("--filter", filter_args)
         ids = run(full_cmd).splitlines()
         return [Plugin(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
@@ -340,22 +381,25 @@ class PluginCLI(DockerCLICaller):
 
         Args:
             plugin: The plugin to push
-            disable_content_trust: Skip image signing (default `True`)
+            disable_content_trust: No-op kept for compatibility. Docker CLI 29
+                has no content-trust option for plugins, so `True` (the default)
+                emits nothing and `False` is rejected.
             timeout: Positive finite seconds from the push CLI's own launch,
                 replacing the client default; `None` inherits it. This is a
                 local subprocess deadline, not the daemon-side HTTP timeout
                 used by `enable()`.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or
+                `disable_content_trust` is false. Raised before the Docker
+                executable is looked up.
             DockerTimeout: The push CLI exceeds its deadline and is killed and
                 reaped, without undoing the push or guaranteeing that
                 daemon-side work stops.
         """
         validate_timeout(timeout)
+        _require_content_trust_skipped(disable_content_trust)
         full_cmd = Command([*self.docker_cmd, "plugin", "push"])
-        if not disable_content_trust:
-            full_cmd.append("--disable-content-trust=false")
         full_cmd.append(plugin)
         run(full_cmd, timeout=timeout)
 
@@ -406,7 +450,9 @@ class PluginCLI(DockerCLICaller):
         Args:
             plugin: The plugin to upgrade
             remote: Remote plugin reference, or None to omit it.
-            disable_content_trust: Skip image verification (default `True`)
+            disable_content_trust: No-op kept for compatibility. Docker CLI 29
+                has no content-trust option for plugins, so `True` (the default)
+                emits nothing and `False` is rejected.
             skip_remote_check: Do not check if specified remote plugin matches
                 existing plugin image
             timeout: Positive finite seconds from the upgrade CLI's own launch,
@@ -415,16 +461,16 @@ class PluginCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or if `disable_content_trust` is false.
+                Raised before the Docker executable is looked up.
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the upgrade or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        _require_content_trust_skipped(disable_content_trust)
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "upgrade", "--grant-all-permissions"]
         )
-        if not disable_content_trust:
-            full_cmd.append("--disable-content-trust=false")
         full_cmd.add_flag("--skip-remote-check", skip_remote_check)
         full_cmd.append(plugin)
         if remote is not None:

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import builtins
-from datetime import datetime
-from typing import overload, override
+from datetime import datetime, timedelta
+from typing import Literal, overload, override
 
 from pydantic import JsonValue
 
@@ -15,6 +15,7 @@ from pywhales.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pywhales.components.service._logs import logs_command
 from pywhales.components.task.models import (
     AssignedGenericResources,
     ObjectVersion,
@@ -23,7 +24,12 @@ from pywhales.components.task.models import (
     TaskStatus,
 )
 from pywhales.enums import TaskState
-from pywhales.utils import run
+from pywhales.utils import (
+    ProcessStream,
+    run,
+    stream_stdout_and_stderr,
+    validate_timeout,
+)
 
 
 class Task(ReloadableObjectFromJson[TaskInspectResult]):
@@ -102,6 +108,9 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
         return f"pywhales.Task(id='{self.id[:12]}', name={self.name})"
 
 
+ValidTask = str | Task
+
+
 class TaskCLI(DockerCLICaller):
     """Task-inspection commands retaining the originating client configuration."""
 
@@ -155,10 +164,136 @@ class TaskCLI(DockerCLICaller):
                 tasks.append(task)
             return tasks
 
-    def logs(self) -> None:
-        """Reject task log requests because this operation is not implemented.
+    @overload
+    def logs(
+        self,
+        task: ValidTask,
+        details: bool = False,
+        since: datetime | timedelta | None = None,
+        tail: int | None = None,
+        timestamps: bool = False,
+        follow: bool = False,
+        raw: bool = False,
+        resolve: bool = True,
+        truncate: bool = True,
+        stream: Literal[False] = False,
+        *,
+        task_ids: bool = True,
+        timeout: float | None = None,
+    ) -> str: ...
+
+    @overload
+    def logs(
+        self,
+        task: ValidTask,
+        details: bool = False,
+        since: datetime | timedelta | None = None,
+        tail: int | None = None,
+        timestamps: bool = False,
+        follow: bool = False,
+        raw: bool = False,
+        resolve: bool = True,
+        truncate: bool = True,
+        *,
+        stream: Literal[True],
+        task_ids: bool = True,
+        timeout: float | None = None,
+    ) -> ProcessStream: ...
+
+    @overload
+    def logs(
+        self,
+        task: ValidTask,
+        details: bool = False,
+        since: datetime | timedelta | None = None,
+        tail: int | None = None,
+        timestamps: bool = False,
+        follow: bool = False,
+        raw: bool = False,
+        resolve: bool = True,
+        truncate: bool = True,
+        stream: bool = False,
+        *,
+        task_ids: bool = True,
+        timeout: float | None = None,
+    ) -> str | ProcessStream: ...
+
+    def logs(
+        self,
+        task: ValidTask,
+        details: bool = False,
+        since: datetime | timedelta | None = None,
+        tail: int | None = None,
+        timestamps: bool = False,
+        follow: bool = False,
+        raw: bool = False,
+        resolve: bool = True,
+        truncate: bool = True,
+        stream: bool = False,
+        *,
+        task_ids: bool = True,
+        timeout: float | None = None,
+    ) -> str | ProcessStream:
+        """Return collected logs of one task or an owned byte stream.
+
+        Docker serves task logs through `docker service logs`, which accepts a
+        task ID. Nothing is inspected first: the logs CLI is the only launch, and
+        it starts before this call returns, including in streaming mode.
+        Collection blocks until the CLI exits and its pipes drain; follow=True can
+        wait indefinitely even when stream=False. Closing a stream only cancels
+        the local CLI, not the task. Exhaust the stream, use it as a context
+        manager, or call close() when stopping early; a bare loop break does not
+        release it.
+
+        Args:
+            task: Task ID or handle to read logs from.
+            details: Include additional log details.
+            since: Lower time bound, or None to omit it.
+            tail: Number of trailing lines; None leaves Docker's default of all lines.
+            timestamps: Include timestamps with log records.
+            follow: Keep following new log records instead of taking a snapshot.
+            raw: Omit Docker's log formatting.
+            resolve: Resolve IDs to names in formatted output.
+            truncate: Allow Docker to truncate IDs in formatted output.
+            stream: Return a closeable stream when True; otherwise collect decoded
+                stdout and stderr records into one string in arrival order.
+            task_ids: Include the task ID in formatted output.
+            timeout: Positive finite seconds for the local logs CLI, or None to
+                inherit the client default. Timing starts at launch and continues
+                while iteration pauses. Expiry kills and reaps the local CLI,
+                preserving captured output; natural post-exit pipe draining is
+                unchanged.
+
+        Returns:
+            Collected text when stream=False; otherwise an owned stream of
+            (source, content) records, with source equal to stdout or stderr and
+            content containing bytes. It inherits the client's stream buffer budget.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerException: If Docker rejects the request, such as an unknown task.
+            DockerTimeout: If the logs CLI exceeds its deadline, delivered during
+                collection or stream consumption/clean context exit.
+            BufferError: If a record or retained stderr history exceeds the
+                configured stream buffer budget.
         """
-        raise NotImplementedError
+        validate_timeout(timeout)
+        full_cmd = logs_command(
+            self.docker_cmd,
+            task,
+            details=details,
+            since=since,
+            tail=tail,
+            timestamps=timestamps,
+            follow=follow,
+            raw=raw,
+            task_ids=task_ids,
+            resolve=resolve,
+            truncate=truncate,
+        )
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
+        if stream:
+            return iterator
+        with iterator:
+            return "".join(record[1].decode() for record in iterator)

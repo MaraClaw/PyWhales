@@ -1,0 +1,8 @@
+{
+  "Comment": "buildkit.dockerfile.v0",
+  "CreatedAt": "2026-11-06T01:00:31+07:00",
+  "CreatedBy": "ADD alpine-minirootfs-3.24.4-aarch64.tar.gz / # buildkit",
+  "CreatedSince": "2026-11-06T01:00:31+07:00",
+  "ID": "<missing>",
+  "Size": "9310208"
+}

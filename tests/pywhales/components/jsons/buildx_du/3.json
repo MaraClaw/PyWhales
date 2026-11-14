@@ -1,0 +1,13 @@
+{
+  "CreatedAt": "2026-11-13 12:44:51.942779887 +0000 UTC",
+  "Description": "cached mount /cache from exec /bin/sh -c make with id \"//cache\"",
+  "ID": "9q4w532qjaqws2fwzf4e8nf6h",
+  "LastUsedAt": "About an hour ago",
+  "Mutable": true,
+  "Parents": null,
+  "Reclaimable": false,
+  "Shared": false,
+  "Size": "120.4MB",
+  "Type": "exec.cachemount",
+  "UsageCount": 7
+}

@@ -25,7 +25,7 @@ from pywhales.components.context.models import (
     ContextStorage,
 )
 from pywhales.exceptions import NoSuchContext
-from pywhales.utils import run, to_list
+from pywhales.utils import ValidPath, run, to_list, validate_timeout
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
@@ -101,14 +101,22 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
         """Return whether this context can still be inspected."""
         return ContextCLI(self.client_config).exists(str(self))
 
-    def update(self) -> None:
-        """Reject context updates because this operation is not implemented.
+    def update(
+        self,
+        description: str | None = None,
+        docker: dict[str, Any] | DockerContextConfig | None = None,
+    ) -> None:
+        """Update this context's description or Docker endpoint, then reload it.
 
-        Raises:
-            NotImplementedError: Always.
+        See `ContextCLI.update` for the option semantics. The cached snapshot is
+        replaced by a fresh inspection once the update succeeds.
+
+        Args:
+            description: New description, or None to leave it unchanged.
+            docker: New Docker endpoint options, or None to leave them unchanged.
         """
-        raise NotImplementedError
-        ContextCLI(self.client_config).update(self)
+        ContextCLI(self.client_config).update(self, description, docker)
+        self.reload()
 
     def use(self) -> None:
         """Set this context as Docker's default context."""
@@ -153,7 +161,10 @@ class DockerContextConfig:
 
 @dataclass
 class KubernetesContextConfig:
-    """Mutable Kubernetes endpoint options for creating a context."""
+    """Mutable Kubernetes endpoint options, no longer accepted by Docker CLI 29.
+
+    `ContextCLI.create` rejects any Kubernetes configuration.
+    """
 
     from_: ValidContext | None = None
     config_file: str | Path | None = None
@@ -174,6 +185,30 @@ class KubernetesContextConfig:
         return ",".join(list_of_args)
 
 
+def _docker_endpoint_option(
+    docker: dict[str, Any] | DockerContextConfig | None,
+) -> str | None:
+    """Return the `--docker` option value, or None when no endpoint is set."""
+    if docker is None:
+        return None
+    if isinstance(docker, dict):
+        docker = DockerContextConfig(**docker)
+    return docker.format_for_docker_cli()
+
+
+def _require_archive_file(path: ValidPath) -> None:
+    """Reject `-`, which Docker reads as standard input or output.
+
+    PyWhales captures a command's output as text and supplies no input, so a
+    context archive can only travel through a named file.
+
+    Raises:
+        ValueError: If the path is `-`.
+    """
+    if str(path) == "-":
+        raise ValueError("A context archive must be a file, not a standard stream")
+
+
 class ContextCLI(DockerCLICaller):
     """Context commands for local CLI configuration, not daemon resources."""
 
@@ -190,31 +225,31 @@ class ContextCLI(DockerCLICaller):
 
         Args:
             context_name: Name for the new context.
-            default_stack_orchestrator: Stack orchestrator, or None to omit the option.
+            default_stack_orchestrator: Retained for positional compatibility;
+                must be None because Docker CLI 29 removed stack orchestrators.
             description: Context description, or None to omit the option.
             from_: Existing context to copy from, or None to omit the option.
             docker: Docker endpoint options; None omits endpoint configuration.
-            kubernetes: Kubernetes endpoint options; None omits their configuration.
+            kubernetes: Retained for positional compatibility; must be None
+                because Docker CLI 29 removed Kubernetes contexts.
 
         Returns:
             A freshly inspected handle to the created context.
+
+        Raises:
+            ValueError: If `default_stack_orchestrator` or `kubernetes` is not
+                None. Raised before the Docker executable is looked up.
         """
-        if isinstance(docker, dict):
-            docker = DockerContextConfig(**docker)
-        if isinstance(kubernetes, dict):
-            kubernetes = KubernetesContextConfig(**kubernetes)
+        if default_stack_orchestrator is not None or kubernetes is not None:
+            raise ValueError(
+                "Docker CLI 29 removed Kubernetes contexts and stack orchestrators"
+            )
 
         full_cmd = Command([*self.docker_cmd, "context", "create"])
 
-        full_cmd.add_simple_arg(
-            "--default-stack-orchestrator", default_stack_orchestrator
-        )
         full_cmd.add_simple_arg("--description", description)
         full_cmd.add_simple_arg("--from", from_)
-        if docker is not None:
-            full_cmd.add_simple_arg("--docker", docker.format_for_docker_cli())
-        if kubernetes is not None:
-            full_cmd.add_simple_arg("--kubernetes", kubernetes.format_for_docker_cli())
+        full_cmd.add_simple_arg("--docker", _docker_endpoint_option(docker))
         full_cmd.append(context_name)
         run(full_cmd)
         return self.inspect(context_name)
@@ -235,6 +270,64 @@ class ContextCLI(DockerCLICaller):
             return False
         else:
             return True
+
+    def export(
+        self,
+        context: ValidContext,
+        output: ValidPath | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Export a context to a tar archive file.
+
+        Args:
+            context: Context handle or name to export.
+            output: Archive file to write. None lets the CLI choose its default
+                name, `<context>.dockercontext`, in the CLI process's working
+                directory. `-` is rejected, because standard output is never
+                returned.
+            timeout: Positive finite seconds for the local CLI, or None to
+                inherit the client default.
+
+        Raises:
+            ValueError: If `timeout` is not positive and finite, or `output` is
+                `-`. Raised before the Docker executable is looked up.
+        """
+        validate_timeout(timeout)
+        if output is not None:
+            _require_archive_file(output)
+        full_cmd = Command([*self.docker_cmd, "context", "export", context])
+        if output is not None:
+            full_cmd.append(output)
+        run(full_cmd, timeout=timeout)
+
+    def import_(
+        self, name: str, source: ValidPath, *, timeout: float | None = None
+    ) -> Context:
+        """Import a context from a tar or zip file and inspect it.
+
+        Args:
+            name: Name for the imported context.
+            source: Archive file to read. `-` is rejected, because standard input
+                is never supplied.
+            timeout: Positive finite seconds for the import CLI, or None to
+                inherit the client default. The inspection that follows is
+                outside this budget.
+
+        Returns:
+            A freshly inspected handle to the imported context.
+
+        Raises:
+            ValueError: If `timeout` is not positive and finite, or `source` is
+                `-`. Raised before the Docker executable is looked up.
+        """
+        validate_timeout(timeout)
+        _require_archive_file(source)
+        run(
+            Command([*self.docker_cmd, "context", "import", name, source]),
+            timeout=timeout,
+        )
+        return self.inspect(name)
 
     @overload
     def inspect(self, x: str | None = None) -> Context: ...
@@ -305,13 +398,38 @@ class ContextCLI(DockerCLICaller):
         full_cmd += contexts
         run(full_cmd)
 
-    def update(self) -> None:
-        """Reject context updates because this operation is not implemented.
+    def show(self) -> str:
+        """Return the name of the current context.
 
-        Raises:
-            NotImplementedError: Always.
+        Returns:
+            The context name Docker would use for this client's configuration,
+            without a trailing newline.
         """
-        raise NotImplementedError
+        return run(Command([*self.docker_cmd, "context", "show"]))
+
+    def update(
+        self,
+        context: ValidContext,
+        description: str | None = None,
+        docker: dict[str, Any] | DockerContextConfig | None = None,
+    ) -> Context:
+        """Update a context's description or Docker endpoint and inspect it.
+
+        Args:
+            context: Context handle or name to update.
+            description: New description, or None to omit the option.
+            docker: New Docker endpoint options, formatted exactly as in
+                `create`; None omits the option.
+
+        Returns:
+            A freshly inspected handle to the updated context.
+        """
+        full_cmd = Command([*self.docker_cmd, "context", "update"])
+        full_cmd.add_simple_arg("--description", description)
+        full_cmd.add_simple_arg("--docker", _docker_endpoint_option(docker))
+        full_cmd.append(context)
+        run(full_cmd)
+        return self.inspect(str(context))
 
     def use(self, context: ValidContext) -> Context:
         """Set Docker's default context and inspect it.

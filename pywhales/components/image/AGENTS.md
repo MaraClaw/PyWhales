@@ -5,6 +5,8 @@
 - `cli_wrapper.py`: `Image`, `ImageCLI`, batch inspection, transfers, copy helpers, and archives.
 - `models.py`: inspect snapshots; `config` and `container_config` reuse `ContainerConfig`,
   while `ImageGraphDriver.data` accepts arbitrary JSON values, including scalars and null.
+  `ImageHistoryLayer` and `ImageSearchResult` model `{{json .}}` records; Docker prints their sizes,
+  counts and flags as strings, so they rely on lax coercion.
 - `streams.py`: `MultiImageStream`, plus the `ImageStream` and `EmptyImageStream` type aliases.
 
 ## Pull And Push Contracts
@@ -27,6 +29,15 @@
   any transfer, streamed ones included; that inspection and a pull's handle inspection sit outside the deadline.
 - Snapshot the selected byte budget (image override, else general) once at public `pull()`/`push()` entry,
   before consuming references or running push preflight.
+- `all_tags=True` takes one `str` repository with no tag or digest (`ValueError` otherwise, after the `timeout` and
+  `quiet`/`stream_logs` checks and before the byte-budget snapshot, reference consumption or lookup). It is a single
+  transfer: no fanout, no handles, `None` when blocking and the stream when streaming. Push skips its batch inspection,
+  because a bare repository isn't an image reference and `inspect` would test `repo:latest`; the CLI reports a missing
+  repository. Iterable and empty requests keep their results without `all_tags`, but `all_tags=True` rejects them.
+- Push `platform` is one `str` forwarded to every transfer, including each fanout task and streamed child. The push
+  preflight inspection never carries it. Pull's `platform` keeps its `--platform=value` token and empty-string skip.
+- Private `_pull_single_tag`/`_push_single_tag` calls always forward the new options, so tests that pin their keyword set
+  must name them.
 
 ## Multi-Image Streams
 
@@ -56,6 +67,28 @@
   Their `timeout` times each launch they make (inspect through removal) via `execution_timeout()`, not config mutation.
 - `save()` rejects empty input and inspects references before saving. An output path returns `None`;
   omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream.
+- `platform` on `load()`, `save()` and `remove()` is `str | Iterable[str] | None`, emitted through
+  `_add_platforms` as repeated `--platform` options (Docker's `strings` flags also take a comma list in one value) and
+  only when not `None`, so existing argv is unchanged. `Image.save()` and `Image.remove()` forward it. The save
+  preflight inspection and archive deadlines, reservations and accounts are untouched by it.
+- `inspect(platform=...)` takes one `str` and returns `ImageInspectResult` snapshots (a single one for a string, a list
+  for an iterable), never handles: the daemon reports the platform manifest's own ID, which `image inspect` can't find
+  again, so a handle would fail on its first reload. Both paths share `_inspect_snapshots`, so batch identity
+  validation (ID or normalized tag/digest aliases) is identical; platform snapshots keep the image's tags and digests,
+  but an image-ID reference can't match and raises `ParsingError`. Empty iterables still skip the CLI.
+- `list(tree=True)` returns the CLI's experimental text unparsed and builds no handles, so it rejects `hydrate=True`
+  (`ValueError`) and never seeds or pins caches. Docker refuses `--quiet`, `--no-trunc` and `--format` with `--tree`,
+  so it emits only `--tree`, `--all`, filters and the selector. The default path's `--quiet --no-trunc` argv is unchanged.
+
+## History And Search
+
+- `history(image, *, platform=None, timeout=None)` and `Image.history()` run `image history --format "{{json .}}"
+  --no-trunc --human=false`; sizes are integer bytes and Docker's `<missing>` layer ID becomes `None`.
+- `search(term, *, filters=None, limit=None, timeout=None)` runs top-level `docker search --format "{{json .}}"
+  --no-trunc`. Filters follow `format_filters_for_cli` (mapping or string pairs, `TypeError` before lookup); typed
+  keys are `is-official` and `stars`, because `is-automated` is deprecated. The call needs registry access.
+- Both validate `timeout` before filters or lookup and time their single launch. Malformed records raise `ParsingError`
+  through `JsonOutputParser` without payload text; a missing history image is `NoSuchImage`.
 - Byte-input `load()` and lazy `save()` launch through `_prepare_archive_launch`, which validates the selected
   timeout (explicit, else the client default) before any process starts or input is read. A save's eager
   inspection stays outside the save deadline: it runs in an `execution_timeout()` scope that ends before any
@@ -97,3 +130,7 @@
 - Diagnostic allowance cases in `tests/pywhales/test_inventory_types.py`, `test_observation.py`, `test_bounded_capture.py`, `test_telemetry_archive_lifecycle.py`, and `components/test_image.py` cover validation, nested/copied atomic reads, exact EOF/post-reap overflow, noisy upload/paused-save progress, retained scopes, raw failures and worker cleanup. `test_telemetry_stop_reasons.py` keeps `total_archive_stderr` mapped to `other_limit`.
 - Copy forwarding uses `test_copy_from_pull` and `test_copy_to_pull`; archive integration includes `test_save_load`
   and `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.
+- `tests/pywhales/components/test_image_cli29.py` is daemon-free: a recording fake CLI (`argv_fakes.py`) checks exact
+  argv, validation before lookup, parse errors and a real-child deadline for history, search, tree listing, `all_tags`
+  and `platform`. Its fixtures are `jsons/image_history/` and `jsons/image_search/`; static shapes are in
+  `tests/pywhales/test_image_cli29_types.py`.

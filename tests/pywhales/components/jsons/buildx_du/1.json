@@ -1,0 +1,13 @@
+{
+  "CreatedAt": "2026-11-13 09:29:25.69969871 +0000 UTC",
+  "Description": "local source for context",
+  "ID": "1xcrjt5b7p6nmpru12sn9mvpt",
+  "LastUsedAt": "2 hours ago",
+  "Mutable": true,
+  "Parents": null,
+  "Reclaimable": true,
+  "Shared": false,
+  "Size": "8.192kB",
+  "Type": "source.local",
+  "UsageCount": 4
+}

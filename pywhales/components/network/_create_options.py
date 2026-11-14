@@ -9,8 +9,11 @@ from ipaddress import (
     ip_interface,
     ip_network,
 )
+from typing import Literal
 
 from pywhales.components.network.models import NetworkIPAMPool
+
+_SCOPES = ("local", "swarm")
 
 
 def _mapping_entries(
@@ -105,7 +108,9 @@ def create_options(
     gateway: str | None,
     subnet: str | None,
     internal: bool | None,
+    ipv4: bool | None,
     enable_ipv6: bool | None,
+    scope: Literal["local", "swarm"] | None,
     ipam_driver: str | None,
     ipam_options: Mapping[str, str | int] | None,
     ipam_pools: Sequence[NetworkIPAMPool] | None,
@@ -113,14 +118,22 @@ def create_options(
     """Return validated option arguments without consulting the Docker executable."""
     if ipam_pools is not None and (gateway is not None or subnet is not None):
         raise ValueError("ipam_pools cannot be combined with subnet or gateway")
+    if scope is not None and scope not in _SCOPES:
+        raise ValueError("scope must be 'local' or 'swarm'")
     result = []
-    for flag, value in (("--internal", internal), ("--ipv6", enable_ipv6)):
+    for flag, value in (
+        ("--internal", internal),
+        ("--ipv4", ipv4),
+        ("--ipv6", enable_ipv6),
+    ):
         if value is not None and type(value) is not bool:
             raise TypeError("network boolean options must be bool or None")
         if value is True:
             result.append(flag)
         if value is False:
             result.append(f"{flag}=false")
+    if scope is not None:
+        result.extend(["--scope", scope])
     if ipam_driver is not None:
         if not isinstance(ipam_driver, str):
             raise TypeError("ipam_driver must be a string or None")

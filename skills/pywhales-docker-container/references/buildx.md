@@ -80,6 +80,10 @@ deadline. A streaming deadline keeps advancing before and between iterations.
 Expiry raises `DockerTimeout` without guaranteeing that the daemon-side build
 stops. See [Prune Build Cache](#prune-build-cache) for `prune`.
 
+A local deadline kills and reaps only the local `docker` CLI. The `docker-buildx`
+plugin child it started can outlive it, as live checks showed for `dap.build` and
+`history.trace`, so don't treat expiry as proof the plugin stopped.
+
 ## Return Contracts
 
 | Mode | Result |
@@ -162,6 +166,79 @@ before `filters` is read. It is never forwarded as Buildx's own
 `prune --timeout` flag, so it doesn't change what Buildx removes. A streamed
 deadline keeps advancing while consumption pauses. Expiry kills and reaps the
 local CLI and raises `DockerTimeout` without undoing cache removal.
+
+Space-based pruning uses the keyword-only `max_used_space`, `min_free_space`, and
+`reserved_space` (an `int` or `str`), plus `verbose`. Buildx's own `--timeout` is
+`status_timeout`, covered below.
+
+## Buildx 0.39 Options
+
+`build` also accepts keyword-only `cgroup_parent`, `policies`, `quiet`,
+`resources`, `shm_size`, and `ulimits`; `quiet=True` rejects `stream_logs=True`.
+`bake` gains `allow`, `policies`, `provenance`, `sbom`, `list`, and
+`variables_set`. `list` is `"targets"` or `"variables"` and returns report text.
+`variables_set` forwards `--var`, which is separate from `variables=`, the
+Bake subprocess environment overlay.
+
+`create(config=...)` now emits `--buildkitd-config`, and `create` also takes
+`leave`, `node`, and `status_timeout`. `remove` makes its builder optional and
+adds `all_inactive`, `force`, `keep_daemon`, and `keep_state`. Removing builders
+deletes them, so require explicit authorization as for prune.
+
+Docker's own builder `--timeout` is `status_timeout` (an `int` or `timedelta`) on
+`list`, `inspect`, `create`, `prune`, `remove`, and `disk_usage`. `timeout`
+never means that flag; it's always the local CLI deadline.
+
+`disk_usage(*, filters=None, builder=None, status_timeout=None, verbose=False,
+debug=False, timeout=None)` normally returns `list[BuildxDiskUsage]`. `verbose=True`
+returns the CLI's text as `str`.
+
+Every Buildx method accepts keyword-only `debug`. On the methods that parse
+output (`list`, `inspect`, `disk_usage`, `history.list`, `history.inspect`, and
+`imagetools.inspect`), `debug=True` returns a `str`: stdout, a newline, then the
+stderr debug log. See [Docker CLI 29 surface changes](client-and-errors.md#docker-cli-29-surface-changes)
+for the shared raw-text rule.
+
+`buildx.dial_stdio(...)` and `buildx.dap.build(...)` inherit the caller's stdio,
+block until the CLI exits, and return `None`; neither captures output. Give them
+a `timeout` unless a blocking call is intended.
+
+`imagetools.create` adds `prefer_index`, `metadata_file`, `platforms`, and
+`progress`.
+
+## History, Policy, And Replay
+
+`docker.buildx.history` wraps `buildx history`. `list` returns
+`list[BuildRecord]`, `inspect` returns `BuildRecordDetail`, `inspect_attachment`
+and `logs` return `str`, `import_` returns the imported records'
+`docker-desktop://` dashboard URLs as `list[str]`, `export`, `open`, and
+`remove` return `None`, and `trace` returns an owned `ProcessStream`. Each takes `builder` and `debug`;
+`logs`, `export`, `import_`, `open`, and `trace` also take a local `timeout`.
+`export` requires a keyword-only `output` path.
+
+```python
+from pywhales import DockerClient
+
+docker = DockerClient()
+for record in docker.buildx.history.list(local=True):
+    print(record)
+```
+
+`history.open()` opens a builder record in Docker Desktop's build UI, and
+`history.import_()` uploads bundles to Docker Desktop's `.imported` store and
+opens the first one, so call them only where that's intended. Imported records
+don't appear in `history.list()` and can't be passed to `open()`.
+`history.remove(all=True)` deletes every record: require explicit authorization.
+Use `trace()` as a context manager. In compare mode the buildx plugin may keep
+serving after you close it, because closing reaps only the local CLI.
+
+`docker.buildx.policy.eval(source, *, file=None, platform=None, fields=None,
+print=False, ...)` and `docker.buildx.policy.test(path, *, filename=None,
+run=None, ...)` return the CLI's text as `str`.
+
+`docker.buildx.replay.build(subject, ...)` returns a plan `dict` with
+`dry_run=True`, an owned `MappedProcessStream[str]` with `stream_logs=True`, and
+`None` otherwise.
 
 ## Builders In Inventory Captures
 
