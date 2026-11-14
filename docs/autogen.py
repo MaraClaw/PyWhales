@@ -25,6 +25,9 @@ pages: Final[dict[str, list[str]]] = {
         "pywhales.components.buildx.cli_wrapper.BuildxCLI",
         "pywhales.components.buildx.imagetools.cli_wrapper.ImagetoolsCLI",
     ],
+    "sub-commands/checkpoint.md": [
+        "pywhales.components.checkpoint.cli_wrapper.CheckpointCLI"
+    ],
     "sub-commands/compose.md": ["pywhales.components.compose.cli_wrapper.ComposeCLI"],
     "sub-commands/config.md": ["pywhales.components.config.cli_wrapper.ConfigCLI"],
     "sub-commands/container.md": [

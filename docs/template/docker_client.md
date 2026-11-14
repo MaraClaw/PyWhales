@@ -75,6 +75,7 @@ configuration beyond the selected build argument or container assignment.
 ## Sub-commands
 
 * [`docker.buildx`](sub-commands/buildx.md)
+* [`docker.checkpoint`](sub-commands/checkpoint.md)
 * [`docker.compose`](sub-commands/compose.md)
 * [`docker.config`](sub-commands/config.md)
 * [`docker.container`](sub-commands/container.md)

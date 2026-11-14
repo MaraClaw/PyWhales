@@ -14,6 +14,7 @@ import pydantic
 from pywhales._json import loads_compat
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
+from pywhales.components.checkpoint.cli_wrapper import CheckpointCLI
 from pywhales.components.compose.cli_wrapper import ComposeCLI
 from pywhales.components.config.cli_wrapper import ConfigCLI
 from pywhales.components.container.cli_wrapper import ContainerCLI
@@ -276,6 +277,7 @@ class DockerClient(DockerCLICaller):
         super().__init__(client_config)
 
         self.buildx = BuildxCLI(self.client_config)
+        self.checkpoint = CheckpointCLI(self.client_config)
         self.compose = ComposeCLI(self.client_config)
         self.config = ConfigCLI(self.client_config)
         self.container = ContainerCLI(self.client_config)
