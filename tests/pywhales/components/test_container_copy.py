@@ -1,7 +1,7 @@
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, assert_never, get_type_hints
+from typing import Literal, TypedDict, Unpack, assert_never, get_type_hints
 
 import pytest
 
@@ -155,8 +155,14 @@ TRANSFER_COMMANDS: dict[TransferOperation, list[str]] = {
 }
 
 
+class _TimeoutOverride(TypedDict, total=False):
+    timeout: float | None
+
+
 def _transfer(
-    client: DockerClient, operation: TransferOperation, **timeout: float | None
+    client: DockerClient,
+    operation: TransferOperation,
+    **timeout: Unpack[_TimeoutOverride],
 ) -> None:
     handle = Container(client.client_config, "immutable-id", is_immutable_id=True)
     match operation:

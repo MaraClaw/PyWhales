@@ -763,7 +763,16 @@ def test_container_handle_start_forwards_positional_options_and_deadline(
 
     assert handle.start(True, True, False, "ctrl-x", timeout=2.5) == "out"
 
-    start.assert_called_once_with(handle, True, True, False, "ctrl-x", timeout=2.5)
+    start.assert_called_once_with(
+        handle,
+        True,
+        True,
+        False,
+        "ctrl-x",
+        checkpoint=None,
+        checkpoint_dir=None,
+        timeout=2.5,
+    )
 
 
 @pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
