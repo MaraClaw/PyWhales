@@ -1,13 +1,13 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-10 against source version 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
+**Verified:** 2026-11-14 against source version 1.3.0 for Docker CLI 29.9.3, Buildx v0.39.0 and Compose v5.7.1 command coverage; 2026-11-10 against 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
 
 ## Overview
 
 PyWhales is a typed Python wrapper around the external Docker CLI, not a Docker HTTP SDK.
 Python >=3.14.10 and Pydantic 2 are required; `.python-version` pins 3.14.10.
 The public API exports `DockerClient`, resource classes, a shared `docker` client, and the inventory and observation entry points from `pywhales/__init__.py`.
-`DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, and `build`.
+`DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, `build`, `events`, `port`, `history`, and `search`. Command coverage targets Docker CLI 29.9.3; the removed `trust` group isn't wrapped.
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.
 `DockerClient(inherited_environment_names=...)` selects exact ambient names before explicit overlays. `None` preserves `inherit_environment` behavior; an empty collection inherits nothing. This doesn't confine executable lookup, configuration files, or credential helpers; see the runtime guide.
 The installed `pywhales` console entry point only prints a notice; it isn't a Docker command runner.

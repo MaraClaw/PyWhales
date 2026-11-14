@@ -22,6 +22,7 @@ Paths are relative to `tests/`. Repository-wide checks and safety rules are in t
 | Other opt-in policy packages | `pywhales/test_admission_*.py`, `pywhales/test_profiles*.py`, `pywhales/test_storage_*.py` |
 | Delivery chain; offline fleet and script tooling | `pywhales/test_delivery_workflows.py`; `pywhales/test_fleet_*.py`, `pywhales/test_transport_experiment.py`, `pywhales/test_plugin_installer.py`, `pywhales/test_docker_overhead_benchmark.py` |
 | Command groups, transport, deadlines, wire models and enum/JSON regressions | [Component selection guide](pywhales/components/AGENTS.md) |
+| Docker CLI 29 argv and option contracts | `pywhales/components/test_*_cli29.py`, `pywhales/test_{buildx_core,compose}_cli29.py`, `pywhales/test_buildx_history_policy.py`; fake CLI `pywhales/components/argv_fakes.py` |
 
 Read module-level code and fixtures before calling a selection unit-only. Fake CLIs and real Python/shell children don't imply daemon use or process-free tests.
 `pywhales/test_delivery_workflows.py` runs a loopback HTTP server, `tar`, `python -m scripts.delivery`, and an offline `uv` install

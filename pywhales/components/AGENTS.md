@@ -18,6 +18,12 @@ The 18 groups are `buildx`, `checkpoint`, `compose`, `config`, `container`, `con
 - Preserve resource-or-string `Valid*` aliases and shared conversion, not ad hoc name/ID extraction.
 - Forward modern options directly; no version probes or fallbacks that silently drop options.
 - Model changes need wire fixtures and static contracts; preserve existing wire aliases.
+- New options are keyword-only after `*`; never insert or reorder positionals. Drop a removed keyword-only Docker
+  option; keep a removed positional one and reject non-default values with a value-free `ValueError` before lookup.
+- Human-readable output is a keyword-only raw-text flag with `Literal` overloads (`pretty`, `verbose`, `tree`, Buildx
+  `debug`): `True` returns CLI stdout as `str`, drops the internal `--format`, and never seeds or pins caches.
+- Never name a Docker duration option `timeout`; that name is the local deadline. Use names such as `status_timeout`,
+  `shutdown_timeout` or `wait_timeout`.
 - Container, Compose and service `envs` forwarding follows the
   [runtime environment transport contract](../AGENTS.md#container-environment-transport); keep it centralized.
 
