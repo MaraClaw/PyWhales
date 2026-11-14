@@ -1,0 +1,6 @@
+{
+  "Description": "Run socat command in alpine container",
+  "IsOfficial": "false",
+  "Name": "alpine/socat",
+  "StarCount": "120"
+}

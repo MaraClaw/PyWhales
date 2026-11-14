@@ -303,6 +303,7 @@ class DockerClient(DockerCLICaller):
         self.events = None
         self.execute = self.container.execute
         self.export = self.container.export
+        self.history = self.image.history
         self.images = self.image.list
         self.import_ = self.image.import_
         self.info = self.system.info
@@ -320,7 +321,7 @@ class DockerClient(DockerCLICaller):
         # self.rmi -> doesn't make much sense since it would be docker.remove_image
         self.run = self.container.run
         self.save = self.image.save
-        # self.search -> Is anybody going to use it in python?
+        self.search = self.image.search
         self.start = self.container.start
         self.stats = self.container.stats
         self.stop = self.container.stop

@@ -2463,6 +2463,7 @@ def test_push_duplicate_images(ctr_client: DockerClient) -> None:
             stream_logs=False,
             buffer_bytes=None,
             timeout=None,
+            platform=None,
         )
 
 
@@ -3026,7 +3027,9 @@ def test_image_remove_single_selection_keeps_flags(
     with patch(
         "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
     ) as command:
-        client.image.remove(make_selection(), **kwargs)
+        client.image.remove(
+            make_selection(), kwargs.get("force", False), kwargs.get("prune", True)
+        )
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "image", "rm", *flags, "alpha"]
 
