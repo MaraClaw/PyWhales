@@ -49,6 +49,8 @@ from pywhales.components.container.models import (
     NetworkSettings,
 )
 from pywhales.components.container.top import docker_top_fields
+from pywhales.components.system.cli_wrapper import SystemCLI
+from pywhales.components.system.gpu import cdi_device_kind
 from pywhales.components.top import ContainerTopResult, parse_table
 from pywhales.enums import ContainerStatusInput, HealthStatusInput, IsolationInput
 from pywhales.exceptions import NoSuchContainer
@@ -797,6 +799,25 @@ def _health_start_interval_seconds(value: int | timedelta | None) -> int | None:
     raise ValueError("health_start_interval must be positive whole seconds")
 
 
+def _require_gpu_support(
+    client_config: ClientConfig, gpus: int | str | None, devices: tuple[str, ...]
+) -> None:
+    """Probe the selected daemon and raise unless it can serve the GPU requests.
+
+    Args:
+        client_config: Configuration selecting the daemon to probe.
+        gpus: The `--gpus` value, or `None`.
+        devices: Materialized `--device` values.
+
+    Raises:
+        ValueError: If neither `gpus` nor a CDI device name is requested.
+        GpuSupportError: If the daemon doesn't report support for a request.
+    """
+    if gpus is None and not any(cdi_device_kind(device) for device in devices):
+        raise ValueError("require_gpu needs gpus or a CDI device name in devices")
+    SystemCLI(client_config).gpu_support().check(gpus=gpus, devices=devices)
+
+
 class RunArgs(TypedDict, total=False, closed=True):
     add_hosts: Iterable[tuple[str, str]]
     annotations: Mapping[str, str]
@@ -879,6 +900,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     read_only: bool
     restart: str | None
     remove: bool
+    require_gpu: bool
     runtime: str | None
     security_options: Iterable[str]
     shm_size: int | str | None
@@ -1118,6 +1140,7 @@ class ContainerCLI(DockerCLICaller):
         read_only: bool = False,
         restart: str | None = None,
         remove: bool = False,
+        require_gpu: bool = False,
         runtime: str | None = None,
         security_options: Iterable[str] = (),
         shm_size: int | str | None = None,
@@ -1159,7 +1182,9 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             TypeError: `command` is a shell string rather than an argv sequence.
-            ValueError: `health_start_interval` is not positive whole seconds.
+            ValueError: `health_start_interval` is not positive whole seconds,
+                or `require_gpu` is set without a GPU request.
+            GpuSupportError: `require_gpu` found the daemon unable to serve it.
             DockerException: Image acquisition or container creation fails.
         """
         start_interval_seconds = _health_start_interval_seconds(health_start_interval)
@@ -1174,6 +1199,10 @@ class ContainerCLI(DockerCLICaller):
                 """
             )
             raise TypeError(error_message)
+        if require_gpu:
+            requested_devices = tuple(devices)
+            devices = requested_devices
+            _require_gpu_support(self.client_config, gpus, requested_devices)
 
         image_cli = pywhales.components.image.cli_wrapper.ImageCLI(self.client_config)
         if pull == "missing":
@@ -2255,6 +2284,7 @@ class ContainerCLI(DockerCLICaller):
         read_only: bool = False,
         restart: str | None = None,
         remove: bool = False,
+        require_gpu: bool = False,
         runtime: str | None = None,
         security_options: Iterable[str] = (),
         shm_size: int | str | None = None,
@@ -2335,7 +2365,9 @@ class ContainerCLI(DockerCLICaller):
             env_files: Local environment files, forwarded in supplied order.
             expose: Container ports to expose without publishing them.
             gpus: GPU count or device-selection expression, such as "all" or
-                "device=0,2"; requires suitable daemon-side GPU support.
+                "device=0,2"; requires suitable daemon-side GPU support. NVIDIA
+                vGPU and MIG devices can also be requested by CDI name through
+                `devices`, for example `["nvidia.com/gpu=0"]`.
             groups_add: Supplementary groups for the container process.
             healthcheck: Disable the image healthcheck when false.
             health_cmd: Healthcheck command.
@@ -2392,6 +2424,11 @@ class ContainerCLI(DockerCLICaller):
             read_only: Mount the container's root filesystem as read only.
             restart: Docker restart policy; None omits the option.
             remove: Automatically remove the container when it exits.
+            require_gpu: Before image preflight, probe the selected daemon (not
+                the local machine) with one `docker system info` launch and
+                raise `GpuSupportError` unless it reports support for `gpus`
+                and every CDI name in `devices`. Requires at least one such
+                request. The probe is outside `timeout`.
             runtime: Runtime to use for this container.
             security_options: Security options
             shm_size: Shared-memory size in bytes or Docker size notation.
@@ -2426,8 +2463,11 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             TypeError: If command is a shell command string.
-            ValueError: If timeout or health_start_interval is invalid, or detach
-                and stream are both true.
+            ValueError: If timeout or health_start_interval is invalid, detach
+                and stream are both true, or require_gpu is set without a GPU
+                request.
+            GpuSupportError: If require_gpu found the daemon unable to serve it.
+            GpuUnavailable: If the daemon rejected the GPU or CDI device request.
             DockerTimeout: If the selected local run subprocess exceeds timeout.
             DockerException: If image preflight or the Docker command fails.
         """
@@ -2444,6 +2484,10 @@ class ContainerCLI(DockerCLICaller):
                 """
             )
             raise TypeError(error_message)
+        if require_gpu:
+            requested_devices = tuple(devices)
+            devices = requested_devices
+            _require_gpu_support(self.client_config, gpus, requested_devices)
 
         image_cli = pywhales.components.image.cli_wrapper.ImageCLI(self.client_config)
         if pull == "missing":

@@ -8,6 +8,7 @@ import pywhales.utils
 from pywhales import Container, DockerClient
 from pywhales.exceptions import (
     DockerException,
+    GpuUnavailable,
     NoSuchConfig,
     NoSuchContainer,
     NoSuchContext,
@@ -222,6 +223,23 @@ def test_absent_stderr_is_a_plain_docker_exception() -> None:
         pytest.param(b'context "X" does not exist', NoSuchContext, id="context-remove"),
         pytest.param(
             b'Error: context "X" does not exist', NoSuchContext, id="context-error"
+        ),
+        pytest.param(
+            b'docker: Error response from daemon: could not select device driver ""'
+            b" with capabilities: [[gpu]]",
+            GpuUnavailable,
+            id="gpu-driver",
+        ),
+        pytest.param(
+            b"Error response from daemon: failed to discover GPU vendor from CDI: x",
+            GpuUnavailable,
+            id="gpu-vendor",
+        ),
+        pytest.param(
+            b"Error response from daemon: CDI device injection failed: "
+            b"unresolvable CDI devices vendor.com/gpu=0",
+            GpuUnavailable,
+            id="gpu-cdi",
         ),
     ],
 )
