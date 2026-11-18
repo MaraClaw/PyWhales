@@ -35,6 +35,8 @@ staging = DockerClient(context="staging", client_type="docker")
 Those are alternatives; select the host or context the user supplied. SSH
 authentication and access to the remote engine must already work. Bind-mount
 source paths refer to the daemon host, not automatically to the Python machine.
+GPU checks follow the same rule: `client.system.gpu_support()` describes that
+client's daemon, never the Python machine's own hardware.
 
 Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
@@ -249,6 +251,13 @@ and `stdout`/`stderr` as `str | None`. Output can be `None` when it wasn't
 captured. More specific errors, such as `NoSuchContainer`, `NoSuchImage`, and
 `DockerTimeout` (a local CLI deadline expiry, not a daemon-side timeout), are
 imported from `pywhales.exceptions`.
+
+Two GPU errors come from the same module. `GpuUnavailable` is a `DockerException`
+subclass selected when captured stderr shows the daemon rejecting a `--gpus` or
+CDI device request. `GpuSupportError` is not a `DockerException`: the opt-in
+`require_gpu=True` preflight raises it before any image pull or container launch,
+with `reason` and `devices` attributes. Catch them separately; see
+[GPUs, vGPU and CDI devices](containers-and-output.md#gpus-vgpu-and-cdi-devices).
 
 Use the exit code and relevant, redacted output to distinguish daemon access,
 missing resources, registry authentication, and unsupported plugin flags.

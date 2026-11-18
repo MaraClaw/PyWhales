@@ -28,7 +28,7 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.3.0.
+The guidance describes source APIs for project version 1.3.1.
 An installed version string alone isn't proof of support. Check Docker CLI 29
 additions (the checkpoint group, raw-text flags, Buildx history and policy,
 Compose stats and wait), inherited
@@ -37,8 +37,8 @@ reconciliation lease renewal, node and standalone targets,
 completion/restart/failure keywords, strict workload
 errors, schema-11 stop attribution and exporter counts, refusal/admission correlation,
 owner active and class/owner queued demand, shared IO and launch-attempt/child-slot
-limits, startup health intervals and profile approvals,
-optional manager leadership, prune deadlines, stdin policy fields, inventory kinds, and typed stream returns
+limits, startup health intervals and profile approvals, GPU probing and the
+`require_gpu` preflight, optional manager leadership, prune deadlines, stdin policy fields, inventory kinds, and typed stream returns
 before copying their examples:
 
 ```python
@@ -55,6 +55,7 @@ from pywhales.admission import (
     RejectionReason,
 )
 from pywhales.client_config import ClientConfig
+from pywhales.components.system.gpu import GpuSupport
 from pywhales.convergence import (
     ComposeTarget,
     ContainerTarget,
@@ -67,6 +68,7 @@ from pywhales.convergence import (
     capture_nodes,
     wait as wait_for_convergence,
 )
+from pywhales.exceptions import DockerException, GpuSupportError, GpuUnavailable
 from pywhales.inventory import InventoryKind
 from pywhales.profiles import CONTROLS, CreateRequest, RuntimePolicy, SecurityProfile
 from pywhales.reconciliation import ActionContext, ConvergenceSummary, JournalStore
@@ -151,6 +153,12 @@ print(signature(docker.checkpoint.create, annotation_format=Format.STRING))
 print(signature(docker.compose.stats, annotation_format=Format.STRING))
 print(signature(DockerClient).parameters["compose_all_resources"])  # bool = False
 print(signature(DockerClient).parameters["compose_ansi"])  # defaults to None
+print(signature(docker.system.gpu_support, annotation_format=Format.STRING))
+print(signature(docker.container.create).parameters["require_gpu"])  # bool = False
+print(signature(docker.container.run).parameters["require_gpu"])  # bool = False
+print([f.name for f in fields(GpuSupport)])  # os_type ... cdi_devices
+print(issubclass(GpuUnavailable, DockerException))  # True
+print(issubclass(GpuSupportError, DockerException))  # False: a preflight refusal
 
 methods = [
     getattr(docker.compose, name)
@@ -344,6 +352,13 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   positive exact integer seconds only, require explicit ceiling approval and
   the conditional `health_start_interval` runtime control, and keep `CONTROLS`
   unchanged. See [Startup health intervals and profiles](containers-and-output.md#startup-health-interval-and-approved-profiles).
+- `docker.system.gpu_support()` returning `GpuSupport`, and keyword-only
+  `require_gpu: bool = False` on container `create` and the `run`
+  implementation (run overloads may show only the `RunArgs` bundle). They
+  are new in 1.3.1; check the signature rather than relying on the version.
+  The probe is one `system info` launch against the selected daemon; it doesn't
+  prove a GPU workload will run. See
+  [GPUs, vGPU and CDI devices](containers-and-output.md#gpus-vgpu-and-cdi-devices).
 - `hasattr(docker, "checkpoint")` true and `hasattr(docker, "trust")` false. The
   group's presence doesn't prove the daemon is experimental with CRIU, and
   `container.port` should return `list[PublishedPort]`. See
