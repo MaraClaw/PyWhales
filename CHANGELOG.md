@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.3.1
+
+### New Features
+
+- `docker.system.gpu_support()` reports GPU evidence from the selected daemon
+  (its context, host or SSH endpoint), never the machine running Python, with
+  one `docker system info` launch. The frozen `GpuSupport` result, from
+  `pywhales.components.system.gpu`, lists registered `nvidia` runtimes, CDI
+  specification directories and discovered CDI devices; `cdi_devices` is `None`
+  (unknown) on daemons older than Docker 28. NVIDIA vGPU guests and MIG slices
+  appear as ordinary `nvidia.com/gpu` CDI names.
+- Container `create()` and every `run()` mode, including the `docker.create` and
+  `docker.run` aliases, accept keyword-only `require_gpu=True`. It probes the
+  daemon before image preflight, outside the call's `timeout`, and raises
+  `GpuSupportError` with reason `not_linux`, `no_gpu_driver`,
+  `cdi_devices_unreported` or `cdi_device_missing`, plus the missing CDI names.
+  `GpuSupportError` is not a `DockerException`. Without a `gpus` value or a CDI
+  name in `devices`, it raises `ValueError` before any launch. It doesn't compare
+  a `gpus=N` count against the host, and default calls never probe.
+- `SystemInfo` parses the `CDISpecDirs` and `DiscoveredDevices` fields reported
+  by Docker 28 and later, with the new `DeviceInfo` model.
+
+### Behavior Changes And Fixes
+
+- Captured daemon rejections of `--gpus` or CDI device requests now raise
+  `GpuUnavailable`, a `DockerException` subclass, instead of plain
+  `DockerException`. A foreground `run()` forwards stderr uncaptured and keeps
+  the plain class, as do attached runs under `strict_workload_errors=True`.
+
+### Documentation
+
+- Added the GPUs, vGPU and CDI devices user guide, including how to request a
+  number of vGPUs, and listed `GpuUnavailable` in the exceptions guide. Updated
+  contributor guides and the consumer skill for daemon GPU support.
+
 ## 1.3.0
 
 ### Breaking Changes
