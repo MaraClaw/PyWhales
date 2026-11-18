@@ -6,6 +6,7 @@ from typing import assert_type
 
 from pywhales import Container, DockerClient, Image
 from pywhales.components.container.cli_wrapper import PublishedPort
+from pywhales.components.system.gpu import GpuSupport
 from pywhales.utils import ProcessStream
 
 
@@ -92,3 +93,15 @@ def _check_port(client: DockerClient, container: Container) -> None:
     assert_type(binding.container_port, str)
     assert_type(binding.host_ip, str)
     assert_type(binding.host_port, int)
+
+
+def _check_gpu_preflight(client: DockerClient) -> None:
+    assert_type(
+        client.container.create("cuda", gpus="all", require_gpu=True), Container
+    )
+    assert_type(client.run("cuda", gpus=1, require_gpu=True), str)
+    assert_type(
+        client.run("cuda", devices=["nvidia.com/gpu=0"], detach=True, require_gpu=True),
+        Container,
+    )
+    assert_type(client.system.gpu_support(), GpuSupport)

@@ -99,6 +99,7 @@ nav:
       - Capacity harness and transport experiments: user_guide/capacity_harness.md
       - docker.run() guide: user_guide/docker_run.md
       - Build performance and measurement: user_guide/build_performance.md
+      - GPUs, vGPU and CDI devices: user_guide/gpus.md
       - Swarm generic resources: user_guide/generic_resources.md
       - Running pywhales inside a container: user_guide/running_pywhales_inside_a_container.md
       - dealing with exceptions: user_guide/exceptions.md

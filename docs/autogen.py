@@ -77,6 +77,7 @@ pages: Final[dict[str, list[str]]] = {
     "user_guide/capacity_harness.md": [],
     "user_guide/docker_run.md": [],
     "user_guide/build_performance.md": [],
+    "user_guide/gpus.md": ["pywhales.components.system.gpu.GpuSupport"],
     "user_guide/generic_resources.md": [],
     "user_guide/running_pywhales_inside_a_container.md": [],
     "user_guide/exceptions.md": [],

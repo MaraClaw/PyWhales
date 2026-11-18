@@ -1,0 +1,118 @@
+# GPUs, vGPU and CDI devices
+
+GPU checks in pywhales look at the Docker daemon the client targets, never at the
+machine running Python. A client built for a remote GPU server reads that server's
+capabilities from your laptop:
+
+```python
+from pywhales import DockerClient
+
+gpu_host = DockerClient(host="ssh://ops@gpu-01.example")  # or context="gpu-01"
+support = gpu_host.system.gpu_support()
+print(support.gpus_available, support.gpu_devices)
+```
+
+`gpu_support()` makes a single `docker system info` call. It reports:
+
+- `gpu_runtimes`: a registered `nvidia` runtime, meaning the NVIDIA Container
+  Toolkit is installed.
+- `cdi_spec_dirs` and `cdi_devices`: the CDI specification directories and the
+  devices the daemon discovered (Docker 28 and later). `cdi_devices` is `None` on
+  older daemons. That means "unknown", not "no devices".
+- `gpu_devices`: the discovered CDI devices of a kind that `--gpus` can inject,
+  which are `nvidia.com/gpu` and `amd.com/gpu`.
+
+NVIDIA vGPU guests and MIG partitions show up as ordinary `nvidia.com/gpu`
+devices, for example `nvidia.com/gpu=0`, `nvidia.com/gpu=0:1` (MIG) or
+`nvidia.com/gpu=GPU-<uuid>`.
+
+## Requesting a number of vGPUs
+
+Each vGPU the hypervisor assigned to the VM is one GPU to Docker. There are three
+ways to request N of them:
+
+```python
+image = "nvidia/cuda:13.0.2-base-ubuntu24.04"
+cmd = ["nvidia-smi", "-L"]
+
+gpu_host.run(image, cmd, gpus=2, remove=True)  # --gpus 2: any two GPUs
+gpu_host.run(image, cmd, gpus='"device=0,1"', remove=True)  # exactly GPUs 0 and 1
+gpu_host.run(
+    image, cmd, devices=["nvidia.com/gpu=0", "nvidia.com/gpu=1"], remove=True
+)  # one CDI device per name
+```
+
+`gpus` accepts an `int` and passes it unchanged to `--gpus`. For a list of
+devices, keep the inner double quotes: there's no shell to strip them, and Docker
+parses the value as CSV, so `device=0,1` alone would split at the comma. Docker
+hands out whole GPUs, so MIG slices never count toward `gpus=N`; request a slice
+by its CDI name instead.
+
+Two limits come from the hypervisor, not from Docker or pywhales:
+
+- A container can't get more vGPUs than were assigned to the VM.
+- There's no fractional request. The size of each vGPU (for example 8 GB) is
+  fixed by its vGPU profile when the VM is created.
+
+`require_gpu=True` doesn't check a count (see below). To have the number
+verified, name each device in `devices`. To count the GPUs a host offers, use
+only the plain index names in `support.gpu_devices` (`nvidia.com/gpu=0`, `=1`,
+...): the same card also appears as `=GPU-<uuid>` and `=all`, and MIG slices as
+`=0:1`.
+
+## Checking before a run
+
+`run()` and `create()` take `require_gpu=True`. It probes the daemon before the
+image is pulled, so a missing driver fails fast instead of after downloading a
+multi-gigabyte CUDA image:
+
+```python
+from pywhales.exceptions import GpuSupportError
+
+try:
+    gpu_host.run(
+        "nvidia/cuda:13.0.2-base-ubuntu24.04",
+        ["nvidia-smi", "-L"],
+        gpus="all",
+        require_gpu=True,
+        remove=True,
+    )
+except GpuSupportError as error:
+    print(error.reason, error.devices)
+```
+
+Pass CDI device names through `devices` to request a specific vGPU or MIG slice:
+`devices=["nvidia.com/gpu=0:1"], require_gpu=True`. Each name must match one of
+the daemon's discovered devices exactly. Host device paths such as `/dev/fuse`
+aren't checked.
+
+A GPU count isn't checked. With `gpus=N`, the preflight only confirms that the
+daemon has some GPU path, so `gpus=4` on a VM with one vGPU passes it and fails
+only when the container starts. Listing N CDI names in `devices` is the way to
+have N specific devices verified.
+
+The `GpuSupportError.reason` values are:
+
+| Reason | Meaning |
+| --- | --- |
+| `not_linux` | The daemon doesn't run Linux containers. |
+| `no_gpu_driver` | `gpus` was requested, but the daemon reports neither an `nvidia` runtime nor a GPU CDI device. |
+| `cdi_devices_unreported` | The daemon predates the discovered-device list, so CDI names can't be verified. |
+| `cdi_device_missing` | Some requested CDI names aren't discovered. `devices` lists them. |
+
+The check is opt-in. It costs one extra CLI launch, and its evidence is
+incomplete: a host that serves `--gpus` only through the toolkit hook, with no
+registered `nvidia` runtime and no CDI specification, reports `no_gpu_driver`
+even though a real run would succeed. On such hosts, leave `require_gpu` off.
+
+## Daemon refusals
+
+Without the preflight, the daemon itself rejects GPU requests it can't satisfy.
+When stderr is captured (by a detached or streamed `run()`), the rejection is
+raised as `GpuUnavailable`, a `DockerException` subclass. A foreground `run()`
+forwards stderr to the terminal, so it raises a plain `DockerException`.
+`create()` doesn't resolve `--gpus` or CDI devices at all; the daemon refuses
+them only when the container starts. Use `require_gpu=True` to catch that before
+the container is created.
+
+{{autogenerated}}

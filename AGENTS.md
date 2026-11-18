@@ -1,6 +1,6 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-14 against source version 1.3.0 for Docker CLI 29.9.3, Buildx v0.39.0 and Compose v5.7.1 command coverage; 2026-11-10 against 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
+**Verified:** 2026-11-18 against source version 1.3.1 for daemon GPU support; 2026-11-14 against 1.3.0 for Docker CLI 29.9.3, Buildx v0.39.0 and Compose v5.7.1 command coverage; 2026-11-10 against 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
 
 ## Overview
 
@@ -25,6 +25,7 @@ Bounded observation sits on top of the command groups:
 - `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
 - Admission `AdmissionOwner(..., owner_demand_capacity=...)` bounds active declared demand across classes for immediate/queued grants and resize growth. Separate `ClassLimit.pending_demand_capacity` and `owner_pending_demand_capacity` bound queued demand; immediate grants bypass those queue-only bounds. See the admission guide for growth guards and `owner_demand_full`.
 - `telemetry` optionally records payload-free admission decisions, launches, completions, and preflight refusals under schema 11. Completion/refusal `stop_reason` uses a closed vocabulary, including `total_io`, `buffer_output_record` and `buffer_stderr_history`; `BoundedExporter.stop_reason_counts` counts every offer, including dropped records. Launches and refusals can correlate with admission decisions; refusals never fabricate a launch or completion. No monitoring dependency or worker is required.
+- GPU support targets the selected daemon, not the local machine: `docker.system.gpu_support()` reads runtimes and discovered CDI devices (including NVIDIA vGPU/MIG) from `system info`, and container `run`/`create(require_gpu=True)` refuse with `GpuSupportError` before image preflight; see the container guide.
 - `strict_workload_errors` is an opt-in client setting for marked attached workload failures; see the shared runtime and container/Compose guides.
 
 ## Structure And Navigation

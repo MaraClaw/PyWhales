@@ -122,6 +122,46 @@ class NoSuchContext(DockerException):
     """The Docker CLI context named in the failed command does not exist."""
 
 
+class GpuUnavailable(DockerException):
+    """The daemon rejected a GPU or CDI device request it cannot satisfy."""
+
+
+type GpuSupportReason = Literal[
+    "not_linux", "no_gpu_driver", "cdi_devices_unreported", "cdi_device_missing"
+]
+
+
+class GpuSupportError(Exception):
+    """A GPU preflight found the selected daemon unable to satisfy a request.
+
+    Raised before any image pull or container launch. The message names only
+    the reason; requested device names stay in the `devices` attribute.
+
+    Attributes:
+        reason: ``"not_linux"`` when the daemon doesn't run Linux containers,
+            ``"no_gpu_driver"`` when it reports neither a GPU runtime nor a
+            known GPU CDI device for `gpus`, ``"cdi_devices_unreported"`` when
+            it predates the discovered-device list (Docker 28) so CDI names
+            can't be verified, and ``"cdi_device_missing"`` when requested CDI
+            names aren't among the daemon's discovered devices.
+        devices: The requested CDI device names the daemon doesn't report, in
+            request order; empty for the other reasons.
+    """
+
+    def __init__(self, reason: GpuSupportReason, devices: tuple[str, ...] = ()) -> None:
+        """Record the refusal reason and the unresolved CDI device names.
+
+        Args:
+            reason: Why the daemon can't satisfy the request.
+            devices: Requested CDI device names the daemon doesn't report.
+        """
+        self.reason: GpuSupportReason = reason
+        self.devices: tuple[str, ...] = devices
+        super().__init__(
+            f"The selected Docker daemon cannot satisfy the GPU request: {reason}."
+        )
+
+
 class DockerTimeout(DockerException):
     """Local CLI timeout after launch-based expiry and process cleanup.
 
@@ -245,6 +285,14 @@ _KIND_PATTERNS: tuple[tuple[type[DockerException], re.Pattern[str]], ...] = (
             rf"context {_QUOTED_NAME} does not exist",
         ),
     ),
+    (
+        GpuUnavailable,
+        _line_start(
+            r'could not select device driver "[^"\s]*" with capabilities',
+            r"failed to discover GPU vendor from CDI",
+            r"CDI device injection failed: unresolvable CDI devices",
+        ),
+    ),
 )
 
 
@@ -260,14 +308,17 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
     and plugin; ``<kind> <name> not found`` for service, network, config, and
     secret; ``get <name>: no such volume``; ``plugin "<name>" not found``;
     ``context "<name>": context not found``; ``context "<name>" does not exist``;
-    and ``This node is not a swarm manager``. Resource names contain no
+    ``This node is not a swarm manager``; and, for GPU requests,
+    ``could not select device driver "<driver>" with capabilities``,
+    ``failed to discover GPU vendor from CDI`` and ``CDI device injection
+    failed: unresolvable CDI devices``. Resource names contain no
     whitespace and are matched as a single token after the phrase, so a name,
     or a file path inside a context message, can't supply another kind's phrase
     unless the path embeds a line break.
 
     When several lines name different kinds, the first kind in this order wins,
     regardless of line order: image, service, container, swarm manager, volume,
-    network, config, secret, plugin, context. Unrecognized stderr, including a
+    network, config, secret, plugin, context, GPU. Unrecognized stderr, including a
     Swarm-mode ``volume <name> not found``, ``node <name> not found``, and
     ``no such task or service``, stays DockerException.
 

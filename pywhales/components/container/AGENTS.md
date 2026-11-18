@@ -28,6 +28,11 @@
   `io_maxbandwidth`, `io_maxiops`, `quiet`, `umask` and `use_api_socket`; zero values are kept. `attach` (stream names,
   repeated `--attach`) and `detach_keys` exist only on `run()`. `content_trust`, `kernel_memory` and `service_ports` were removed,
   as was `update(kernel_memory=)`: they emitted flags Docker 29 rejects, so callers get `TypeError`. Keep `RunArgs` aligned.
+- `require_gpu=True` on `create()`/`run()` (in `RunArgs`) probes the selected daemon with one `docker system info` launch
+  through `SystemCLI.gpu_support()` (`../system/gpu.py`), after argument validation and before image preflight, outside
+  `timeout`. It materializes `devices` once, raises `ValueError` without a `gpus` or CDI request and `GpuSupportError` on a
+  refusal. Default calls never probe. Never inspect the local machine; `create()` doesn't resolve GPU requests, start does.
+  Daemon refusals with captured stderr classify as `GpuUnavailable`.
 - Their `envs` share the [runtime environment transport](../../AGENTS.md#container-environment-transport); keep that policy out of separate builders.
 
 ## Output Modes
@@ -101,6 +106,8 @@ Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container_cli29.py`, `test_checkpoint.py` and `test_container_removed_options.py`: Docker 29
   option argv, `port()` parsing, sized inspect pins, checkpoint commands and removed keywords, all with the recording fake CLI.
 - `tests/pywhales/test_container_cli29_types.py` and `test_checkpoint_types.py`: static contracts for those options and `CheckpointCLI`.
+- `tests/pywhales/components/test_gpu_support.py`: fake-CLI GPU probing, `require_gpu` preflight ordering and refusals,
+  and daemon GPU stderr classification, without Docker.
 - `tests/pywhales/components/test_container_health_interval.py`: fake-CLI whole-second forwarding and
   invalid-value rejection before preflight across create/run modes and root aliases, without Docker.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.

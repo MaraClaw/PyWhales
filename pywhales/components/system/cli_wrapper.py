@@ -8,6 +8,7 @@ from typing import Literal, overload
 from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._json_output import JsonOutputParser
+from pywhales.components.system.gpu import GpuSupport
 from pywhales.components.system.models import (
     DockerEvent,
     DockerItemsSummary,
@@ -189,6 +190,22 @@ class SystemCLI(DockerCLICaller):
                 if origin == "stdout"
             ),
         )
+
+    def gpu_support(self) -> GpuSupport:
+        """Report GPU evidence from the selected Docker daemon.
+
+        The probe is one `docker system info` launch against the daemon this
+        client targets (its context, host, or SSH endpoint), so a remote GPU
+        server is checked from any workstation. Nothing local is inspected.
+
+        Returns:
+            The daemon's GPU runtimes, CDI specification directories and
+            discovered CDI devices. Call its `check()` to validate a request.
+
+        Raises:
+            ParsingError: If the info output is malformed.
+        """
+        return GpuSupport.from_info(self.info())
 
     def info(self) -> SystemInfo:
         """Return Docker-reported client and daemon information.

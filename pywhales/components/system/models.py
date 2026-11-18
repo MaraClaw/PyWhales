@@ -46,6 +46,19 @@ class Runtime(DockerCamelModel):
     runtime_args: list[str] | None = None
 
 
+class DeviceInfo(DockerCamelModel):
+    """A device the daemon's device driver discovered, such as a CDI device.
+
+    Attributes:
+        source: Discovering driver; Docker 28 and later report ``"cdi"``.
+        id: Device name in the driver's syntax, for example
+            ``"nvidia.com/gpu=0"`` for CDI.
+    """
+
+    source: str | None = None
+    id: Annotated[str | None, pydantic.Field(alias="ID")] = None
+
+
 class Commit(DockerCamelModel):
     id: Annotated[str | None, pydantic.Field(alias="ID")] = None
     expected: str | None = None
@@ -204,6 +217,10 @@ class SystemInfo(DockerCamelModel):
     cluster_store: str | None = None
     runtimes: dict[str, Runtime] | None = None
     default_runtime: str | None = None
+    cdi_spec_dirs: Annotated[list[str] | None, pydantic.Field(alias="CDISpecDirs")] = (
+        None
+    )
+    discovered_devices: list[DeviceInfo] | None = None
     swarm: SwarmInfo | None = None
     live_restore_enabled: bool | None = None
     isolation: Isolation | str | None = None
