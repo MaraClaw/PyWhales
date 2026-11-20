@@ -39,6 +39,7 @@ from pywhales.convergence import (
 from pywhales.convergence import _wire as wire_types
 from pywhales.convergence._service import ServiceObservation
 from pywhales.inventory import InspectionPolicy
+from pywhales.telemetry import LaunchRecord, RefusalRecord, TelemetryRecord
 
 
 @pytest.fixture
@@ -5063,6 +5064,109 @@ def test_node_batching_fits_a_launch_attempt_budget_that_single_probes_exhaust(
     assert packed == Success()
     assert isinstance(singles, Failure) and singles.reason == "observation"
     assert isinstance(singles.cause, ObservationLimitError)
+
+
+def long_nodes(count: int) -> list[str]:
+    return [f"node-{index}-{'n' * 40}" for index in range(count)]
+
+
+def observed_client(path: Path, records: list[TelemetryRecord]) -> DockerClient:
+    return DockerClient(
+        client_call=[sys.executable, str(path / "docker.py")],
+        telemetry_observer=records.append,
+    )
+
+
+def node_argv(client: DockerClient, names: Sequence[str]) -> int:
+    from pywhales._launch_limits import argv_size
+
+    docker = [str(argument) for argument in client.client_config.docker_cmd]
+    return argv_size([*docker, *NODE, *names])
+
+
+@pytest.mark.parametrize(
+    "size,fit,expected",
+    [
+        pytest.param(4, 3, [(0, 3), (3, 6)], id="argv-bytes"),
+        pytest.param(2, 6, [(0, 2), (2, 4), (4, 6)], id="max-references"),
+    ],
+)
+def test_node_chunks_split_to_fit_argv_bytes_without_single_probes(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    size: int,
+    fit: int,
+    expected: list[tuple[int, int]],
+) -> None:
+    names = long_nodes(6)
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    tight = batched(policy, size, max_argv_bytes=node_argv(client, names[:fit]))
+    target = capture_nodes(client, tuple(names), policy=tight, timeout=5)
+    assert isinstance(target, NodeTarget)
+    assert wait(target, policy=tight, timeout=5, poll_interval=0.01) == Success()
+    chunks = [[*NODE, *names[start:stop]] for start, stop in expected]
+    assert launches(tmp_path, NODE) == calls_of(tmp_path) == chunks * 3
+    assert not any(isinstance(record, RefusalRecord) for record in records)
+    launched = [record for record in records if isinstance(record, LaunchRecord)]
+    assert len(launched) == len(chunks) * 3
+
+
+def test_node_too_long_to_launch_alone_is_refused_as_its_single_probe(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    from pywhales.exceptions import ObservationLimitError
+
+    names = ["node-a", "node-b", f"node-{'n' * 200}", "node-d"]
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    limit = node_argv(client, names[2:3]) - 1
+    assert node_argv(client, [names[0], names[1], names[3]]) <= limit
+    walks: list[tuple[object, ...]] = []
+    for size in (1, 4):
+        records.clear()
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, size, max_argv_bytes=limit)
+        result = capture_nodes(client, tuple(names), policy=run_policy, timeout=5)
+        assert isinstance(result, Failure) and result.reason == "observation"
+        cause = result.cause
+        assert isinstance(cause, ObservationLimitError)
+        refusals = [record for record in records if isinstance(record, RefusalRecord)]
+        walks.append((cause.reason, cause.limit, cause.measured, len(refusals)))
+        assert launches(tmp_path, NODE) == (
+            [[*NODE, names[0]], [*NODE, names[1]]]
+            if size == 1
+            else [[*NODE, *names[:2]]]
+        )
+    assert walks == [("argv", limit, limit + 1, 1)] * 2
+
+
+def test_byte_fit_batches_still_reprobe_singly_after_a_runtime_failure(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = long_nodes(6)
+    entries: dict[str, list[Any]] = {name: [[node(name)]] for name in names}
+    rpc = {"error": "Error response from daemon: rpc error\n"}
+    entries[names[2]] = [rpc, [node(names[2])]]
+    store_nodes(tmp_path, entries)
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    tight = batched(policy, 4, max_argv_bytes=node_argv(client, names[:2]))
+    target = capture_nodes(client, tuple(names), policy=tight, timeout=5)
+    assert isinstance(target, NodeTarget)
+    assert wait(target, policy=tight, timeout=5, poll_interval=0.01) == Success()
+    pairs = [[*NODE, *names[start : start + 2]] for start in (0, 2, 4)]
+    assert launches(tmp_path, NODE) == [
+        *pairs[:2],
+        [*NODE, names[2]],
+        [*NODE, names[3]],
+        pairs[2],
+        *pairs * 2,
+    ]
+    assert not any(isinstance(record, RefusalRecord) for record in records)
 
 
 def stack_of(

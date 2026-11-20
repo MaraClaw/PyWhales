@@ -1,7 +1,8 @@
 """Preserve complete wire templates while validating required observation fields."""
 
 import hashlib
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from itertools import groupby
 from typing import Literal
@@ -15,13 +16,21 @@ from pydantic import (
     field_validator,
 )
 
+from pywhales._environment import (
+    finalize_environment,
+    frozen_environment_scope,
+    resolve_environment,
+)
+from pywhales._execution_policy import get_execution_policy
 from pywhales._json import dumps_compat, loads_compat
+from pywhales._launch_limits import LaunchMeasurement, LaunchPlanner
 from pywhales._observation import check_observation, get_observation
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.convergence._types import Failure, ServiceTarget
 from pywhales.exceptions import (
     DockerException,
     ObservationCancelled,
+    ObservationLimitError,
     ObservationTimeout,
 )
 from pywhales.utils import run, type_adapter
@@ -354,16 +363,21 @@ def _batch_items[Wire: BaseModel](
 
 
 def _batch_prefix[Wire: BaseModel](
-    config: ClientConfig, kind: _Kind[Wire], chunk: Sequence[str]
+    config: ClientConfig,
+    kind: _Kind[Wire],
+    chunk: Sequence[str],
+    environment: Mapping[str, str] | None,
 ) -> Iterator[Wire]:
     """Yield one batch's validated items in request order, stopping at any failure.
 
-    A failed launch or reply yields nothing. A malformed item ends the iteration
-    before itself, so earlier items are still delivered and the caller re-probes the
-    rest singly. Cancellation and deadline propagate; they would recur on re-probe.
+    The launch uses the planned ``environment`` when one is given. A failed launch
+    or reply yields nothing. A malformed item ends the iteration before itself, so
+    earlier items are still delivered and the caller re-probes the rest singly.
+    Cancellation and deadline propagate; they would recur on re-probe.
     """
     try:
-        items = _batch_items(config, kind, chunk)
+        with _frozen(config, environment):
+            items = _batch_items(config, kind, chunk)
     except ObservationCancelled, ObservationTimeout:
         raise
     except Exception:
@@ -376,33 +390,131 @@ def _batch_prefix[Wire: BaseModel](
         yield wire
 
 
+def _frozen(
+    config: ClientConfig, environment: Mapping[str, str] | None
+) -> AbstractContextManager[None]:
+    """Return a scope that freezes a planned environment for one launch.
+
+    Args:
+        config: Client settings whose next launch consumes the frozen environment.
+        environment: Planned launch environment, or ``None`` to freeze nothing so
+            the launch resolves its own.
+
+    Returns:
+        A context manager to enter around exactly one launch from ``config``.
+    """
+    if environment is None:
+        return nullcontext()
+    return frozen_environment_scope(config, environment)
+
+
+def _fitting(
+    measurement: LaunchMeasurement, identities: Sequence[str], size: int
+) -> Iterator[slice]:
+    """Yield consecutive runs of at most ``size`` IDs, each as long as fits.
+
+    A run of two or more IDs passes ``measurement``, so its launch is never refused
+    for argv or native size. An ID that cannot launch even alone becomes a run of
+    its own, so its single probe refuses it exactly as a single-ID walk would,
+    refusal telemetry included. Runs are measured only as they are requested.
+
+    Args:
+        measurement: Launch prefix and environment that every run is measured with.
+        identities: IDs to cover, in launch order.
+        size: Largest run; at least two.
+
+    Yields:
+        Slices of ``identities`` that cover it in order.
+    """
+    start = 0
+    while start < len(identities):
+        offset = start
+        try:
+            for part in measurement.chunks(identities[offset:], size):
+                start = offset + part.stop
+                yield slice(offset + part.start, start)
+        except ObservationLimitError, UnicodeEncodeError:
+            pass
+        else:
+            return
+        # chunks() refuses identities[start] alone only after yielding every run
+        # before it; give it a run of its own and plan the rest afresh.
+        yield slice(start, start + 1)
+        start += 1
+
+
+def _plan(
+    config: ClientConfig, command: Sequence[str], identities: Sequence[str]
+) -> tuple[Mapping[str, str] | None, Iterator[slice]]:
+    """Plan a walk's chunks and the environment that each of its launches uses.
+
+    Outside an observation, or with fewer than two IDs or a ``max_references``
+    below two, every chunk holds one ID and nothing is frozen. Otherwise the launch
+    environment is resolved once, as ``run`` resolves it, and chunks are the
+    longest runs of at most ``max_references`` IDs whose launch with that
+    environment fits ``max_argv_bytes`` and the native limits. If the command or
+    environment cannot be resolved, every chunk holds one ID again, so each probe
+    raises that failure itself, as in a single-ID walk.
+
+    Args:
+        config: Client settings for every launch in the walk.
+        command: Inspect subcommand between the Docker globals and the IDs.
+        identities: IDs to inspect, in walk order.
+
+    Returns:
+        The environment to freeze around each launch, or ``None`` to freeze
+        nothing, and a lazy iterator of slices that cover ``identities`` in order.
+    """
+    singles = (slice(index, index + 1) for index in range(len(identities)))
+    state = get_observation()
+    if state is None or state.policy.max_references < 2 or len(identities) < 2:
+        return None, singles
+    try:
+        docker_cmd = config.docker_cmd
+        execution_policy = get_execution_policy(docker_cmd)
+        environment = resolve_environment(
+            execution_policy.environment, frozen=execution_policy.frozen_environment
+        )
+        prefix = [*(str(argument) for argument in docker_cmd), *command]
+        environment = finalize_environment(environment, prefix)
+    except Exception:
+        # Every single probe meets this failure again and raises it in walk order.
+        return None, singles
+    measurement = LaunchPlanner(state.policy).measure(prefix, environment)
+    return environment, _fitting(measurement, identities, state.policy.max_references)
+
+
 def _inspect_many[Wire: BaseModel](
     config: ClientConfig, kind: _Kind[Wire], identities: Sequence[str]
 ) -> Iterator[Wire]:
-    """Inspect exact IDs in policy-sized chunks, yielding wires in request order.
+    """Inspect exact IDs in planned chunks, yielding wires in request order.
 
-    A chunk is one multi-ID launch, sized by the active policy's ``max_references``
-    (one outside an observation) and preceded by an observation checkpoint. The
+    A chunk is one multi-ID launch preceded by an observation checkpoint. Under an
+    observation it holds at most the active policy's ``max_references`` IDs and is
+    as long as fits ``max_argv_bytes`` and the native limits, measured with the
+    environment resolved once for the walk and frozen around each of its launches.
+    An ID that cannot launch even alone is probed singly, so it is refused exactly
+    as in a single-ID walk. Outside an observation every chunk holds one ID. The
     batch never explains its own failure: whatever the batch does not deliver,
     including everything after a failure, is re-probed one ID at a time in order,
     so the first failure, its type and its cause match a purely single-ID walk.
     A single probe raising ``TaskMissing`` skips that ID and the walk continues.
-    Nothing launches before iteration, and unread chunks never launch.
+    Nothing is resolved or launched before iteration, and unread chunks never launch.
     """
-    state = get_observation()
-    size = 1 if state is None else state.policy.max_references
-    for start in range(0, len(identities), size):
-        chunk = identities[start : start + size]
+    environment, parts = _plan(config, kind.command, identities)
+    for part in parts:
+        chunk = identities[part]
         delivered = 0
         if len(chunk) > 1:
             check_observation()
-            for wire in _batch_prefix(config, kind, chunk):
+            for wire in _batch_prefix(config, kind, chunk, environment):
                 delivered += 1
                 yield wire
         for identity in chunk[delivered:]:
             check_observation()
             try:
-                wire = kind.single(config, identity)
+                with _frozen(config, environment):
+                    wire = kind.single(config, identity)
             except TaskMissing:
                 continue
             yield wire
