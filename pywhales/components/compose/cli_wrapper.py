@@ -33,6 +33,8 @@ from pywhales.components.compose.models import (
     ComposeVariable,
     ComposeVolume,
 )
+from pywhales.components.system.cli_wrapper import SystemCLI
+from pywhales.components.system.gpu import compose_gpu_requests
 from pywhales.components.top import ComposeTopResult, parse_compose_top
 from pywhales.enums import (
     ComposeCreatePullPolicy,
@@ -156,6 +158,91 @@ def _parse_event(record: bytes) -> ComposeEvent:
     return ComposeEvent(**loads_compat(record))
 
 
+def _scaled_to_zero(service: JsonValue, override: int | None) -> bool:
+    """Whether a normalized service starts no instances.
+
+    An `override` count wins over the service's `scale`, which wins over
+    `deploy.replicas`.
+    """
+    if override is not None:
+        return override == 0
+    if not isinstance(service, dict):
+        return False
+    scale = service.get("scale")
+    if scale is None:
+        deploy = service.get("deploy")
+        scale = deploy.get("replicas") if isinstance(deploy, dict) else None
+    return type(scale) is int and scale == 0
+
+
+def _require_compose_gpu(
+    cli: ComposeCLI,
+    selected: Sequence[str] | None,
+    dependencies: bool,
+    scales: Mapping[str, int] | None,
+) -> None:
+    """Raise unless the selected daemon can serve the selected services' GPU requests.
+
+    Renders the normalized project with `compose config`, naming `selected` so
+    that profile-gated services they enable are included, collects the GPU
+    requests of the checked services, then probes the daemon the client targets.
+    Both launches use the client default deadline. The output may or may not
+    contain what the selected services depend on; the dependency walk covers
+    whatever it contains. A service whose effective instance count is 0 requests
+    nothing, but what it depends on is still checked.
+
+    Args:
+        cli: Compose commands whose client configuration selects the project
+            and the daemon.
+        selected: Services to check, or `None` for all of them. Compose rejects
+            a name the project doesn't define when rendering the configuration.
+        dependencies: Also check what the selected services depend on,
+            transitively. Ignored when `selected` is `None`.
+        scales: Instance counts that override the project's, as `up` takes them,
+            or `None` to skip no service for its scale.
+
+    Raises:
+        ValueError: The checked services request no GPU and no CDI device.
+        DockerException: The `compose config` launch exits unsuccessfully.
+        GpuSupportError: The daemon doesn't report support for a request.
+    """
+    full_cmd = Command([*cli.docker_compose_cmd, "config", "--format", "json"])
+    if selected is not None:
+        full_cmd.extend(selected)
+    parser = JsonOutputParser("compose config", cli.client_config.raw_diagnostics)
+    configuration = parser.parse(_parse_config_json, run(full_cmd, capture_stdout=True))
+    raw_services = configuration.get("services")
+    services: dict[str, JsonValue] = (
+        raw_services if isinstance(raw_services, dict) else {}
+    )
+    wanted = (
+        set(services)
+        if selected is None
+        else {name for name in selected if name in services}
+    )
+    pending = list(wanted) if dependencies else []
+    while pending:
+        service = services[pending.pop()]
+        depends_on = service.get("depends_on") if isinstance(service, dict) else None
+        for name in depends_on if isinstance(depends_on, dict | list) else ():
+            if isinstance(name, str) and name in services and name not in wanted:
+                wanted.add(name)
+                pending.append(name)
+    requests, devices = compose_gpu_requests(
+        {
+            name: service
+            for name, service in services.items()
+            if name in wanted
+            and (scales is None or not _scaled_to_zero(service, scales.get(name)))
+        }
+    )
+    if not requests and not devices:
+        raise ValueError(
+            "require_gpu found no GPU request in the selected Compose services"
+        )
+    SystemCLI(cli.client_config).gpu_support().check_requests(requests, devices)
+
+
 class ComposeRunArgs(TypedDict, total=False, closed=True):
     build: bool
     entrypoint: str | None
@@ -181,6 +268,7 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
     quiet_build: bool
     quiet_pull: bool
     remove_orphans: bool
+    require_gpu: bool
     timeout: float | None
 
 
@@ -1616,6 +1704,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_build: bool = False,
         quiet_pull: bool = False,
         remove_orphans: bool = False,
+        require_gpu: bool = False,
         timeout: float | None = None,
     ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream: ...
 
@@ -1652,6 +1741,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_build: bool = False,
         quiet_pull: bool = False,
         remove_orphans: bool = False,
+        require_gpu: bool = False,
         timeout: float | None = None,
     ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream:
         """Run a one-off command on a service.
@@ -1701,6 +1791,25 @@ class ComposeCLI(DockerCLICaller):
             quiet_pull: Pull without printing progress information.
             remove_orphans: Remove containers for services not defined in the
                 Compose file.
+            require_gpu: Before launching, check that the selected daemon can
+                serve the GPU requests in the project's normalized
+                configuration. This adds two local CLI launches,
+                `compose config SERVICE` and `docker system info`, both outside
+                `timeout` and using the client default deadline. Naming the
+                service makes `config` include a profile-gated service that
+                `run` enables. The check runs after the arguments are encoded and
+                validated, just before the run launch. It reads each checked
+                service's `gpus`, its `deploy.resources.reservations.devices`
+                entries that name an NVIDIA or AMD GPU capability (`gpu`,
+                `nvidia`, `compute`, `utility`, `amd` and the like) or use the
+                `nvidia` or `cdi` driver, and the `devices` mappings whose
+                `source` and `target` are the same CDI name. The checked
+                services are `service` plus, unless `dependencies` is `False`,
+                the services it depends on. `service` is checked whatever its
+                `scale`, because `run` always starts one container for it; a
+                dependency scaled to 0 is skipped. The check targets
+                the daemon the client is configured for, not the local machine.
+                The default `False` launches nothing extra.
             timeout: Positive finite seconds from local CLI launch, or `None`
                 to inherit the client default. Timing advances even when a returned stream is
                 not consumed. This is not a Compose shutdown or health-wait timeout.
@@ -1714,7 +1823,11 @@ class ComposeCLI(DockerCLICaller):
 
         Raises:
             ValueError: Streaming conflicts with TTY or detach, detach conflicts
-                with TTY or dry-run mode, or `timeout` is not positive and finite.
+                with TTY or dry-run mode, `timeout` is not positive and finite,
+                an argument can't be encoded, or `require_gpu` found no GPU
+                request in the checked services.
+            GpuSupportError: `require_gpu` found the daemon unable to serve a
+                request. Raised before the run launch.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped, without guaranteeing container termination.
             DockerException: The local Compose CLI exits unsuccessfully.
@@ -1775,6 +1888,8 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--remove-orphans", remove_orphans)
         full_cmd.append(service)
         full_cmd += command
+        if require_gpu:
+            _require_compose_gpu(self, [service], dependencies, {service: 1})
 
         if stream:
             return stream_stdout_and_stderr(
@@ -2073,6 +2188,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_pull: bool = ...,
         shutdown_timeout: int | timedelta | None = ...,
         timestamps: bool = ...,
+        require_gpu: bool = ...,
     ) -> ProcessStream | None: ...
 
     @overload
@@ -2111,6 +2227,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_pull: bool = ...,
         shutdown_timeout: int | timedelta | None = ...,
         timestamps: bool = ...,
+        require_gpu: bool = ...,
     ) -> None: ...
 
     @overload
@@ -2149,6 +2266,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_pull: bool = False,
         shutdown_timeout: int | timedelta | None = None,
         timestamps: bool = False,
+        require_gpu: bool = False,
     ) -> ProcessStream | None: ...
 
     def up(
@@ -2186,6 +2304,7 @@ class ComposeCLI(DockerCLICaller):
         quiet_pull: bool = False,
         shutdown_timeout: int | timedelta | None = None,
         timestamps: bool = False,
+        require_gpu: bool = False,
     ) -> ProcessStream | None:
         """Start the containers.
 
@@ -2254,13 +2373,39 @@ class ComposeCLI(DockerCLICaller):
                 already running. This is Compose's `--timeout`, not a local
                 subprocess deadline; `None` omits it.
             timestamps: Show timestamps in the attached logs.
+            require_gpu: Before launching, check that the selected daemon can
+                serve the GPU requests in the project's normalized
+                configuration. This adds two local CLI launches,
+                `compose config [SERVICE...]` and `docker system info`, both using
+                the client default deadline. Naming the services makes `config`
+                include profile-gated services that `up` enables. The check runs
+                after the arguments are encoded, just before the up launch. It
+                reads each checked service's `gpus`, its
+                `deploy.resources.reservations.devices` entries that name an
+                NVIDIA or AMD GPU capability (`gpu`, `nvidia`, `compute`,
+                `utility`, `amd` and the like) or use the `nvidia` or `cdi` driver,
+                and the `devices` mappings whose `source` and `target` are the
+                same CDI name. The checked services are `services` (every
+                service for `None`) plus, unless `dependencies` is `False`, the
+                services they depend on. A checked service whose instance count
+                is 0, by `scales`, then `scale`, then `deploy.replicas`, is
+                skipped, though what it depends on is still checked. The check
+                targets the daemon the client is configured for, not the local
+                machine. `services=[]` skips it along with the launch. The
+                default `False` launches nothing extra.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
             and services are selected; otherwise `None`, including for `[]`.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or
+                `require_gpu` found no GPU request in the checked services.
+            GpuSupportError: `require_gpu` found the daemon unable to serve a
+                request. Raised before the up launch.
+            DockerException: The `compose config` launch of `require_gpu` exits
+                unsuccessfully, for example for a service the project doesn't
+                define.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -2309,6 +2454,8 @@ class ComposeCLI(DockerCLICaller):
         if services is not None:
             services = to_list(services)
             full_cmd += services
+        if require_gpu:
+            _require_compose_gpu(self, services, dependencies, scales)
 
         if stream_logs:
             return stream_stdout_and_stderr(full_cmd)
