@@ -118,6 +118,10 @@ class NodeMissing(Exception):
         super().__init__("The selected node is missing.")
 
 
+class TaskMissing(Exception):
+    """An exact missing-task response from a single task probe."""
+
+
 class ContainerHealth(BaseModel):
     model_config = ConfigDict(strict=True)
     status: str = Field(alias="Status", min_length=1)
@@ -251,8 +255,22 @@ def inspect_node(config: ClientConfig, node_id: str) -> NodeWire:
 
 
 def inspect_task(config: ClientConfig, task_id: str) -> TaskWire:
-    """Inspect exactly one listed immutable task ID."""
-    payload = run([*config.docker_cmd, "inspect", "--type", "task", task_id])
+    """Inspect one listed task ID, distinguishing only its exact missing-task response.
+
+    Raises:
+        TaskMissing: If the probe fails with exactly a plain ``DockerException``
+            whose stderr is the daemon's not-found response for ``task_id``.
+    """
+    try:
+        payload = run([*config.docker_cmd, "inspect", "--type", "task", task_id])
+    except DockerException as error:
+        if (
+            type(error) is DockerException
+            and error.stderr
+            == f"Error response from daemon: task {task_id} not found\n"
+        ):
+            raise TaskMissing from error
+        raise
     results = type_adapter(list[TaskWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != task_id:
         raise ParsingError("Task inspect identity mismatch")
@@ -368,6 +386,7 @@ def _inspect_many[Wire: BaseModel](
     batch never explains its own failure: whatever the batch does not deliver,
     including everything after a failure, is re-probed one ID at a time in order,
     so the first failure, its type and its cause match a purely single-ID walk.
+    A single probe raising ``TaskMissing`` skips that ID and the walk continues.
     Nothing launches before iteration, and unread chunks never launch.
     """
     state = get_observation()
@@ -382,7 +401,11 @@ def _inspect_many[Wire: BaseModel](
                 yield wire
         for identity in chunk[delivered:]:
             check_observation()
-            yield kind.single(config, identity)
+            try:
+                wire = kind.single(config, identity)
+            except TaskMissing:
+                continue
+            yield wire
 
 
 def inspect_tasks(config: ClientConfig, task_ids: Sequence[str]) -> Iterator[TaskWire]:
@@ -394,7 +417,9 @@ def inspect_tasks(config: ClientConfig, task_ids: Sequence[str]) -> Iterator[Tas
 
     Returns:
         An iterator yielding each task in ``task_ids`` order. Launches happen as it
-        is consumed, and it raises what single-ID inspection would raise.
+        is consumed, and it raises what single-ID inspection would raise. A task
+        whose single probe reports exactly that it is not found, such as one
+        pruned after listing, is skipped for this walk; batch stderr never is.
     """
     return _inspect_many(config, _TASKS, task_ids)
 

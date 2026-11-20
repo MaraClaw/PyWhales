@@ -19,7 +19,12 @@ from pywhales.convergence._compose import (
 from pywhales.convergence._container import capture_selected, wait_containers
 from pywhales.convergence._node import capture_selected as capture_selected_nodes
 from pywhales.convergence._node import wait_nodes
-from pywhales.convergence._service import ServiceObservation, check_service, summarize
+from pywhales.convergence._service import (
+    ServiceObservation,
+    check_service,
+    summarize,
+    task_history,
+)
 from pywhales.convergence._types import (
     Cancelled,
     ComposeTarget,
@@ -302,6 +307,10 @@ def wait(
 ) -> Outcome:
     """Wait for captured service, stack, Compose, container or node membership.
 
+    Service and stack waits list each service's tasks every cycle. Within one call,
+    a listed task that can never count again is inspected only once, and a task the
+    daemon reports not found when probed alone is skipped for that cycle.
+
     Args:
         target: Captured service generation, explicitly fixed stack membership, or
             Compose services, standalone containers, or Swarm nodes. Nodes must be
@@ -352,7 +361,10 @@ def wait(
     current: str | None = None
     last_complete: DeadlineDetail | None = None
     try:
-        with observation(policy, deadline=deadline, cancel=cancel) as state:
+        with (
+            observation(policy, deadline=deadline, cancel=cancel) as state,
+            task_history(),
+        ):
             batched = state.policy.max_references > 1
             while True:
                 check_observation(state)

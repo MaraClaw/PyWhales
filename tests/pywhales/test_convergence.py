@@ -111,10 +111,16 @@ elif args[:2] == ["service", "ps"]:
 elif args[:3] == ["inspect", "--type", "task"]:
     overrides = data.get("task_inspect_overrides", {})
     vanished = data.get("vanished_tasks", [])
+    mode = "batch" if len(args) > 4 else "single"
+    errors = [data.get("task_errors", {}).get(identity, {}).get(mode) for identity in args[3:]]
     found = []
-    for identity in args[3:]:
-        found += [overrides[identity]] if identity in overrides else [item for item in tasks if item["ID"] == identity and identity not in vanished]
+    for identity, error in zip(args[3:], errors):
+        if error is None:
+            found += [overrides[identity]] if identity in overrides else [item for item in tasks if item["ID"] == identity and identity not in vanished]
     print(json.dumps(found))
+    if any(errors):
+        sys.stderr.write("".join(error for error in errors if error))
+        sys.exit(1)
     if len(args) > 4 and len(found) < len(args) - 3:
         sys.stderr.write("Error: No such task\\n")
         sys.exit(1)
@@ -4320,6 +4326,10 @@ def broken_job(identity: str) -> dict[str, Any]:
     return current
 
 
+def pruned(identity: str) -> str:
+    return f"Error response from daemon: task {identity} not found\n"
+
+
 SWARM_FALLBACKS = [
     pytest.param(
         [failed_job("a"), broken_job("b"), job_task("c", 1, 1)],
@@ -4371,6 +4381,27 @@ SWARM_FALLBACKS = [
         1,
         id="later-chunk-never-launches",
     ),
+    pytest.param(
+        [job_task("a", 0, 1), failed_job("b")],
+        {"task_errors": {"a": {"single": pruned("a"), "batch": pruned("a")}}},
+        4,
+        3,
+        id="pruned-then-failed",
+    ),
+    pytest.param(
+        [job_task("a", 0, 1), failed_job("b")],
+        {
+            "task_errors": {
+                "a": {
+                    "single": "Error response from daemon: rpc error\n",
+                    "batch": pruned("a"),
+                }
+            }
+        },
+        4,
+        2,
+        id="batch-stderr-never-classified",
+    ),
 ]
 
 
@@ -4399,6 +4430,191 @@ def test_swarm_batch_failures_match_single_probes_in_listing_order(
         counts.append(len(launches(tmp_path, TASK)))
     assert shapes[0] == shapes[1]
     assert counts[1] == expected
+
+
+def task_row(identity: str, desired: str, observed: str) -> dict[str, Any]:
+    row = task(identity)
+    row["DesiredState"], row["Status"]["State"] = desired, observed
+    return row
+
+
+def add_task_data(path: Path, **extras: object) -> None:
+    data = json.loads((path / "data.json").read_text())
+    (path / "data.json").write_text(json.dumps({**data, **extras}))
+
+
+def inspections(path: Path, identities: Sequence[str]) -> dict[str, int]:
+    calls = launches(path, TASK)
+    return {
+        identity: sum(identity in call[len(TASK) :] for call in calls)
+        for identity in identities
+    }
+
+
+def wait_cycles(
+    target: ServiceTarget,
+    policy: InspectionPolicy,
+    cycles: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Outcome:
+    import pywhales._observation as observation_module
+    import pywhales.convergence._wait as wait_module
+
+    current = [100.0]
+
+    def sleep(seconds: float) -> None:
+        current[0] += seconds
+
+    clock = SimpleNamespace(monotonic=lambda: current[0], sleep=sleep)
+    monkeypatch.setattr(wait_module, "time", clock)
+    monkeypatch.setattr(observation_module, "time", clock)
+    return wait(target, policy=policy, timeout=cycles, poll_interval=1)
+
+
+@pytest.mark.parametrize(
+    "size,expected",
+    [
+        pytest.param(1, [["old-1"], ["old-0"], ["task-0"]], id="single"),
+        pytest.param(
+            2,
+            [["old-1", "old-0"], ["old-1"], ["old-0"], ["task-0"]],
+            id="batch",
+        ),
+    ],
+)
+def test_swarm_task_pruned_after_listing_is_skipped_for_the_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    size: int,
+    expected: list[list[str]],
+) -> None:
+    store(tmp_path, [service()], swarm_history(1, 2)[::-1])
+    target = capture(fake_cli, policy)
+    add_task_data(
+        tmp_path,
+        task_errors={"old-0": {"single": pruned("old-0"), "batch": pruned("old-0")}},
+    )
+    (tmp_path / "calls").unlink()
+    result = wait(target, policy=batched(policy, size), timeout=5, poll_interval=1)
+    assert result == Success()
+    assert launches(tmp_path, TASK) == [[*TASK, *ids] for ids in expected]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Error response from daemon: permission denied\n",
+        "Error response from daemon: task old-1 not found\n",
+        "Error response from daemon: task old-0 not found\npermission denied\n",
+        "Error response from daemon: task old-0 not found",
+        "Error: No such task: old-0\n",
+    ],
+)
+def test_swarm_unrelated_task_probe_failure_still_ends_the_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, error: str
+) -> None:
+    from pywhales.exceptions import DockerException
+
+    store(tmp_path, [service()], swarm_history(1, 2)[::-1])
+    target = capture(fake_cli, policy)
+    add_task_data(
+        tmp_path, task_errors={"old-0": {"single": error, "batch": pruned("old-0")}}
+    )
+    shapes: list[tuple[object, ...]] = []
+    for limit in (1, 2):
+        result = wait(target, policy=batched(policy, limit), timeout=5, poll_interval=1)
+        assert isinstance(result, Failure) and result.reason == "observation"
+        assert result.service_id == "service-a"
+        assert isinstance(result.cause, DockerException)
+        assert result.cause.stderr == error
+        shapes.append(outcome_shape(result))
+    assert shapes[0] == shapes[1]
+
+
+@pytest.mark.parametrize("size", [1, 3])
+def test_swarm_wait_inspects_settled_history_once_per_call(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+) -> None:
+    active = [
+        task_row("starting", "running", "starting"),
+        task_row("failing", "running", "failed"),
+        task_row("stopping", "shutdown", "running"),
+        task_row("preparing", "ready", "preparing"),
+    ]
+    settled = [
+        task_row(f"old-{state}", "shutdown", state)
+        for state in ("complete", "shutdown", "failed", "rejected", "remove")
+    ] + [task_row("removed", "remove", "orphaned")]
+    store(tmp_path, [service()], [*active, *settled])
+    target = capture(fake_cli, policy)
+    expected = {row["ID"]: 3 for row in active} | {row["ID"]: 1 for row in settled}
+    for _ in range(2):
+        (tmp_path / "calls").unlink()
+        result = wait_cycles(target, batched(policy, size), 3, monkeypatch)
+        assert result == Deadline(
+            DeadlineDetail(
+                1, missing_ready_slots=1, duplicate_slots=1, non_running_tasks=1
+            )
+        )
+        assert len(launches(tmp_path, ["service", "ps"])) == 3
+        assert inspections(tmp_path, list(expected)) == expected
+
+
+def test_swarm_history_reuse_follows_each_listing(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starting = task_row("starting", "running", "starting")
+    old = task_row("old", "shutdown", "shutdown")
+    fresh = task_row("fresh", "running", "starting")
+    flipped = task_row("flip", "shutdown", "failed")
+    store(tmp_path, [service()], [])
+    add_task_data(
+        tmp_path,
+        task_sequences={
+            "service-a": [
+                [starting, task_row("flip", "running", "failed"), old],
+                [starting, flipped, old],
+                [starting, flipped, fresh],
+                [starting, flipped, fresh],
+            ]
+        },
+    )
+    target = capture(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    assert isinstance(wait_cycles(target, policy, 4, monkeypatch), Deadline)
+    assert len(launches(tmp_path, ["service", "ps"])) == 4
+    assert inspections(tmp_path, ["starting", "flip", "old", "fresh"]) == {
+        "starting": 4,
+        "flip": 2,
+        "old": 1,
+        "fresh": 2,
+    }
+
+
+def test_swarm_job_rows_from_other_iterations_are_inspected_once(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = job_task("legacy", 0, 1)
+    del legacy["JobIteration"]
+    previous = [job_task("prev-a", 0, 1), job_task("prev-b", 1, 1, "failed"), legacy]
+    current = [job_task("cur-a", 0, 2, "running"), job_task("cur-b", 1, 2)]
+    store(tmp_path, [job_service(iteration=2)], [*previous, *current])
+    target = capture(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    assert isinstance(wait_cycles(target, policy, 3, monkeypatch), Deadline)
+    expected = {row["ID"]: 1 for row in previous} | {row["ID"]: 3 for row in current}
+    assert inspections(tmp_path, list(expected)) == expected
 
 
 def container_set(identities: Sequence[str]) -> dict[str, Any]:
