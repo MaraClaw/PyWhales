@@ -35,8 +35,9 @@ staging = DockerClient(context="staging", client_type="docker")
 Those are alternatives; select the host or context the user supplied. SSH
 authentication and access to the remote engine must already work. Bind-mount
 source paths refer to the daemon host, not automatically to the Python machine.
-GPU checks follow the same rule: `client.system.gpu_support()` describes that
-client's daemon, never the Python machine's own hardware.
+GPU checks follow the same rule: `client.system.gpu_support()` and every
+`require_gpu` preflight describe that client's daemon or Swarm, never the Python
+machine's own hardware.
 
 Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
@@ -255,8 +256,9 @@ imported from `pywhales.exceptions`.
 Two GPU errors come from the same module. `GpuUnavailable` is a `DockerException`
 subclass selected when captured stderr shows the daemon rejecting a `--gpus` or
 CDI device request. `GpuSupportError` is not a `DockerException`: the opt-in
-`require_gpu=True` preflight raises it before any image pull or container launch,
-with `reason` and `devices` attributes. Catch them separately; see
+`require_gpu=True` preflights of container `create`/`run`, Swarm `service.create`
+and Compose `up`/`run` raise it before the launch (for containers, before any
+image pull), with `reason` and `devices` attributes. Catch them separately; see
 [GPUs, vGPU and CDI devices](containers-and-output.md#gpus-vgpu-and-cdi-devices).
 
 Use the exit code and relevant, redacted output to distinguish daemon access,
@@ -360,8 +362,9 @@ signature; notable entry points are:
   config_only=..., ingress=..., ipv4=..., scope=...)`, and `remove(force=...)`.
 - `service.create` and `service.update` cover the CLI 29 option set, including
   long-form `publish` mappings and `--*-add`/`--*-rm` pairs such as `env_add`,
-  `label_add`, and `publish_rm`. `task.logs(task, ...)` has the `service.logs`
-  overloads and returns `str` or an owned `ProcessStream`.
+  `label_add`, and `publish_rm`. `service.create` also takes opt-in `require_gpu`,
+  which checks Swarm node generic resources before the launch. `task.logs(task, ...)`
+  has the `service.logs` overloads and returns `str` or an owned `ProcessStream`.
 - `filters` on `node.list`, and keyword-only `filters` on `service.ps`, `node.ps`, `stack.ps`, and
   `stack.services`; `stack.config(compose_files, *, skip_interpolation=False)`
   returns `str`; `stack.deploy` takes `detach` (`None`, `True`, or `False`) and `quiet`, and

@@ -135,6 +135,8 @@ def _check_existing_commands_with_new_options(client: DockerClient) -> None:
         None,
     )
     assert_type(compose.up(stream_logs=True, menu=True), ProcessStream | None)
+    assert_type(compose.up("app", require_gpu=True), None)
+    assert_type(compose.up(stream_logs=True, require_gpu=True), ProcessStream | None)
 
 
 def _check_run(client: DockerClient) -> None:
@@ -153,3 +155,4 @@ def _check_run(client: DockerClient) -> None:
         remove_orphans=True,
     )
     assert_type(result, str)
+    assert_type(client.compose.run("app", tty=False, require_gpu=True), str)

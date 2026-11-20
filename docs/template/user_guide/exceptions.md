@@ -17,9 +17,10 @@ Those are the child classes:
 * `NoSuchContext`
 * `GpuUnavailable`, when the daemon rejects a `--gpus` or CDI device request
 
-`GpuSupportError`, raised by the opt-in `require_gpu=True` preflight of container
-`run()` and `create()`, is not a `DockerException`: no CLI command failed. See
-[GPUs, vGPU and CDI devices](gpus.md).
+`GpuSupportError`, raised by the opt-in `require_gpu=True` preflights of container
+`run()` and `create()`, Swarm service `create()` and Compose `up()` and `run()`, is
+not a `DockerException`: no CLI command failed. Its `reason` values are listed in
+[GPUs, vGPU and CDI devices](gpus.md#checking-before-a-run).
 
 A class is chosen from the text docker wrote to stderr. A line has to begin with the
 resource kind's own phrase, such as `No such secret: x` or `config x not found`,

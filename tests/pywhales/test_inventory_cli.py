@@ -177,9 +177,15 @@ def test_response_limit_reaps_real_child(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         child = real_popen(
-            args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
         )
         children.append(child)
         return child

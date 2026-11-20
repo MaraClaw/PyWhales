@@ -13,8 +13,19 @@ starts, including lazy archive exports and queued transfers.
 
 Expiry kills and reaps the local CLI, including when archive consumption is
 paused or an archive producer is blocked. The timeout is reported when caller
-execution resumes; arbitrary Python iterator code cannot be interrupted. This
-does not guarantee descendant cleanup or roll back daemon-side operations.
+execution resumes; arbitrary Python iterator code cannot be interrupted. Expiry
+never rolls back daemon-side operations.
+
+On POSIX, a launch whose inherited standard descriptors include no terminal runs
+in its own process group. Every stop PyWhales makes, whether a command or
+observation deadline, cancellation, an observation limit, `close()`,
+reclamation of a dropped stream, or an exception such as `KeyboardInterrupt`
+while a call waits, sends SIGKILL to the whole group, so plugins such as
+`docker-compose` and `docker-buildx` die with the CLI. A launch that ends on its
+own with EOF on every pipe is not signalled, and streams never closed are killed
+when the interpreter exits. Launches with `tty=True` or an inherited terminal,
+and every launch on Windows, keep the leader-only kill, so a plugin child can
+outlive the CLI there.
 
 Compose `build` (blocking or streamed), Compose `execute` (captured, TTY or detached),
 and container `wait` (also `docker.wait`) accept keyword-only `timeout`. Invalid

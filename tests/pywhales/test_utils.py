@@ -6,6 +6,7 @@ does not replace the local process requirements.
 """
 
 import errno
+import json
 import os
 import select
 import signal
@@ -21,9 +22,12 @@ from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
-from typing import Literal, assert_never, override
+from typing import Annotated, Any, Literal, assert_never, override
 
+import pydantic
 import pytest
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import CoreSchema, core_schema
 
 import pywhales._process_stream
 import pywhales._readiness
@@ -47,11 +51,15 @@ from pywhales.exceptions import (
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
+    PROJECT_ROOT,
     MappedProcessStream,
     ProcessStream,
+    custom_parse_object_as,
     format_cpuset,
     stream_stdout_and_stderr,
+    type_adapter,
 )
+from tests.pywhales.process_groups import Grandchild, holder, stdin_from
 
 
 def test_mapped_process_stream_owns_unstarted_mapping() -> None:
@@ -586,7 +594,9 @@ def test_process_stream_close_discards_buffered_stdin_held_by_descendant() -> No
 
             assert not closer.is_alive(), "close blocked flushing buffered stdin"
             _assert_process_released(stream)
-            assert not select.select([status_reader], [], [], 0)[0]
+            # Closing killed the descendant with the CLI's process group.
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
         finally:
             release_writer.close()
             if closer.ident is None:
@@ -1566,19 +1576,24 @@ def test_process_stream_ending_stops_workers_while_descendant_holds_output(
         os.fdopen(status_read, "rb", buffering=0) as status_reader,
         os.fdopen(status_write, "wb", buffering=0) as status_writer,
     ):
-        # Given a child whose descendant keeps stdout and stderr open after the
-        # child itself is stopped.
+        # Given a child, isolated by its piped stdin, whose descendant keeps
+        # stdout and stderr open.
         stream = stream_stdout_and_stderr(
             [
                 sys.executable,
                 "-c",
                 _HOLDER
-                + ("os.write(1, b'oversize\\n')\n" if ending == "failure" else "")
+                + (
+                    "os.read(0, 1)\nos.write(1, b'oversize\\n')\n"
+                    if ending == "failure"
+                    else ""
+                )
                 + "signal.pause()\n",
                 release_reader.fileno(),
                 status_writer.fileno(),
             ],
             pass_fds=(release_reader.fileno(), status_writer.fileno()),
+            pipe_stdin=True,
             timeout=1 if ending == "expiry" else None,
             buffer_bytes=3 if ending == "failure" else None,
         )
@@ -1587,6 +1602,10 @@ def test_process_stream_ending_stops_workers_while_descendant_holds_output(
             status_writer.close()
             assert select.select([status_reader], [], [], 3)[0]
             assert status_reader.read(1) == b"R"
+            if ending == "failure":
+                assert stream.stdin is not None
+                stream.stdin.write(b"go")
+                stream.stdin.flush()
 
             # When the stream is closed, expires, or fails.
             match ending:
@@ -1600,10 +1619,11 @@ def test_process_stream_ending_stops_workers_while_descendant_holds_output(
                 case unreachable:
                     assert_never(unreachable)
 
-            # Then every worker stopped, the child was reaped, and the error
-            # is delivered once while the descendant still holds the pipes.
+            # Then every worker stopped, the child was reaped, the descendant
+            # died with the child's process group, and the error is delivered once.
             _assert_process_released(stream)
-            assert not select.select([status_reader], [], [], 0)[0]
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
             match ending:
                 case "close":
                     assert list(stream) == []
@@ -1621,6 +1641,171 @@ def test_process_stream_ending_stops_workers_while_descendant_holds_output(
             stream.close()
             assert select.select([status_reader], [], [], 3)[0]
             assert status_reader.read(1) == b""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("stop", ["deadline", "interrupt"])
+def test_run_stop_kills_the_isolated_cli_process_group(
+    stop: Literal["deadline", "interrupt"],
+) -> None:
+    def interrupt(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    tail = "os.kill(os.getppid(), signal.SIGALRM)\n" if stop == "interrupt" else ""
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    try:
+        with (
+            Grandchild() as grandchild,
+            open(os.devnull, "rb") as null,
+            stdin_from(null.fileno()),
+        ):
+            # Given a CLI with no terminal on stdio whose grandchild holds its
+            # output; the interrupted launch takes the plain no-timeout branch.
+            command = [
+                sys.executable,
+                "-c",
+                holder(tail + "signal.pause()\n"),
+                *grandchild.argv,
+            ]
+
+            # When the deadline expires, or KeyboardInterrupt arrives mid-wait.
+            with pytest.raises(
+                DockerTimeout if stop == "deadline" else KeyboardInterrupt
+            ) as raised:
+                pywhales.utils.run(
+                    command,
+                    pass_fds=grandchild.fds,
+                    timeout=0.5 if stop == "deadline" else None,
+                )
+
+            # Then the grandchild died with the CLI's process group.
+            grandchild.started()
+            grandchild.assert_gone()
+            if isinstance(raised.value, DockerTimeout):
+                assert raised.value.return_code == -signal.SIGKILL
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminals")
+def test_run_with_terminal_stdin_keeps_the_leader_only_kill() -> None:
+    controller, terminal = os.openpty()
+    try:
+        with Grandchild() as grandchild, stdin_from(terminal):
+            # Given a CLI that inherits a terminal on stdin.
+            command = [
+                sys.executable,
+                "-c",
+                holder("signal.pause()\n"),
+                *grandchild.argv,
+            ]
+
+            # When its deadline expires.
+            with pytest.raises(DockerTimeout) as raised:
+                pywhales.utils.run(command, pass_fds=grandchild.fds, timeout=0.5)
+
+            # Then only the CLI was killed and its grandchild still answers.
+            assert raised.value.return_code == -signal.SIGKILL
+            grandchild.started()
+            grandchild.assert_alive()
+    finally:
+        os.close(controller)
+        os.close(terminal)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("launch", ["run", "stream"])
+def test_launch_ending_with_eof_on_every_pipe_signals_nothing(
+    launch: Literal["run", "stream"],
+) -> None:
+    with Grandchild() as grandchild:
+        # Given an isolated CLI whose grandchild outlives it without its output.
+        command = [
+            sys.executable,
+            "-c",
+            holder("os.write(1, b'done\\n')\n", holds_output=False),
+            *grandchild.argv,
+        ]
+
+        # When the CLI exits and both pipes reach EOF.
+        match launch:
+            case "run":
+                output = pywhales.utils.run(command, pass_fds=grandchild.fds, input=b"")
+                assert output == "done"
+            case "stream":
+                with stream_stdout_and_stderr(
+                    command, pass_fds=grandchild.fds, pipe_stdin=True
+                ) as stream:
+                    assert list(stream) == [("stdout", b"done\n")]
+                _assert_process_released(stream)
+                assert stream._process.returncode == 0
+            case unreachable:
+                assert_never(unreachable)
+
+        # Then nothing was signalled: the grandchild still answers.
+        grandchild.started()
+        grandchild.assert_alive()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize(
+    ("stop", "tail", "code"),
+    [
+        ("scope", "signal.pause()\n", -signal.SIGKILL),
+        ("scope", "os._exit(0)\n", 0),
+        ("cancel", "signal.pause()\n", -signal.SIGKILL),
+        (
+            "limit",
+            "os.read(0, 1)\nos.write(1, b'x' * 64)\nsignal.pause()\n",
+            -signal.SIGKILL,
+        ),
+    ],
+    ids=["scope-running", "scope-exited", "cancel", "limit"],
+)
+def test_observed_stream_stop_kills_the_cli_process_group(
+    stop: Literal["scope", "cancel", "limit"], tail: str, code: int
+) -> None:
+    cancel = Event()
+    policy = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_stream_bytes=16,
+    )
+    expected: type[Exception] = {
+        "scope": ObservationTimeout,
+        "cancel": ObservationCancelled,
+        "limit": ObservationLimitError,
+    }[stop]
+    with Grandchild() as grandchild:
+        # Given an observed stream whose CLI, running or exited, has a
+        # grandchild holding both pipes.
+        with observation(
+            policy,
+            deadline=monotonic() + 0.5 if stop == "scope" else None,
+            cancel=cancel,
+        ):
+            stream = stream_stdout_and_stderr(
+                [sys.executable, "-c", holder(tail), *grandchild.argv],
+                pass_fds=grandchild.fds,
+                pipe_stdin=True,
+            )
+
+        # When the scope expires, is cancelled, or its stream budget overflows.
+        with stream, pytest.raises(expected):
+            grandchild.started()
+            if stop == "cancel":
+                cancel.set()
+            elif stop == "limit":
+                assert stream.stdin is not None
+                stream.stdin.write(b"go")
+                stream.stdin.flush()
+            list(stream)
+
+        # Then the stream released the CLI and the grandchild died with its group.
+        _assert_process_released(stream)
+        assert stream._process.returncode == code
+        grandchild.assert_gone()
 
 
 @pytest.mark.parametrize("fail_at", [2, 3, 4])
@@ -1668,9 +1853,16 @@ def test_process_stream_setup_failure_unwinds_child_pipes_and_threads(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         process = subprocess.Popen(
-            args, stdin=stdin, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
         )
         launched.append(process)
         return process
@@ -2307,3 +2499,169 @@ def test_scoped_stream_deadline_wait_is_one_wait_for_the_remaining_time(
     finally:
         stream.close()
     _assert_process_released(stream)
+
+
+@dataclass
+class _AtLeast:
+    """Unhashable schema marker: value equality without frozen leaves no hash."""
+
+    minimum: int
+
+    def __get_pydantic_core_schema__(
+        self, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            self._check, handler(source)
+        )
+
+    def _check(self, value: int) -> int:
+        if value < self.minimum:
+            raise ValueError("below the minimum")
+        return value
+
+
+class _WatchedLock:
+    """Re-entrant lock that signals once a second acquisition has been attempted."""
+
+    def __init__(self) -> None:
+        self.contended = Event()
+        self._lock = threading.RLock()
+        self._guard = threading.Lock()
+        self._attempts = 0
+
+    def __enter__(self) -> None:
+        with self._guard:
+            self._attempts += 1
+            if self._attempts == 2:
+                self.contended.set()
+        self._lock.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+@dataclass(eq=False)
+class _SchemaGate:
+    """Hashable schema marker holding each adapter build until contention starts."""
+
+    contended: Event
+    builds: list[int] = field(default_factory=list)
+
+    def __get_pydantic_core_schema__(
+        self, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        self.builds.append(1)
+        self.contended.wait(timeout=10)
+        return handler(source)
+
+
+def test_custom_parse_object_as_builds_one_adapter_per_type(
+    adapter_constructions: list[Any],
+) -> None:
+    for _ in range(3):
+        assert custom_parse_object_as(list[int], ["1", 2]) == [1, 2]
+        assert custom_parse_object_as(list[str], ["a"]) == ["a"]
+
+    assert adapter_constructions == [list[int], list[str]]
+
+
+def test_type_adapter_keeps_types_apart_and_options_per_call(
+    adapter_constructions: list[Any],
+) -> None:
+    ints = type_adapter(list[int])
+
+    assert type_adapter(list[int]) is ints
+    assert type_adapter(list[str]) is not ints
+    assert ints.validate_python(["1"]) == [1]
+    assert ints.validate_json("[1]") == [1]
+    with pytest.raises(pydantic.ValidationError):
+        ints.validate_python(["1"], strict=True)
+    assert ints.validate_python(["1"]) == [1]
+    with pytest.raises(pydantic.ValidationError):
+        custom_parse_object_as(list[str], [1])
+    assert adapter_constructions == [list[int], list[str]]
+
+
+def test_type_adapter_decodes_unhashable_types_without_caching_them(
+    adapter_constructions: list[Any],
+) -> None:
+    target: Any = Annotated[int, _AtLeast(5)]
+    with pytest.raises(TypeError):
+        hash(target)
+
+    assert custom_parse_object_as(target, 7) == 7
+    with pytest.raises(pydantic.ValidationError):
+        custom_parse_object_as(target, 3)
+
+    assert adapter_constructions.count(target) == 2
+    assert pywhales.utils._ADAPTERS == {}
+
+
+def test_type_adapter_concurrent_first_use_builds_one_adapter(
+    adapter_constructions: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = _WatchedLock()
+    monkeypatch.setattr(pywhales.utils, "_ADAPTERS_LOCK", lock)
+    gate = _SchemaGate(lock.contended)
+    target: Any = Annotated[int, gate]
+    workers = 4
+    start = threading.Barrier(workers)
+    adapters: list[object] = []
+
+    def decode() -> None:
+        start.wait(timeout=10)
+        adapters.append(type_adapter(target))
+
+    threads = [Thread(target=decode) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert len(adapters) == workers
+    assert all(adapter is adapters[0] for adapter in adapters)
+    assert gate.builds == [1]
+    assert adapter_constructions.count(target) == 1
+
+
+_IMPORT_PROBE = """
+import json
+import typing
+
+import pydantic
+
+built = []
+build = pydantic.TypeAdapter
+
+
+def counting(type_):
+    built.append(type_)
+    return build(type_)
+
+
+pydantic.TypeAdapter = counting
+
+import pywhales.client_config
+import pywhales.components.manifest.cli_wrapper
+import pywhales.convergence
+import pywhales.utils
+
+generic = [repr(item) for item in built if typing.get_origin(item) is not None]
+print(json.dumps([len(pywhales.utils._ADAPTERS), generic]))
+"""
+
+
+def test_importing_pywhales_builds_no_decode_adapters() -> None:
+    probe = subprocess.run(
+        [sys.executable, "-c", _IMPORT_PROBE],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    cached, generic = json.loads(probe.stdout)
+    assert cached == 0
+    assert generic == []

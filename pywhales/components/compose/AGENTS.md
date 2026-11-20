@@ -65,12 +65,16 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 - `attach()` inherits the caller's terminal streams (`tty=True`); `cp()` takes `(service, path)` tuples as the container
   endpoint; `export()` writes to a file on the Python host (`--output`), never returns bytes.
 - Non-detached `run()` (captured, TTY, or streamed) and `execute()` (non-streamed; captured or TTY) explicitly pass `workload_status=True`. With originating-client `strict_workload_errors=True`, nonzero exits raise exact `DockerException`; detached and other Compose launches retain specialization. `execute()` has no stream mode; don't add one for this policy. See [shared classification rules](../../AGENTS.md#configuration-and-policy).
+- `up(require_gpu=True)` and `run(require_gpu=True)` add two launches, `compose config [SERVICE...]` (normalized JSON) and `docker system info`, with the client default deadline, outside `run()`'s `timeout` (`up()` has none). `config` names the selected services so profile-gated ones that `up`/`run` enables are rendered, and it fails with `DockerException` for an unknown service; `None` passes no names. The probes run after local validation and argument encoding, just before the launch, so a bad argument raises before either. `compose_gpu_requests` (`../system/gpu.py`) reads `gpus`, `deploy.resources.reservations.devices` entries with an NVIDIA or AMD GPU capability (`gpu`, `nvidia`, `compute`, `compat32`, `graphics`, `utility`, `video`, `display`, `amd`) or the `nvidia`/`cdi` driver, and `devices` mappings whose `source` equals `target` and is a qualified CDI name (as Compose treats them; strings aren't CDI) of the selected services (all for `None`) plus transitive `depends_on` unless `dependencies=False`. `up` skips a service whose instance count is 0 (`scales`, else `scale`, else `deploy.replicas`) but still checks what it depends on; `run` always checks its target and skips only dependencies scaled to 0. No request raises `ValueError` after `config` and before `info`; a refusal raises `GpuSupportError`. `up(services=[])` stays a no-op with no probe, and the default never probes.
 
 ## Local Deadlines
 
 - `build`, `execute`, `run`, `pull`, `push`, `watch`, `logs`, and `events` take keyword-only `timeout`: positive finite seconds from the
-  local CLI launch, or `None` to inherit `ClientConfig.default_timeout`. Expiry kills and reaps only the local CLI and
+  local CLI launch, or `None` to inherit `ClientConfig.default_timeout`. Expiry kills and reaps the local CLI and
   raises `DockerTimeout`; it doesn't stop services, undo pulled or pushed layers, or change post-exit pipe draining.
+  On POSIX the kill takes the CLI's whole process group, so the `docker-compose` plugin dies with it. Terminal-facing
+  launches (`tty=True`, the `run`/`execute` default, or an inherited terminal descriptor) and Windows kill only the
+  `docker` process, and the plugin can outlive it there.
   A returned stream's deadline advances while nothing consumes it.
 - `build()`, `pull()`, `push()`, and `watch()` validate `timeout` before the `[]` no-op: an invalid value raises `ValueError`
   for `[]` and `None` selections alike, and a valid one with `[]` returns `None` without a launch. `pull()` validates
@@ -79,8 +83,9 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   keyword-only `timeout`, validated before lookup, the `[]`/`{}` no-ops and the dry-run check. `images`, `volumes`, `ps` and the
   `config*` queries take none and use the client default. `wait()` is unbounded without a deadline; expiry leaves containers
   running.
-- Expiry kills and reaps the local `docker` CLI only. Live checks of `attach()` and `logs(follow=True)` found the
-  `docker-compose` plugin child still running afterwards; don't claim plugin cleanup in docstrings or tests.
+- `attach()` always runs with `tty=True`, so its expiry kills and reaps the local `docker` CLI only; live checks found
+  the `docker-compose` plugin child still running afterwards, as `logs(follow=True)` did before group termination.
+  Claim plugin cleanup only for POSIX launches that face no terminal, never for terminal-facing launches or Windows.
 - Dry-run rejections and the `[]` rules in Service Selection are unchanged by timeouts. `watch()` keeps its explicit
   `--prune=false` or `--prune=true` under a deadline.
 - Local budgets aren't Docker option values: `down()`, `restart()`, and `stop()` `timeout` is the container shutdown
@@ -129,6 +134,7 @@ Paths below are relative to `tests/pywhales/`; collection/runtime cautions are i
 - `test_compose_build_enum_json.py`: nested JSON, enum/string outputs, independent defaults, raw config.
 - `test_exceptions.py`: strict-workload marks on non-detached `run`/`execute`, with detached classification controls; shared captured and stream exception paths are covered in `test_utils.py` too.
 - `components/test_compose.py`: top layouts/raw/no-op/error cases, logs/events ownership, legacy integration.
+- `components/test_gpu_compose_preflight.py`: canned-CLI `require_gpu` launches, service names in the `config` argv, dependency selection, scale-0 skipping, ordering and unchanged argv for `up` and `run`, without Docker.
 - `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event/pull/push/watch
   deadline execution, forwarding, and empty-selection validation.
 - Static contracts: `test_compose_type_contracts.py`, `test_type_contracts.py` (`_check_owned_stream_contracts`),

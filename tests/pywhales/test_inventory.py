@@ -1,9 +1,13 @@
 import json
+import os
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import JsonValue
 
 from pywhales._inventory_dispatch import make_resource
 from pywhales._inventory_staging import stage_resources
@@ -228,6 +232,85 @@ def test_late_oversized_reference_fails_before_any_inspection() -> None:
     ):
         capture_inventory([request("context", config, "a", "x" * 100)], policy=policy)
     run.assert_not_called()
+
+
+def run_contexts(args: Sequence[str]) -> str:
+    return json.dumps([{"Name": reference} for reference in args[3:]])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX filesystem encoding")
+@pytest.mark.parametrize("max_references", [1, 7, 64])
+def test_planning_encodes_each_reference_and_environment_once(
+    max_references: int,
+) -> None:
+    config = ClientConfig(
+        _client_call_with_path=["mock-docker"],
+        environment={"PYWHALES_TEST_COUNT": "sentinel"},
+    )
+    references = [f"reference-{index:02d}" for index in range(64)]
+    policy = InspectionPolicy(
+        max_references=max_references, max_argv_bytes=100000, max_response_bytes=100000
+    )
+    encoded: Counter[str] = Counter()
+    fsencode = os.fsencode
+
+    def counting_fsencode(value: str) -> bytes:
+        encoded[value] += 1
+        return fsencode(value)
+
+    with (
+        patch("pywhales._launch_limits.os.fsencode", side_effect=counting_fsencode),
+        patch(
+            "pywhales.components.context.cli_wrapper.run", side_effect=run_contexts
+        ) as run,
+    ):
+        snapshot = capture_inventory(
+            [request("context", config, *references)], policy=policy
+        )
+    assert [record.id for record in snapshot.records] == references
+    assert run.call_count == -(-len(references) // max_references)
+    assert {reference: encoded[reference] for reference in references} == (
+        dict.fromkeys(references, 1)
+    )
+    assert encoded["PYWHALES_TEST_COUNT=sentinel"] == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX native limits")
+def test_capture_reads_native_limits_once_per_planning_call() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    other = ClientConfig(_client_call_with_path=["mock-docker"])
+    with (
+        patch("pywhales._launch_limits.sys.platform", "linux"),
+        patch(
+            "pywhales._launch_limits.os.sysconf",
+            side_effect=lambda name: 100000 if name == "SC_ARG_MAX" else 4096,
+        ) as sysconf,
+        patch("pywhales.components.context.cli_wrapper.run", side_effect=run_contexts),
+    ):
+        capture_inventory(
+            [request("context", config, "a", "b", "c"), request("context", other, "d")],
+            policy=POLICY,
+        )
+        assert [call.args for call in sysconf.call_args_list] == [
+            ("SC_ARG_MAX",),
+            ("SC_PAGESIZE",),
+        ]
+        capture_inventory([request("context", config, "a")], policy=POLICY)
+    assert sysconf.call_count == 4
+
+
+def test_capture_does_not_copy_the_handles_it_discards() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    response = json.dumps([{"Name": "same", "Metadata": {"value": 1}}] * 2)
+    with (
+        patch("pywhales._inventory_staging.deepcopy", side_effect=AssertionError),
+        patch("pywhales.components.context.cli_wrapper.run", return_value=response),
+    ):
+        snapshot = capture_inventory(
+            [request("context", config, "same", "same")], policy=POLICY
+        )
+    first, second = (record.payload for record in snapshot.records)
+    assert first == second and first is not second
 
 
 def test_empty_and_invalid_inputs_never_look_up_executable() -> None:
@@ -642,6 +725,36 @@ def test_strict_manifest_inspect_rejects_missing_reference_without_launch() -> N
     with run_manifests(MANIFEST_RESPONSE) as run, pytest.raises(ParsingError):
         _inspect_manifest_list_snapshot(config, "")
     run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",
+        "[]",
+        "not json",
+        '{"schemaVersion": "2"}',
+        '{"name": "other", "schemaVersion": 2}',
+    ],
+    ids=["empty", "non-object", "invalid-json", "invalid-model", "other-name"],
+)
+def test_strict_manifest_inspect_rejects_unusable_output(output: str) -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(output), pytest.raises(ParsingError):
+        _inspect_manifest_list_snapshot(config, "ref")
+
+
+def test_strict_manifest_inspect_reuses_one_strict_adapter(
+    adapter_constructions: list[Any],
+) -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(*[MANIFEST_RESPONSE] * 3):
+        for reference in ("a", "b", "c"):
+            assert _inspect_manifest_list_snapshot(config, reference).name == reference
+    with run_manifests('{"schemaVersion": "2"}'), pytest.raises(ParsingError):
+        _inspect_manifest_list_snapshot(config, "d")
+
+    assert adapter_constructions.count(dict[str, JsonValue]) == 1
 
 
 def test_public_manifest_inspect_stays_lenient() -> None:

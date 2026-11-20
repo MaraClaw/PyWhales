@@ -15,6 +15,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from datetime import datetime, timedelta
@@ -26,12 +27,14 @@ from typing import (
     Any,
     Literal,
     Self,
+    cast,
     overload,
     override,
 )
 
 import pydantic
 
+from pywhales._capture_pipes import CapturePipes
 from pywhales._environment import finalize_environment, resolve_environment
 from pywhales._execution_policy import (
     DEFAULT_BUFFER,
@@ -39,6 +42,14 @@ from pywhales._execution_policy import (
     get_execution_policy,
 )
 from pywhales._process_stream import ProcessStream as ProcessStream
+from pywhales._readiness import (
+    isolates,
+    kill_launch,
+    reap_launch,
+    track,
+    unwind_launch,
+    watch_exit,
+)
 from pywhales._reclaim import watch
 from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
@@ -49,9 +60,50 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 LOGGER = logging.getLogger(__name__)
 
+_ADAPTERS: dict[Any, pydantic.TypeAdapter[Any]] = {}
+_ADAPTERS_LOCK = threading.RLock()
+
+
+def type_adapter[T](type_: type[T]) -> pydantic.TypeAdapter[T]:
+    """Return the shared Pydantic adapter for a type, building it on first use.
+
+    Building an adapter regenerates the type's core schema and validator, which
+    costs far more than a validation, so each adapter is built once and kept.
+    Construction is lazy, never at import, and serialized by a lock with a
+    second lookup inside it, so concurrent first use builds exactly one adapter.
+
+    Types are keyed by typing's own equality and hash, so two separately
+    evaluated ``list[int]`` objects share an adapter while ``list[int]`` and
+    ``list[str]`` do not. Pass per-call options such as ``strict`` to the
+    validation method, not to the adapter, because every caller of an equal type
+    shares it. Adapters, and the types they hold, live for the process.
+
+    Args:
+        type_: Target model or type accepted by Pydantic's TypeAdapter.
+
+    Returns:
+        The adapter shared by every caller of an equal type. A type that can't be
+        hashed, such as an ``Annotated`` form with unhashable metadata, gets a
+        new uncached adapter on each call.
+    """
+    try:
+        adapter = _ADAPTERS.get(type_)
+    except TypeError:
+        return pydantic.TypeAdapter(type_)
+    if adapter is None:
+        with _ADAPTERS_LOCK:
+            adapter = _ADAPTERS.get(type_)
+            if adapter is None:
+                adapter = pydantic.TypeAdapter(type_)
+                _ADAPTERS[type_] = adapter
+    return cast("pydantic.TypeAdapter[T]", adapter)
+
 
 def custom_parse_object_as[T](type_: type[T], obj: object) -> T:
     """Parse a Python value using Pydantic's adapter for the requested type.
+
+    The adapter comes from ``type_adapter``, so repeated calls for an equal type
+    reuse one adapter.
 
     Args:
         type_: Target model or type accepted by Pydantic's TypeAdapter.
@@ -63,7 +115,7 @@ def custom_parse_object_as[T](type_: type[T], obj: object) -> T:
     Raises:
         pydantic.ValidationError: If the input cannot satisfy the target type.
     """
-    return pydantic.TypeAdapter(type_).validate_python(obj)
+    return type_adapter(type_).validate_python(obj)
 
 
 def title_if_necessary(string: str) -> str:
@@ -190,6 +242,111 @@ def _log_command(
         LOGGER.debug("Running command (%d arguments; details withheld)", len(args))
 
 
+def _run_isolated(
+    args: list[str],
+    env: Mapping[str, str],
+    pass_fds: Sequence[int],
+    input: bytes | Iterable[bytes] | None,
+    deadline: float | None,
+    telemetry: ExecutionTelemetry,
+    *,
+    capture_stdout: bool,
+    capture_stderr: bool,
+    raw_diagnostics: bool,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run an unobserved launch in its own process group until it ends.
+
+    Output is drained like ``Popen.communicate()``, but the leader is reaped
+    only once the call stops waiting, so each stop still reaches the group: a
+    deadline expiring while the leader runs, pipes that a descendant still
+    holds one second after the deadline, or any exception, KeyboardInterrupt
+    included, SIGKILLs it. A launch ending with EOF on every pipe signals nothing.
+
+    Args:
+        args: Complete stringified command.
+        env: Effective child environment.
+        pass_fds: Descriptors kept open in the child.
+        input: Bytes or byte chunks written by a stdin pump; ``None`` inherits
+            stdin.
+        deadline: Monotonic deadline, or ``None`` to wait without one.
+        telemetry: Measurements for this launch.
+        capture_stdout: Pipe stdout instead of inheriting it.
+        capture_stderr: Pipe stderr instead of inheriting it.
+        raw_diagnostics: Permission to expose values in a timeout's message.
+
+    Returns:
+        The reaped leader's status and captured output; an uncaptured stream is
+        ``None``.
+
+    Raises:
+        DockerTimeout: The leader still ran when the deadline expired.
+    """
+    process = Popen(
+        args,
+        stdin=PIPE if input is not None else None,
+        stdout=PIPE if capture_stdout else None,
+        stderr=PIPE if capture_stderr else None,
+        env=env,
+        pass_fds=pass_fds,
+        start_new_session=True,
+    )
+    track(process, True)
+    stdout = None if process.stdout is None else bytearray()
+    stderr = None if process.stderr is None else bytearray()
+    output = {
+        pipe.fileno(): buffer
+        for pipe, buffer in ((process.stdout, stdout), (process.stderr, stderr))
+        if pipe is not None and buffer is not None
+    }
+    pipes = [pipe for pipe in (process.stdout, process.stderr) if pipe is not None]
+    timed_out = False
+    try:
+        with (
+            watch_exit(process) as exited,
+            CapturePipes(pipes, exited) as ready,
+            StdinPump(process, input, telemetry),
+        ):
+            limit, grace = deadline, False
+            while ready or not exited.is_set():
+                now = monotonic()
+                if limit is not None and now >= limit:
+                    if grace:
+                        kill_launch(process)
+                        break
+                    # Like communicate, collect what the launch flushes for a second.
+                    timed_out = not exited.is_set()
+                    if timed_out:
+                        kill_launch(process)
+                    limit, grace = now + 1, True
+                    continue
+                for fd, _ in ready.ready(None if limit is None else limit - now):
+                    if chunk := os.read(fd, 65536):
+                        output[fd].extend(chunk)
+                    else:
+                        ready.discard(fd)
+    finally:
+        for pipe in (process.stdin, *pipes):
+            if pipe is not None:
+                pipe.close()
+        telemetry.return_code = reap_launch(process)
+    completed = subprocess.CompletedProcess(
+        args,
+        process.returncode,
+        None if stdout is None else bytes(stdout),
+        None if stderr is None else bytes(stderr),
+    )
+    if timed_out:
+        telemetry.captured(completed.stdout, completed.stderr)
+        raise DockerTimeout(
+            args,
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+            raw_diagnostics=raw_diagnostics,
+        )
+    return completed
+
+
 @overload
 def run(
     args: Sequence[object],
@@ -240,8 +397,17 @@ def run(
     Snapshot the originating execution policy before converting arguments to
     strings. A timeout uses a monotonic deadline established immediately before
     launch, kills and reaps a still-running local CLI on expiry, and retains
-    captured details on DockerTimeout. It does not guarantee cancellation of
-    daemon-side work. Without a selected timeout, wait without a deadline.
+    captured details on DockerTimeout. A CLI that exits before its deadline is
+    never a timeout. Neither path guarantees cancellation of daemon-side work.
+    Without a selected timeout, wait without a deadline.
+
+    On POSIX, a launch that is not ``tty`` and inherits no terminal on
+    descriptors 0, 1 or 2 runs in its own process group. Every stop the call
+    makes, including an expired deadline, output pipes a descendant still holds
+    one second after the deadline, and an exception such as KeyboardInterrupt
+    raised while waiting, SIGKILLs the whole group, so plugins and helpers the
+    CLI started die with it. Terminal-facing launches and Windows keep the
+    leader-only kill, which can leave such descendants running.
 
     Inside ``observation()`` the call always uses bounded capture, which sends
     input only when an enclosing scope sets ``max_total_stdin_bytes``. Output is
@@ -323,6 +489,8 @@ def run(
     else:
         stderr_dest = None
     _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
+    inherited = ((0, input), (1, stdout_dest), (2, stderr_dest))
+    isolated = isolates(*(fd for fd, dest in inherited if dest is None), tty=tty)
     with ExecutionTelemetry(policy.telemetry_observer, "captured") as telemetry:
         if observation is not None:
             if (
@@ -346,6 +514,19 @@ def run(
                 observation,
                 telemetry=telemetry,
                 input=input,
+            )
+        elif isolated:
+            telemetry.start()
+            completed_process = _run_isolated(
+                args,
+                subprocess_env,
+                pass_fds,
+                input,
+                None if timeout is None else monotonic() + timeout,
+                telemetry,
+                capture_stdout=capture_stdout,
+                capture_stderr=capture_stderr,
+                raw_diagnostics=policy.raw_diagnostics,
             )
         elif timeout is None and input is None:
             telemetry.start()
@@ -386,7 +567,7 @@ def run(
                                 continue
                             timed_out = process.poll() is None
                             if timed_out:
-                                process.kill()
+                                kill_launch(process)
                             try:
                                 stdout, stderr = process.communicate(timeout=1)
                             except subprocess.TimeoutExpired as captured:
@@ -717,6 +898,7 @@ def _start_process(
             subprocess_env,
             raw_diagnostics=policy.raw_diagnostics,
         )
+        isolated = isolates(*(() if pipe_stdin else (0,)))
         with nullcontext() if observation is None else native_argv_limit(args):
             process = Popen(
                 args,
@@ -725,7 +907,9 @@ def _start_process(
                 stderr=PIPE,
                 env=subprocess_env,
                 pass_fds=pass_fds,
+                start_new_session=isolated,
             )
+        track(process, isolated)
         return ProcessStream(
             process,
             args,
@@ -739,8 +923,6 @@ def _start_process(
         )
     except BaseException as error:
         if process is not None:
-            from pywhales._readiness import unwind_launch
-
             unwind_launch(process, None, [])
         if reservation is not None:
             reservation.release()
@@ -764,7 +946,10 @@ def stream_stdout_and_stderr(
     for records and terminal status. Deadlines continue while consumption pauses
     or never begins. Exhaustion reaps the child; early exit requires a context
     manager or close(), because a bare break does not clean up. Closure or
-    timeout kills only the local CLI, not daemon-managed resources.
+    timeout kills the local CLI, not daemon-managed resources. On POSIX, unless
+    inherited stdin is a terminal, the CLI runs in its own process group and
+    every stop SIGKILLs the group, plugins included; otherwise, and on Windows,
+    only the CLI process is killed.
 
     Started inside ``observation()``, the launch checks cancellation and the
     argv and environment limits before ``Popen``, and the stream keeps that

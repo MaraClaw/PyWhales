@@ -9,7 +9,15 @@ from time import monotonic
 from pywhales._capture_pipes import CapturePipes
 from pywhales._execution_policy import ExecutionPolicy
 from pywhales._observation import ObservationState, check_observation
-from pywhales._readiness import CANCEL_CHECK, watch_exit
+from pywhales._readiness import (
+    CANCEL_CHECK,
+    await_exit,
+    isolates,
+    kill_launch,
+    reap_launch,
+    track,
+    watch_exit,
+)
 from pywhales._scoped_launch import check_scoped_launch, native_argv_limit
 from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import (
@@ -27,24 +35,34 @@ def _launch(
     *,
     piped_stdin: bool,
 ) -> subprocess.Popen[bytes]:
-    """Start the child with piped output, and piped stdin only for supplied input."""
+    """Start the child with piped output, and piped stdin only for supplied input.
+
+    The child gets its own process group unless the stdin it inherits is a
+    terminal, so stops reach the plugins it spawns.
+    """
+    isolated = isolates(*(() if piped_stdin else (0,)))
     with native_argv_limit(args):
         if piped_stdin:
-            return subprocess.Popen(
+            process = subprocess.Popen(
                 args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
                 pass_fds=pass_fds,
+                start_new_session=isolated,
             )
-        return subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            pass_fds=pass_fds,
-        )
+        else:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                pass_fds=pass_fds,
+                start_new_session=isolated,
+            )
+    track(process, isolated)
+    return process
 
 
 def bounded_capture(
@@ -67,6 +85,10 @@ def bounded_capture(
     allowed by and charged to the scope's aggregate I/O accounts in one locked
     step, so concurrent launches never overspend them; a source limit wins a tie
     with ``total_io`` on the same read.
+
+    The child's exit is detected without reaping it. Any stop before both pipes
+    reach EOF, even after the child exited, SIGKILLs its process group when it
+    has one, so plugins holding the pipes die too; a natural end signals nothing.
 
     Args:
         args: Complete stringified command.
@@ -106,6 +128,7 @@ def bounded_capture(
     stdout = bytearray()
     stderr = bytearray()
     read_bytes = {process.stdout.fileno(): 0, process.stderr.fileno(): 0}
+    completed = False
     try:
         buffers = {process.stdout.fileno(): stdout, process.stderr.fileno(): stderr}
         with (
@@ -127,11 +150,10 @@ def bounded_capture(
                         observation.deadline is None or deadline < observation.deadline
                     )
                 ):
-                    process.kill()
-                    process.wait()
+                    kill_launch(process)
                     raise DockerTimeout(
                         args,
-                        process.returncode,
+                        await_exit(process),
                         bytes(stdout),
                         bytes(stderr),
                         raw_diagnostics=policy.raw_diagnostics,
@@ -176,18 +198,19 @@ def bounded_capture(
                         raise overflow
                     else:
                         buffers[fd].extend(chunk)
+        completed = True
         check_observation(observation)
         return subprocess.CompletedProcess(
-            args, process.wait(), bytes(stdout), bytes(stderr)
+            args, reap_launch(process), bytes(stdout), bytes(stderr)
         )
     finally:
-        if process.poll() is None:
-            process.kill()
+        if not completed:
+            kill_launch(process)
         if process.stdin is not None:
             process.stdin.close()
         process.stdout.close()
         process.stderr.close()
-        process.wait()
+        reap_launch(process)
         reservation.release()
         telemetry.return_code = process.returncode
         telemetry.stdout_bytes, telemetry.stderr_bytes = read_bytes.values()

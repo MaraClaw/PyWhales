@@ -1,6 +1,8 @@
 """Evaluate one captured service without retaining inspection payloads."""
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from pywhales.client_config import ParsingError
@@ -14,6 +16,30 @@ from pywhales.convergence._wire import (
 )
 from pywhales.enums import TaskState
 from pywhales.utils import run
+
+# Task states after ``running``; each is terminal as an observed state.
+_SETTLED_STATES = frozenset(
+    {"complete", "shutdown", "failed", "rejected", "remove", "orphaned"}
+)
+_settled_tasks: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "settled_tasks", default=None
+)
+
+
+@contextmanager
+def task_history() -> Generator[None]:
+    """Remember settled task rows across the cycles of one wait.
+
+    While entered, ``check_service`` records, per service ID, listed task IDs it
+    can never count again and inspects only the other listed IDs. Membership still
+    comes from each fresh listing. Only IDs are kept, never inspection payloads,
+    and everything is forgotten on exit, so nothing carries over between waits.
+    """
+    token = _settled_tasks.set({})
+    try:
+        yield
+    finally:
+        _settled_tasks.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +107,11 @@ def check_service(
 ) -> ServiceObservation | Failure:
     """Check a captured generation, counting blockers only on desired-running tasks.
 
+    Inside ``task_history``, a listed task already seen settled during that wait
+    is not inspected again: a non-job row whose desired and observed states are
+    both past ``running``, or a job row from another job iteration. Every other
+    listed row is inspected and validated on each call.
+
     Args:
         target: The captured service generation.
         snapshot: An inspection of ``target.service_id`` the caller already fetched.
@@ -125,6 +156,9 @@ def check_service(
     ).splitlines()
     if any(not task_id for task_id in ids) or len(ids) != len(set(ids)):
         raise ParsingError("Invalid task listing")
+    history = _settled_tasks.get()
+    settled = set() if history is None else history.setdefault(target.service_id, set())
+    settled.intersection_update(ids)
     slots: set[int] = set()
     seen_slots: set[int] = set()
     approved = set(target.approved_node_ids or ())
@@ -132,7 +166,8 @@ def check_service(
     seen_nodes: set[str] = set()
     duplicate_nodes = missing_assignment = outside_nodes = False
     duplicate = stale = non_running = invalid = False
-    for task in inspect_tasks(target.client_config, ids):
+    pending = [task_id for task_id in ids if task_id not in settled]
+    for task in inspect_tasks(target.client_config, pending):
         if task.service_id != target.service_id:
             raise ParsingError("Task service identity mismatch")
         if is_job:
@@ -140,6 +175,7 @@ def check_service(
                 task.job_iteration is None
                 or task.job_iteration.index != target.job_iteration
             ):
+                settled.add(task.id)
                 continue
             if (
                 task.status.state in {"failed", "rejected"}
@@ -159,6 +195,8 @@ def check_service(
         if task.desired not in TaskState or task.status.state not in TaskState:
             raise ParsingError("Unknown task state")
         if task.desired != "running":
+            if task.desired in _SETTLED_STATES and task.status.state in _SETTLED_STATES:
+                settled.add(task.id)
             continue
         non_running |= task.status.state != "running"
         if target.mode == "replicated" and task.slot is not None:

@@ -1,11 +1,14 @@
-"""Mocked Docker resources for documentation provider lifecycle regressions."""
+"""Fixtures for documentation provider mocks and Pydantic adapter counting."""
 
 from collections.abc import Callable, Sequence
+from typing import Any
 from unittest.mock import MagicMock
 
+import pydantic
 import pytest
 from pytest_mock import MockerFixture
 
+import pywhales.utils
 from docs import docs_utils
 from pywhales import Builder, Container, Volume
 from pywhales.components.system.models import SystemInfo
@@ -84,3 +87,32 @@ def daemon(mocker: MockerFixture) -> MagicMock:
     mocker.patch.object(docs_utils, "_example_names", side_effect=names)
     mocker.patch("subprocess.run", side_effect=AssertionError("external command"))
     return client
+
+
+@pytest.fixture
+def adapter_constructions(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Record Pydantic adapter constructions against an empty shared cache.
+
+    Replaces ``pydantic.TypeAdapter`` with a function that appends each requested
+    type to the returned list before building the real adapter, and swaps in an
+    empty ``pywhales.utils`` adapter cache so first use is observable. It forwards
+    only the type, and adapters built through a ``TypeAdapter`` name imported from
+    Pydantic before the patch aren't counted. pytest restores both replacements
+    after the test.
+
+    Args:
+        monkeypatch: Installs the counting adapter class and the empty cache.
+
+    Returns:
+        The constructed types in construction order, unhashable ones included.
+    """
+    constructed: list[Any] = []
+    build = pydantic.TypeAdapter
+
+    def counting(type_: type[Any]) -> pydantic.TypeAdapter[Any]:
+        constructed.append(type_)
+        return build(type_)
+
+    monkeypatch.setattr(pydantic, "TypeAdapter", counting)
+    monkeypatch.setattr(pywhales.utils, "_ADAPTERS", {})
+    return constructed

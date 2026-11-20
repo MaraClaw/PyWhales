@@ -28,7 +28,7 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.3.1.
+The guidance describes source APIs for project version 1.3.2.
 An installed version string alone isn't proof of support. Check Docker CLI 29
 additions (the checkpoint group, raw-text flags, Buildx history and policy,
 Compose stats and wait), inherited
@@ -156,7 +156,11 @@ print(signature(DockerClient).parameters["compose_ansi"])  # defaults to None
 print(signature(docker.system.gpu_support, annotation_format=Format.STRING))
 print(signature(docker.container.create).parameters["require_gpu"])  # bool = False
 print(signature(docker.container.run).parameters["require_gpu"])  # bool = False
+print(signature(docker.service.create).parameters["require_gpu"])  # bool = False
+print(signature(docker.compose.up).parameters["require_gpu"])  # bool = False
+print(signature(docker.compose.run).parameters["require_gpu"])  # bool = False
 print([f.name for f in fields(GpuSupport)])  # os_type ... cdi_devices
+print(hasattr(GpuSupport, "gpu_count"), hasattr(GpuSupport, "check"))  # True True
 print(issubclass(GpuUnavailable, DockerException))  # True
 print(issubclass(GpuSupportError, DockerException))  # False: a preflight refusal
 
@@ -352,12 +356,17 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   positive exact integer seconds only, require explicit ceiling approval and
   the conditional `health_start_interval` runtime control, and keep `CONTROLS`
   unchanged. See [Startup health intervals and profiles](containers-and-output.md#startup-health-interval-and-approved-profiles).
-- `docker.system.gpu_support()` returning `GpuSupport`, and keyword-only
+- `docker.system.gpu_support()` returning `GpuSupport` with the `whole_gpus`,
+  `gpu_uuids`, `mig_devices` and `gpu_count` properties, and keyword-only
   `require_gpu: bool = False` on container `create` and the `run`
-  implementation (run overloads may show only the `RunArgs` bundle). They
-  are new in 1.3.1; check the signature rather than relying on the version.
-  The probe is one `system info` launch against the selected daemon; it doesn't
-  prove a GPU workload will run. See
+  implementation (run overloads may show only the `RunArgs` bundle), Swarm
+  `service.create`, and Compose `up` and `run`. `gpu_support()` and the container
+  flag are new in 1.3.1; the properties, the count check and the service and
+  Compose flags are new in 1.3.2. Check the signature rather than relying on the
+  version. The container probe is one
+  `system info` launch against the selected daemon, the service probe lists the
+  Swarm's nodes, and the Compose probe adds `compose config` plus `system info`.
+  None of them proves a GPU workload will run. See
   [GPUs, vGPU and CDI devices](containers-and-output.md#gpus-vgpu-and-cdi-devices).
 - `hasattr(docker, "checkpoint")` true and `hasattr(docker, "trust")` false. The
   group's presence doesn't prove the daemon is experimental with CRIU, and

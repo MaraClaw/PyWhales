@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.3.2
+
+### New Features
+
+- `GpuSupport` classifies the discovered GPU CDI names: `whole_gpus` (index
+  names such as `nvidia.com/gpu=0`), `gpu_uuids` (`GPU-` values),
+  `mig_devices` (`0:1` and `MIG-` values) and `gpu_count`, the number of whole
+  GPUs by index, or `None` when the daemon doesn't report CDI devices.
+- `pywhales.components.system.gpu` adds `GpuRequest` with `GpuRequest.parse()`,
+  which reads a `--gpus` value with Docker CLI semantics,
+  `GpuSupport.check_requests()`, `compose_gpu_requests()`,
+  `generic_resource_requests()` and `check_generic_resources()`.
+- Swarm `service.create()` accepts keyword-only `require_gpu=True`. After
+  argument validation it lists the selected manager's nodes (`node ls` plus one
+  batched `node inspect`), outside `timeout`, and raises `GpuSupportError` with
+  reason `no_node_capacity` unless one ready, active node advertises every
+  generic resource request. Requests aren't summed across nodes; placement
+  constraints and capacity claimed by running tasks are ignored. Without a
+  nonzero `kind=<integer>` request it raises `ValueError` before any launch.
+- Compose `up()` and `run()` accept keyword-only `require_gpu=True`. Just before
+  the launch, it renders `compose config` for the selected services and checks
+  their `gpus`, GPU device reservations and CDI device mappings, plus those of
+  their dependencies unless `dependencies=False`, against the daemon with one
+  `docker system info` launch. Services scaled to 0 are skipped, except the
+  `run()` target. Without a GPU request it raises `ValueError` before the probe;
+  `up(services=[])` stays a no-op. Default calls never probe.
+
+### Behavior Changes And Fixes
+
+- Container `create()` and `run()` with `require_gpu=True` now also check a
+  `gpus` count or device selection against the discovered CDI names and raise
+  `GpuSupportError` with the new reason `gpu_device_missing`. Docker's CDI path
+  maps `--gpus N` to indexes `0` through `N-1`. A name is checked only when the
+  daemon reports names of the same form; MIG names on the `--gpus` path are never
+  checked, and a host that reports no CDI names passes. Docker falls back to the
+  NVIDIA runtime hook when CDI injection fails, so a refusal assumes the host's
+  CDI specification is current.
+- The `GpuSupportError` message now names the selected Docker daemon or Swarm.
+
+### Documentation
+
+- Extended the GPUs user guide with device classification, count and selection
+  checks, and the Swarm service and Compose preflights; listed the new reasons in
+  the exceptions guide and linked `require_gpu` from the generic resources guide.
+  Updated contributor guides and the consumer skill.
+
 ## 1.3.1
 
 ### New Features

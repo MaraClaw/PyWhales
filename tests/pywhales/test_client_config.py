@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import override
+from typing import Any, override
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +17,7 @@ from pytest_mock import MockerFixture
 
 from pywhales import Config, DockerClient, Node, Secret, Service, Volume
 from pywhales._execution_policy import get_execution_policy
+from pywhales._types import JsonObject
 from pywhales.client_config import (
     ClientConfig,
     ParsingError,
@@ -701,3 +702,41 @@ def test_bulk_reload_publishes_unpinned_snapshots_and_failure_keeps_pins() -> No
         launches = len(cli.launches)
         assert all(volume.driver for volume in pinned)
         assert len(cli.launches) == launches + 2
+
+
+valid_volume_message = {
+    "CreatedAt": "2020-10-08T18:32:55Z",
+    "Driver": "local",
+    "Labels": None,
+    "Mountpoint": "/var/lib/docker/volumes/volume/_data",
+    "Name": "volume",
+    "Options": None,
+    "Scope": "local",
+}
+
+
+def test_batch_inspect_reuses_one_adapter_across_batches(
+    adapter_constructions: list[Any],
+) -> None:
+    resource = Volume(ClientConfig(), "volume", is_immutable_id=True)
+    payload = json.dumps([valid_volume_message])
+
+    for _ in range(3):
+        parsed = resource._parse_inspect_results(payload, ["volume"])
+        assert [item.name for item in parsed] == ["volume"]
+
+    assert adapter_constructions.count(list[JsonObject]) == 1
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_batch_inspect_failure_after_adapter_reuse_chains_only_in_raw_mode(
+    raw: bool, adapter_constructions: list[Any]
+) -> None:
+    resource = Volume(ClientConfig(raw_diagnostics=raw), "volume", is_immutable_id=True)
+    resource._parse_inspect_results(json.dumps([valid_volume_message]), ["volume"])
+
+    with pytest.raises(ParsingError, match="Invalid batch inspect JSON") as raised:
+        resource._parse_inspect_results("not json", ["volume"])
+
+    assert (raised.value.__cause__ is not None) is raw
+    assert adapter_constructions.count(list[JsonObject]) == 1

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, NotRequired, TypedDict
 
 import pytest
+from pydantic import JsonValue
 
 from pywhales import DockerClient
 from pywhales._observation import ObservationState
@@ -35,8 +36,10 @@ from pywhales.convergence import (
     capture_service,
     wait,
 )
+from pywhales.convergence import _wire as wire_types
 from pywhales.convergence._service import ServiceObservation
 from pywhales.inventory import InspectionPolicy
+from pywhales.telemetry import LaunchRecord, RefusalRecord, TelemetryRecord
 
 
 @pytest.fixture
@@ -109,10 +112,16 @@ elif args[:2] == ["service", "ps"]:
 elif args[:3] == ["inspect", "--type", "task"]:
     overrides = data.get("task_inspect_overrides", {})
     vanished = data.get("vanished_tasks", [])
+    mode = "batch" if len(args) > 4 else "single"
+    errors = [data.get("task_errors", {}).get(identity, {}).get(mode) for identity in args[3:]]
     found = []
-    for identity in args[3:]:
-        found += [overrides[identity]] if identity in overrides else [item for item in tasks if item["ID"] == identity and identity not in vanished]
+    for identity, error in zip(args[3:], errors):
+        if error is None:
+            found += [overrides[identity]] if identity in overrides else [item for item in tasks if item["ID"] == identity and identity not in vanished]
     print(json.dumps(found))
+    if any(errors):
+        sys.stderr.write("".join(error for error in errors if error))
+        sys.exit(1)
     if len(args) > 4 and len(found) < len(args) - 3:
         sys.stderr.write("Error: No such task\\n")
         sys.exit(1)
@@ -381,8 +390,16 @@ def test_cancellation_reaps_hung_fake_cli(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         if "ps" in args:
             launched.set()
@@ -431,8 +448,16 @@ def test_deadline_reaps_hung_child(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -768,9 +793,17 @@ def test_partial_cycles_never_replace_complete_detail_and_hung_children_are_reap
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         nonlocal matching
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         if args[-len(command) :] == command:
             matching += 1
@@ -1294,8 +1327,16 @@ def test_global_partial_recheck_retains_previous_complete_cycle_and_reaps_child(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -1444,8 +1485,16 @@ def track_processes(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -4318,6 +4367,10 @@ def broken_job(identity: str) -> dict[str, Any]:
     return current
 
 
+def pruned(identity: str) -> str:
+    return f"Error response from daemon: task {identity} not found\n"
+
+
 SWARM_FALLBACKS = [
     pytest.param(
         [failed_job("a"), broken_job("b"), job_task("c", 1, 1)],
@@ -4369,6 +4422,27 @@ SWARM_FALLBACKS = [
         1,
         id="later-chunk-never-launches",
     ),
+    pytest.param(
+        [job_task("a", 0, 1), failed_job("b")],
+        {"task_errors": {"a": {"single": pruned("a"), "batch": pruned("a")}}},
+        4,
+        3,
+        id="pruned-then-failed",
+    ),
+    pytest.param(
+        [job_task("a", 0, 1), failed_job("b")],
+        {
+            "task_errors": {
+                "a": {
+                    "single": "Error response from daemon: rpc error\n",
+                    "batch": pruned("a"),
+                }
+            }
+        },
+        4,
+        2,
+        id="batch-stderr-never-classified",
+    ),
 ]
 
 
@@ -4397,6 +4471,191 @@ def test_swarm_batch_failures_match_single_probes_in_listing_order(
         counts.append(len(launches(tmp_path, TASK)))
     assert shapes[0] == shapes[1]
     assert counts[1] == expected
+
+
+def task_row(identity: str, desired: str, observed: str) -> dict[str, Any]:
+    row = task(identity)
+    row["DesiredState"], row["Status"]["State"] = desired, observed
+    return row
+
+
+def add_task_data(path: Path, **extras: object) -> None:
+    data = json.loads((path / "data.json").read_text())
+    (path / "data.json").write_text(json.dumps({**data, **extras}))
+
+
+def inspections(path: Path, identities: Sequence[str]) -> dict[str, int]:
+    calls = launches(path, TASK)
+    return {
+        identity: sum(identity in call[len(TASK) :] for call in calls)
+        for identity in identities
+    }
+
+
+def wait_cycles(
+    target: ServiceTarget,
+    policy: InspectionPolicy,
+    cycles: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Outcome:
+    import pywhales._observation as observation_module
+    import pywhales.convergence._wait as wait_module
+
+    current = [100.0]
+
+    def sleep(seconds: float) -> None:
+        current[0] += seconds
+
+    clock = SimpleNamespace(monotonic=lambda: current[0], sleep=sleep)
+    monkeypatch.setattr(wait_module, "time", clock)
+    monkeypatch.setattr(observation_module, "time", clock)
+    return wait(target, policy=policy, timeout=cycles, poll_interval=1)
+
+
+@pytest.mark.parametrize(
+    "size,expected",
+    [
+        pytest.param(1, [["old-1"], ["old-0"], ["task-0"]], id="single"),
+        pytest.param(
+            2,
+            [["old-1", "old-0"], ["old-1"], ["old-0"], ["task-0"]],
+            id="batch",
+        ),
+    ],
+)
+def test_swarm_task_pruned_after_listing_is_skipped_for_the_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    size: int,
+    expected: list[list[str]],
+) -> None:
+    store(tmp_path, [service()], swarm_history(1, 2)[::-1])
+    target = capture(fake_cli, policy)
+    add_task_data(
+        tmp_path,
+        task_errors={"old-0": {"single": pruned("old-0"), "batch": pruned("old-0")}},
+    )
+    (tmp_path / "calls").unlink()
+    result = wait(target, policy=batched(policy, size), timeout=5, poll_interval=1)
+    assert result == Success()
+    assert launches(tmp_path, TASK) == [[*TASK, *ids] for ids in expected]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Error response from daemon: permission denied\n",
+        "Error response from daemon: task old-1 not found\n",
+        "Error response from daemon: task old-0 not found\npermission denied\n",
+        "Error response from daemon: task old-0 not found",
+        "Error: No such task: old-0\n",
+    ],
+)
+def test_swarm_unrelated_task_probe_failure_still_ends_the_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, error: str
+) -> None:
+    from pywhales.exceptions import DockerException
+
+    store(tmp_path, [service()], swarm_history(1, 2)[::-1])
+    target = capture(fake_cli, policy)
+    add_task_data(
+        tmp_path, task_errors={"old-0": {"single": error, "batch": pruned("old-0")}}
+    )
+    shapes: list[tuple[object, ...]] = []
+    for limit in (1, 2):
+        result = wait(target, policy=batched(policy, limit), timeout=5, poll_interval=1)
+        assert isinstance(result, Failure) and result.reason == "observation"
+        assert result.service_id == "service-a"
+        assert isinstance(result.cause, DockerException)
+        assert result.cause.stderr == error
+        shapes.append(outcome_shape(result))
+    assert shapes[0] == shapes[1]
+
+
+@pytest.mark.parametrize("size", [1, 3])
+def test_swarm_wait_inspects_settled_history_once_per_call(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+) -> None:
+    active = [
+        task_row("starting", "running", "starting"),
+        task_row("failing", "running", "failed"),
+        task_row("stopping", "shutdown", "running"),
+        task_row("preparing", "ready", "preparing"),
+    ]
+    settled = [
+        task_row(f"old-{state}", "shutdown", state)
+        for state in ("complete", "shutdown", "failed", "rejected", "remove")
+    ] + [task_row("removed", "remove", "orphaned")]
+    store(tmp_path, [service()], [*active, *settled])
+    target = capture(fake_cli, policy)
+    expected = {row["ID"]: 3 for row in active} | {row["ID"]: 1 for row in settled}
+    for _ in range(2):
+        (tmp_path / "calls").unlink()
+        result = wait_cycles(target, batched(policy, size), 3, monkeypatch)
+        assert result == Deadline(
+            DeadlineDetail(
+                1, missing_ready_slots=1, duplicate_slots=1, non_running_tasks=1
+            )
+        )
+        assert len(launches(tmp_path, ["service", "ps"])) == 3
+        assert inspections(tmp_path, list(expected)) == expected
+
+
+def test_swarm_history_reuse_follows_each_listing(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starting = task_row("starting", "running", "starting")
+    old = task_row("old", "shutdown", "shutdown")
+    fresh = task_row("fresh", "running", "starting")
+    flipped = task_row("flip", "shutdown", "failed")
+    store(tmp_path, [service()], [])
+    add_task_data(
+        tmp_path,
+        task_sequences={
+            "service-a": [
+                [starting, task_row("flip", "running", "failed"), old],
+                [starting, flipped, old],
+                [starting, flipped, fresh],
+                [starting, flipped, fresh],
+            ]
+        },
+    )
+    target = capture(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    assert isinstance(wait_cycles(target, policy, 4, monkeypatch), Deadline)
+    assert len(launches(tmp_path, ["service", "ps"])) == 4
+    assert inspections(tmp_path, ["starting", "flip", "old", "fresh"]) == {
+        "starting": 4,
+        "flip": 2,
+        "old": 1,
+        "fresh": 2,
+    }
+
+
+def test_swarm_job_rows_from_other_iterations_are_inspected_once(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = job_task("legacy", 0, 1)
+    del legacy["JobIteration"]
+    previous = [job_task("prev-a", 0, 1), job_task("prev-b", 1, 1, "failed"), legacy]
+    current = [job_task("cur-a", 0, 2, "running"), job_task("cur-b", 1, 2)]
+    store(tmp_path, [job_service(iteration=2)], [*previous, *current])
+    target = capture(fake_cli, policy)
+    (tmp_path / "calls").unlink()
+    assert isinstance(wait_cycles(target, policy, 3, monkeypatch), Deadline)
+    expected = {row["ID"]: 1 for row in previous} | {row["ID"]: 3 for row in current}
+    assert inspections(tmp_path, list(expected)) == expected
 
 
 def container_set(identities: Sequence[str]) -> dict[str, Any]:
@@ -4847,6 +5106,109 @@ def test_node_batching_fits_a_launch_attempt_budget_that_single_probes_exhaust(
     assert isinstance(singles.cause, ObservationLimitError)
 
 
+def long_nodes(count: int) -> list[str]:
+    return [f"node-{index}-{'n' * 40}" for index in range(count)]
+
+
+def observed_client(path: Path, records: list[TelemetryRecord]) -> DockerClient:
+    return DockerClient(
+        client_call=[sys.executable, str(path / "docker.py")],
+        telemetry_observer=records.append,
+    )
+
+
+def node_argv(client: DockerClient, names: Sequence[str]) -> int:
+    from pywhales._launch_limits import argv_size
+
+    docker = [str(argument) for argument in client.client_config.docker_cmd]
+    return argv_size([*docker, *NODE, *names])
+
+
+@pytest.mark.parametrize(
+    "size,fit,expected",
+    [
+        pytest.param(4, 3, [(0, 3), (3, 6)], id="argv-bytes"),
+        pytest.param(2, 6, [(0, 2), (2, 4), (4, 6)], id="max-references"),
+    ],
+)
+def test_node_chunks_split_to_fit_argv_bytes_without_single_probes(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    size: int,
+    fit: int,
+    expected: list[tuple[int, int]],
+) -> None:
+    names = long_nodes(6)
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    tight = batched(policy, size, max_argv_bytes=node_argv(client, names[:fit]))
+    target = capture_nodes(client, tuple(names), policy=tight, timeout=5)
+    assert isinstance(target, NodeTarget)
+    assert wait(target, policy=tight, timeout=5, poll_interval=0.01) == Success()
+    chunks = [[*NODE, *names[start:stop]] for start, stop in expected]
+    assert launches(tmp_path, NODE) == calls_of(tmp_path) == chunks * 3
+    assert not any(isinstance(record, RefusalRecord) for record in records)
+    launched = [record for record in records if isinstance(record, LaunchRecord)]
+    assert len(launched) == len(chunks) * 3
+
+
+def test_node_too_long_to_launch_alone_is_refused_as_its_single_probe(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    from pywhales.exceptions import ObservationLimitError
+
+    names = ["node-a", "node-b", f"node-{'n' * 200}", "node-d"]
+    store_nodes(tmp_path, {name: [[node(name)]] for name in names})
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    limit = node_argv(client, names[2:3]) - 1
+    assert node_argv(client, [names[0], names[1], names[3]]) <= limit
+    walks: list[tuple[object, ...]] = []
+    for size in (1, 4):
+        records.clear()
+        (tmp_path / "calls").unlink(missing_ok=True)
+        run_policy = batched(policy, size, max_argv_bytes=limit)
+        result = capture_nodes(client, tuple(names), policy=run_policy, timeout=5)
+        assert isinstance(result, Failure) and result.reason == "observation"
+        cause = result.cause
+        assert isinstance(cause, ObservationLimitError)
+        refusals = [record for record in records if isinstance(record, RefusalRecord)]
+        walks.append((cause.reason, cause.limit, cause.measured, len(refusals)))
+        assert launches(tmp_path, NODE) == (
+            [[*NODE, names[0]], [*NODE, names[1]]]
+            if size == 1
+            else [[*NODE, *names[:2]]]
+        )
+    assert walks == [("argv", limit, limit + 1, 1)] * 2
+
+
+def test_byte_fit_batches_still_reprobe_singly_after_a_runtime_failure(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = long_nodes(6)
+    entries: dict[str, list[Any]] = {name: [[node(name)]] for name in names}
+    rpc = {"error": "Error response from daemon: rpc error\n"}
+    entries[names[2]] = [rpc, [node(names[2])]]
+    store_nodes(tmp_path, entries)
+    records: list[TelemetryRecord] = []
+    client = observed_client(tmp_path, records)
+    tight = batched(policy, 4, max_argv_bytes=node_argv(client, names[:2]))
+    target = capture_nodes(client, tuple(names), policy=tight, timeout=5)
+    assert isinstance(target, NodeTarget)
+    assert wait(target, policy=tight, timeout=5, poll_interval=0.01) == Success()
+    pairs = [[*NODE, *names[start : start + 2]] for start in (0, 2, 4)]
+    assert launches(tmp_path, NODE) == [
+        *pairs[:2],
+        [*NODE, names[2]],
+        [*NODE, names[3]],
+        pairs[2],
+        *pairs * 2,
+    ]
+    assert not any(isinstance(record, RefusalRecord) for record in records)
+
+
 def stack_of(
     client: DockerClient, policy: InspectionPolicy, names: list[str]
 ) -> StackTarget:
@@ -5061,3 +5423,121 @@ def test_node_and_service_chunks_are_preceded_by_an_observation_checkpoint(
     inspections = [index for index, event in enumerate(events) if event == "inspect"]
     assert len(inspections) == expected
     assert all(events[index - 1] == "check" for index in inspections)
+
+
+def assert_adapters_built_once(
+    built: list[Any], cycle: Callable[[], None], expected: Sequence[Any]
+) -> None:
+    """Repeat a decode cycle and require each expected adapter built exactly once."""
+    cycle()
+    first = list(built)
+    for _ in range(3):
+        cycle()
+    assert built == first
+    assert all(first.count(kind) == 1 for kind in expected)
+    assert len(first) == len(expected)
+
+
+def test_swarm_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    store(tmp_path, [service()], [task()])
+    target = capture(fake_cli, policy)
+
+    def cycle() -> None:
+        assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [list[wire_types.ServiceWire], list[wire_types.TaskWire]],
+    )
+
+
+def test_node_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    store_nodes(
+        tmp_path,
+        {"node-a": [[node("node-a", manager=True)]], "node-b": [[node("node-b")]]},
+    )
+    target = captured_nodes(fake_cli, policy)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [list[wire_types.NodeWire], list[dict[str, JsonValue]]],
+    )
+
+
+def test_compose_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    members = [container(identity, health="healthy") for identity in (A, B)]
+    for member in members:
+        member["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    store_compose(tmp_path, snapshot(*members))
+    target = compose_target(fake_cli, policy)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [
+            list[wire_types.ContainerWire],
+            list[dict[str, JsonValue]],
+            dict[str, JsonValue],
+            list[str],
+        ],
+    )
+
+
+def test_standalone_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    members = [standalone(identity, health="healthy") for identity in (A, B)]
+    for member in members:
+        member["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    store_standalone(tmp_path, {member["Id"]: [[member]] for member in members})
+    target = capture_containers(fake_cli, (A, B), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [
+            list[wire_types.StandaloneContainerWire],
+            list[dict[str, JsonValue]],
+            dict[str, JsonValue],
+            list[str],
+        ],
+    )

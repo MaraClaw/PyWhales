@@ -76,6 +76,10 @@ these differences.
 `up` and `run` enable dependencies by default; `build`'s separate
 `with_dependencies` option defaults to `False`.
 `quiet=True` is incompatible with `stream_logs=True`.
+`up` and `run` also take opt-in `require_gpu=True`: it reads the project's
+normalized GPU requests (two extra launches, `compose config` and `system info`)
+and raises `GpuSupportError` before the launch. See
+[Swarm Services and Compose](containers-and-output.md#swarm-services-and-compose).
 
 ## Distinguish Timeout Meanings
 
@@ -103,9 +107,11 @@ concept, the Compose-side `--wait-timeout` bound on service readiness, not a
 local CLI deadline either. `start(wait_timeout=...)` and
 `up(shutdown_timeout=...)` are Compose-side options too.
 
-A local deadline kills and reaps only the local `docker` CLI. The `docker-compose`
-plugin child it started can outlive it, as live checks showed for `attach` and
-`logs`, so don't treat expiry as proof the plugin stopped.
+On POSIX, a local deadline kills the local `docker` CLI's whole process group,
+so the `docker-compose` plugin child dies with it. Launches with `tty=True` or
+an inherited terminal descriptor, and every launch on Windows, kill only the
+`docker` CLI. There the plugin can outlive it, as live checks showed for
+`attach` and `logs`, so don't treat expiry as proof the plugin stopped.
 
 ## One-Off Commands and TTY Defaults
 

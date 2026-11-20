@@ -214,14 +214,26 @@ def _launch_archive(
     """Start an unbuffered archive child with a piped stdout.
 
     An operating-system argument-size refusal is reported as an observation
-    limit only when the launch is observed.
+    limit only when the launch is observed. The child gets its own process
+    group unless a standard descriptor it inherits is a terminal, so stopping
+    the transfer also stops what the CLI spawned.
     """
+    from pywhales._readiness import isolates, track
     from pywhales._scoped_launch import native_argv_limit
 
+    isolated = isolates(*(fd for fd, pipe in ((0, stdin), (2, stderr)) if pipe is None))
     with nullcontext() if observation is None else native_argv_limit(command):
-        return Popen(
-            command, stdin=stdin, stdout=PIPE, stderr=stderr, env=environment, bufsize=0
+        process = Popen(
+            command,
+            stdin=stdin,
+            stdout=PIPE,
+            stderr=stderr,
+            env=environment,
+            bufsize=0,
+            start_new_session=isolated,
         )
+    track(process, isolated)
+    return process
 
 
 def _own_archive(
@@ -940,7 +952,7 @@ class ImageCLI(DockerCLICaller):
                             chunks.append(chunk)
                         stdout = b"".join(chunks)
                     owner.check()
-                    exit_code = process.wait()
+                    exit_code = owner.wait()
                     owner.check()
                 finally:
                     owner.close()
@@ -1922,7 +1934,9 @@ class ImageCLI(DockerCLICaller):
             Archive-byte chunks from stdout, with no progress-record framing or
             configured payload budget. Exhaustion or generator closure closes
             pipes, reaps the local child, and joins its accounting thread before
-            completing telemetry. Closure kills a still-running local child.
+            completing telemetry. Closure before the child exited and stdout
+            reached EOF kills the local child; on POSIX, unless an inherited
+            descriptor is a terminal, it kills the child's whole process group.
 
         Raises:
             NoSuchImage: The save CLI reports a missing image.
@@ -1959,12 +1973,12 @@ class ImageCLI(DockerCLICaller):
                 try:
                     if not owner.bounded:
                         yield from owner.lines(process.stdout)
-                        exit_code = process.wait(0.1)
+                        exit_code = owner.wait(0.1)
                     else:
                         while chunk := owner.read(process.stdout):
                             yield chunk
                         owner.check()
-                        exit_code = process.wait()
+                        exit_code = owner.wait()
                         owner.check()
                     stderr = owner.diagnostics() if owner.concurrent else b""
                     if exit_code != 0:

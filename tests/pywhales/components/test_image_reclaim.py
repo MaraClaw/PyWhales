@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 import weakref
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from threading import Event, current_thread
 from unittest.mock import patch
 
@@ -19,16 +19,32 @@ import pytest
 from pywhales._process_stream import _ProcessCore
 from pywhales.components.image.streams import MultiImageStream, _MultiImageCore
 from pywhales.utils import PROJECT_ROOT, MappedProcessStream, stream_stdout_and_stderr
+from tests.pywhales.process_groups import Grandchild, holder
 
 BOUNDED_WAIT = 5.0
 CHILD = "import os; os.write(1, b'abc\\n' * 64); input()"
 
 
-def saturated_group(cores: list[_ProcessCore]) -> MultiImageStream:
-    """Return a started two-child group whose workers both wait to enqueue."""
+def saturated_group(
+    cores: list[_ProcessCore], code: str = CHILD, pass_fds: Sequence[int] = ()
+) -> MultiImageStream:
+    """Return a started two-child group whose workers both wait to enqueue.
+
+    Args:
+        cores: Receives each launched child's core.
+        code: Child source; it must first write ``abc\\n`` lines to stdout.
+        pass_fds: Descriptors each child keeps, also appended to its argv.
+
+    Returns:
+        The group, after one record was taken from it.
+    """
 
     def start(name: str) -> MappedProcessStream[tuple[str, bytes]]:
-        child = stream_stdout_and_stderr([sys.executable, "-c", CHILD], pipe_stdin=True)
+        child = stream_stdout_and_stderr(
+            [sys.executable, "-c", code, *map(str, pass_fds)],
+            pass_fds=pass_fds,
+            pipe_stdin=True,
+        )
         cores.append(child._core)
         return MappedProcessStream(child, ((name, line) for _, line in child))
 
@@ -86,6 +102,31 @@ def test_dropped_group_with_blocked_workers_is_reclaimed(
             for pipe in (child.stdin, child._process.stdout, child._process.stderr)
             if pipe is not None
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_dropped_group_kills_each_transfer_process_group(
+    cores: list[_ProcessCore],
+) -> None:
+    with Grandchild() as grandchild:
+        # Given a saturated group whose two CLIs each have a grandchild holding
+        # their output.
+        code = holder("os.write(1, b'abc\\n' * 64)\ninput()\n")
+        group = saturated_group(cores, code, grandchild.fds)
+        core: _MultiImageCore = group._core
+        grandchild.started(2)
+
+        # When the caller drops the group.
+        del group
+        gc.collect()
+
+        # Then reclamation released both CLIs and both grandchildren died with
+        # their groups.
+        assert core._cleanup_done.wait(BOUNDED_WAIT)
+        for child in cores:
+            assert child._released.wait(BOUNDED_WAIT)
+            assert child._process.returncode == -signal.SIGKILL
+        grandchild.assert_gone()
 
 
 @pytest.mark.parametrize("abandon", [True, False], ids=["abandoned", "reachable"])

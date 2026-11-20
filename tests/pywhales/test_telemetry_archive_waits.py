@@ -4,20 +4,28 @@ import signal
 import sys
 import threading
 from collections import Counter
-from collections.abc import Buffer
+from collections.abc import Buffer, Generator
+from functools import partial
 from subprocess import PIPE, Popen
 from threading import Event, Thread
 from time import monotonic, sleep
-from typing import override
+from typing import Literal, override
 
 import pytest
 
-from pywhales import _archive_deadline
+from pywhales import DockerClient, _archive_deadline
 from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._observation import ObservationState, observation
 from pywhales._readiness import CANCEL_CHECK, WakeLatch
-from pywhales.exceptions import DockerTimeout, ObservationCancelled, ObservationTimeout
+from pywhales.components.image import cli_wrapper
+from pywhales.exceptions import (
+    DockerTimeout,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 from pywhales.inventory import InspectionPolicy
+from tests.pywhales.process_groups import Grandchild, holder, stdin_from
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX readiness waits")
 
@@ -456,3 +464,130 @@ def test_policy_only_scope_adds_no_monitoring() -> None:
         assert process.stdout is not None
         assert b"".join(owner.lines(process.stdout)) == b"x\n"
         owner.thread.join(timeout=3)
+
+
+def _archive_client(
+    code: str, grandchild: Grandchild, monkeypatch: pytest.MonkeyPatch
+) -> DockerClient:
+    """Return a client whose archive CLI runs ``code`` with the grandchild's pipes."""
+    monkeypatch.setattr(cli_wrapper, "Popen", partial(Popen, pass_fds=grandchild.fds))
+    client = DockerClient(client_call=[sys.executable, "-c", code, *grandchild.argv])
+    monkeypatch.setattr(client.image, "inspect", lambda images: [])
+    return client
+
+
+_STOPS: dict[str, type[Exception]] = {
+    "deadline": DockerTimeout,
+    "scope": ObservationTimeout,
+    "cancel": ObservationCancelled,
+    "limit": ObservationLimitError,
+}
+
+
+@pytest.mark.parametrize("stop", ["deadline", "scope", "cancel", "limit"])
+def test_save_stop_kills_the_cli_process_group(
+    stop: Literal["deadline", "scope", "cancel", "limit"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancel = Event()
+    policy = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_stream_bytes=16,
+    )
+    with (
+        Grandchild() as grandchild,
+        open(os.devnull, "rb") as null,
+        stdin_from(null.fileno()),
+    ):
+        # Given a save whose CLI, without a terminal on stdin, has a grandchild
+        # holding stdout and stderr.
+        size = 64 if stop == "limit" else 1
+        tail = f"os.write(1, b'x' * {size})\nsignal.pause()\n"
+        client = _archive_client(holder(tail), grandchild, monkeypatch)
+        archive = client.image.save(
+            "sample", timeout=0.5 if stop == "deadline" else None
+        )
+
+        # When a deadline expires, the scope is cancelled, or the archive
+        # overflows the scope's stream budget.
+        with (
+            pytest.raises(_STOPS[stop]),
+            observation(
+                policy,
+                deadline=monotonic() + (0.5 if stop == "scope" else 30),
+                cancel=cancel,
+            ),
+        ):
+            if stop != "limit":
+                assert next(archive) == b"x"
+            if stop == "cancel":
+                cancel.set()
+            list(archive)
+
+        # Then the grandchild died with the CLI's process group.
+        grandchild.started()
+        grandchild.assert_gone()
+
+
+@pytest.mark.parametrize("stop", ["deadline", "scope"])
+def test_load_stop_kills_the_cli_process_group(
+    stop: Literal["deadline", "scope"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = InspectionPolicy(
+        max_references=1,
+        max_argv_bytes=65536,
+        max_response_bytes=1024,
+        max_total_archive_stderr_bytes=1024,
+    )
+    with Grandchild() as grandchild:
+        # Given a load with piped stdio whose CLI's grandchild holds its output.
+        client = _archive_client(holder("signal.pause()\n"), grandchild, monkeypatch)
+
+        # When the command or scope deadline expires.
+        with (
+            pytest.raises(_STOPS[stop]),
+            observation(
+                policy, deadline=monotonic() + (0.5 if stop == "scope" else 30)
+            ),
+        ):
+            client.image.load(b"input", timeout=0.5 if stop == "deadline" else None)
+
+        # Then the grandchild died with the CLI's process group.
+        grandchild.started()
+        grandchild.assert_gone()
+
+
+@pytest.mark.parametrize("ending", ["close", "end"])
+def test_save_closure_kills_the_group_but_completion_signals_nothing(
+    ending: Literal["close", "end"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with (
+        Grandchild() as grandchild,
+        open(os.devnull, "rb") as null,
+        stdin_from(null.fileno()),
+    ):
+        # Given an unbounded save whose CLI's grandchild holds its output, or
+        # lets it reach EOF when the CLI exits.
+        code = (
+            holder("os.write(1, b'x\\n')\nsignal.pause()\n")
+            if ending == "close"
+            else holder("os.write(1, b'x\\n')\n", holds_output=False)
+        )
+        archive = _archive_client(code, grandchild, monkeypatch).image.save("sample")
+
+        # When the caller closes the archive after one line, or exhausts it.
+        assert next(archive) == b"x\n"
+        if ending == "close":
+            assert isinstance(archive, Generator)
+            archive.close()
+        else:
+            assert list(archive) == []
+
+        # Then closure killed the CLI's group, while completion signalled nothing.
+        grandchild.started()
+        if ending == "close":
+            grandchild.assert_gone()
+        else:
+            grandchild.assert_alive()

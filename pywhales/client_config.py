@@ -668,9 +668,7 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
                 Raw diagnostics may expose validation chains or response dumps.
         """
         try:
-            json_objects = pydantic.TypeAdapter(list[JsonObject]).validate_json(
-                json_str
-            )
+            json_objects = utils.type_adapter(list[JsonObject]).validate_json(json_str)
         except pydantic.ValidationError as err:
             if self.client_config.raw_diagnostics:
                 raise ParsingError("Invalid batch inspect JSON response") from err

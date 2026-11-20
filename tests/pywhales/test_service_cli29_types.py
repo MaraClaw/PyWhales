@@ -49,6 +49,12 @@ def _check_service_create(client: DockerClient) -> None:
         Service,
     )
     assert_type(client.service.create("img", None, mode="replicated"), Service)
+    assert_type(
+        client.service.create(
+            "img", None, generic_resources=["gpu=1"], require_gpu=True
+        ),
+        Service,
+    )
 
 
 def _check_service_update(client: DockerClient, service: Service) -> None:

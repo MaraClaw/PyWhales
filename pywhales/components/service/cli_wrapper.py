@@ -16,6 +16,7 @@ from typing import (
 
 from pydantic import JsonValue
 
+import pywhales.components.node.cli_wrapper
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import (
     ClientConfig,
@@ -44,6 +45,10 @@ from pywhales.components.service.models import (
     ServiceSpec,
     ServiceUpdateStatus,
     ServiceVersion,
+)
+from pywhales.components.system.gpu import (
+    check_generic_resources,
+    generic_resource_requests,
 )
 from pywhales.enums import (
     RestartConditionInput,
@@ -389,6 +394,28 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
 ValidService = str | Service
 
 
+def _require_gpu_capacity(client_config: ClientConfig, requests: Sequence[str]) -> None:
+    """Probe the selected Swarm's nodes and raise unless one can hold every request.
+
+    Args:
+        client_config: Configuration selecting the Swarm manager to probe.
+        requests: Materialized generic resource requests such as ``"gpu=2"``.
+
+    Raises:
+        ValueError: If no request has the ``kind=value`` shape with a nonzero
+            amount. Nothing is launched.
+        GpuSupportError: If no ready, active node advertises every request.
+    """
+    if not generic_resource_requests(requests):
+        raise ValueError(
+            "require_gpu needs a generic resource request in generic_resources"
+        )
+    nodes = pywhales.components.node.cli_wrapper.NodeCLI(client_config).list(
+        hydrate=True
+    )
+    check_generic_resources(requests, nodes)
+
+
 class ServiceCLI(DockerCLICaller):
     """Service commands requiring the configured CLI and a Swarm manager daemon."""
 
@@ -471,6 +498,7 @@ class ServiceCLI(DockerCLICaller):
         rollback_monitor: int | timedelta | None = None,
         rollback_max_failure_ratio: float | None = None,
         rollback_order: UpdateOrderInput | None = None,
+        require_gpu: bool = False,
         timeout: float | None = None,
     ) -> Service:
         """Create a Docker Swarm service.
@@ -576,6 +604,20 @@ class ServiceCLI(DockerCLICaller):
             rollback_monitor: Rollback monitoring duration in seconds or timedelta, or None.
             rollback_max_failure_ratio: Rollback failure ratio in [0, 1], or None.
             rollback_order: stop-first or start-first, or None.
+            require_gpu: Before the create launch, check that the Swarm has a
+                node that can hold every request in `generic_resources`. This
+                probes the selected manager's node list (one `node ls` launch
+                plus one batched `node inspect`), not the local machine. It
+                compares each ready, active node's advertised generic resources,
+                adding discrete values and counting each named resource once per
+                kind, and needs one node that can hold every request. Requests
+                for one kind are summed, although the Docker CLI rejects
+                duplicate kinds, and a leading `+` on an amount is accepted. It
+                ignores placement constraints and the capacity running tasks
+                already claim, so it can pass a request the scheduler leaves
+                pending, but never refuses one that a ready, active node
+                advertises. The probe runs outside `timeout`. The default False
+                never probes.
             timeout: Positive finite seconds from the create CLI's own launch,
                 replacing the client default; None inherits it. This is a local
                 subprocess deadline, not a Docker option.
@@ -586,8 +628,13 @@ class ServiceCLI(DockerCLICaller):
         Raises:
             TypeError: If an option or policy value has the wrong shape or type.
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds, or an option or policy value is out of
-                range or unsupported.
+                finite number of seconds, an option or policy value is out of
+                range or unsupported, or require_gpu is set without a
+                `kind=<non-negative integer>` request of nonzero amount in
+                generic_resources.
+            GpuSupportError: If require_gpu finds no ready, active node whose
+                advertised generic resources cover every request; its reason is
+                `no_node_capacity`. Nothing is created.
             DockerTimeout: If the create CLI exceeds its deadline. It is killed and
                 reaped, without undoing daemon-side service creation.
         """
@@ -609,6 +656,9 @@ class ServiceCLI(DockerCLICaller):
             rollback_max_failure_ratio,
             rollback_order,
         )
+        requests = (
+            tuple(to_list(generic_resources)) if require_gpu else generic_resources
+        )
         options = encode_options(
             "create",
             {
@@ -626,7 +676,7 @@ class ServiceCLI(DockerCLICaller):
                 "entrypoint": entrypoint,
                 "env": envs,
                 "env_file": env_files,
-                "generic_resource": generic_resources,
+                "generic_resource": requests,
                 "group": groups,
                 "no_healthcheck": not healthcheck,
                 "health_cmd": health_cmd,
@@ -677,6 +727,8 @@ class ServiceCLI(DockerCLICaller):
             },
             self.client_config,
         )
+        if require_gpu:
+            _require_gpu_capacity(self.client_config, requests)
         full_cmd = Command([*self.docker_cmd, "service", "create", "--quiet"])
         full_cmd.extend(options.arguments)
         full_cmd.extend(policy_args)

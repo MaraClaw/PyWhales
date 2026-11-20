@@ -1,6 +1,6 @@
 """Ordered, bounded resource inspection without publishing original caches."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import get_args
@@ -13,7 +13,7 @@ from pywhales._environment import (
 )
 from pywhales._execution_policy import get_execution_policy
 from pywhales._inventory_dispatch import inspect_group, make_resource, resource_kind
-from pywhales._launch_limits import check_launch
+from pywhales._launch_limits import LaunchMeasurement, LaunchPlanner
 from pywhales._observation import check_observation, observation
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components._swarm_inspect import (
@@ -29,6 +29,7 @@ from pywhales.exceptions import ObservationLimitError
 from pywhales.inventory import (
     InspectionPolicy,
     InventoryKind,
+    InventoryPayload,
     InventoryRecord,
     InventoryRequest,
     InventoryResource,
@@ -106,55 +107,66 @@ def _prefix(group: _Group, arguments: Sequence[object]) -> list[str]:
     return [*command, group.kind, "inspect"]
 
 
-def _argv(
-    group: _Group, prefix: list[str], entries: Sequence[_Occurrence]
-) -> list[str]:
-    if group.kind == "builder":
-        return prefix
-    if group.kind == "manifest_list":
-        # One list per launch: a second positional would name a manifest inside it.
-        (entry,) = entries
-        return [*prefix, entry.reference, *(["--insecure"] if entry.insecure else [])]
-    return [*prefix, *(entry.reference for entry in entries)]
-
-
 def _chunks(
-    group: _Group,
-    prefix: list[str],
-    environment: Mapping[str, str],
-    policy: InspectionPolicy,
+    group: _Group, measurement: LaunchMeasurement, max_references: int
 ) -> list[list[_Occurrence]]:
+    """Plan one group's launches, each checked against the measured prefix.
+
+    Raises:
+        ObservationLimitError: If the builder listing, or a launch holding a single
+            reference, exceeds a limit; the first such reference in order fails.
+    """
     if group.kind == "builder":
+        measurement.check()
         return [group.occurrences]
     if group.kind == "manifest_list":
+        # One list per launch: a second positional would name a manifest inside it.
+        for occurrence in group.occurrences:
+            measurement.reset()
+            measurement.append(occurrence.reference)
+            if occurrence.insecure:
+                measurement.append("--insecure")
+            measurement.check()
         return [[occurrence] for occurrence in group.occurrences]
-    chunks: list[list[_Occurrence]] = []
-    chunk: list[_Occurrence] = []
-    for occurrence in group.occurrences:
-        candidate: list[_Occurrence] = [*chunk, occurrence]
-        if len(candidate) <= policy.max_references:
-            try:
-                check_launch(
-                    [*prefix, *(entry.reference for entry in candidate)],
-                    environment,
-                    policy,
-                )
-            except ObservationLimitError:
-                if not chunk:
-                    raise
-            else:
-                chunk = candidate
-                continue
-        chunks.append(chunk)
-        chunk = [occurrence]
-    if chunk:
-        chunks.append(chunk)
-    return chunks
+    references = [occurrence.reference for occurrence in group.occurrences]
+    return [
+        group.occurrences[part]
+        for part in measurement.chunks(references, max_references)
+    ]
 
 
-def _stage(
-    items: Sequence[InventoryRequest | InventoryResource], policy: InspectionPolicy
-) -> tuple[list[InventoryRecord], list[InventoryResource]]:
+def _record(
+    group: _Group, identity: str, resource: InventoryResource, payload: InventoryPayload
+) -> InventoryRecord:
+    """Return a record holding a deep copy of the staged snapshot."""
+    return InventoryRecord(
+        kind=group.kind, id=identity, payload=payload.model_copy(deep=True)
+    )
+
+
+def _handle(
+    group: _Group, identity: str, resource: InventoryResource, payload: InventoryPayload
+) -> InventoryResource:
+    """Return a deep copy of the staged handle that keeps its client configuration."""
+    return deepcopy(resource, {id(group.config): group.config})
+
+
+def _stage[Detached](
+    items: Sequence[InventoryRequest | InventoryResource],
+    policy: InspectionPolicy,
+    detach: Callable[[_Group, str, InventoryResource, InventoryPayload], Detached],
+) -> list[Detached]:
+    """Inspect every item and return one detached value per reference in order.
+
+    Args:
+        items: Requests and handles; references keep their input order.
+        policy: Limits for the observation enclosing planning and every launch.
+        detach: Builds each returned value from a validated staged handle and its
+            snapshot; staging keeps neither once it returns.
+
+    Returns:
+        One value per reference, including duplicates, in input order.
+    """
     with observation(policy) as state:
         limit = state.policy.max_total_references
         if limit is not None:
@@ -166,9 +178,8 @@ def _stage(
                 if count > limit:
                     raise ObservationLimitError("total_references", limit, count)
         groups = _normalize(items)
-        plans: list[
-            tuple[_Group, list[str], Mapping[str, str], list[list[_Occurrence]]]
-        ] = []
+        planner = LaunchPlanner(state.policy)
+        plans: list[tuple[_Group, Mapping[str, str], list[list[_Occurrence]]]] = []
         for group in groups:
             check_observation(state)
             command = group.config.docker_cmd
@@ -182,32 +193,23 @@ def _stage(
                 raise ObservationLimitError("environment", None, None) from None
             prefix = _prefix(group, command)
             environment = finalize_environment(environment, prefix)
-            if group.kind == "builder":
-                check_launch(prefix, environment, state.policy)
-            else:
-                for occurrence in group.occurrences:
-                    check_launch(
-                        _argv(group, prefix, [occurrence]), environment, state.policy
-                    )
+            measurement = planner.measure(prefix, environment)
             plans.append(
                 (
                     group,
-                    prefix,
                     environment,
-                    _chunks(group, prefix, environment, state.policy),
+                    _chunks(group, measurement, state.policy.max_references),
                 )
             )
-        state.check_launch_attempts(sum(len(chunks) for _, _, _, chunks in plans))
-        records: dict[int, InventoryRecord] = {}
-        resources: dict[int, InventoryResource] = {}
-        for group, prefix, environment, chunks in plans:
+        state.check_launch_attempts(sum(len(chunks) for _, _, chunks in plans))
+        detached: dict[int, Detached] = {}
+        for group, environment, chunks in plans:
             aliases: dict[str, str] = {}
             snapshots = {}
             swarm_models: list[SwarmInspectResult] = []
             group_ids: list[str] = []
             for chunk in chunks:
                 check_observation(state)
-                check_launch(_argv(group, prefix, chunk), environment, state.policy)
                 request = [
                     make_resource(
                         group.kind,
@@ -255,14 +257,7 @@ def _stage(
                         | ServiceInspectResult,
                     ):
                         swarm_models.append(payload)
-                    records[entry.index] = InventoryRecord(
-                        kind=group.kind,
-                        id=identity,
-                        payload=payload.model_copy(deep=True),
-                    )
-                    resources[entry.index] = deepcopy(
-                        resource, {id(group.config): group.config}
-                    )
+                    detached[entry.index] = detach(group, identity, resource, payload)
             if swarm_models:
                 resolved = associate_swarm_inspect_results(
                     swarm_models,
@@ -272,14 +267,18 @@ def _stage(
                 if [identity for identity, _ in resolved] != group_ids:
                     raise ParsingError("Inspect associations differ across chunks")
         check_observation(state)
-        return (
-            [records[index] for index in range(len(records))],
-            [resources[index] for index in range(len(resources))],
-        )
+        return [detached[index] for index in range(len(detached))]
+
+
+def stage_records(
+    items: Sequence[InventoryRequest | InventoryResource], policy: InspectionPolicy
+) -> list[InventoryRecord]:
+    """Return detached records in input order without changing input handles."""
+    return _stage(items, policy, _record)
 
 
 def stage_resources(
     resources: Sequence[InventoryResource], policy: InspectionPolicy
 ) -> list[InventoryResource]:
     """Return newly hydrated handles in input order without changing originals."""
-    return _stage(resources, policy)[1]
+    return _stage(resources, policy, _handle)
