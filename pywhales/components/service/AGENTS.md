@@ -24,6 +24,7 @@ Service `create` (`envs`) and `update` (`env_add`) use the [runtime environment 
 - Ports accept the container `publish` tuples or long-form mappings. Mounts, secrets and configs are long-form mappings joined with commas. `args` is a sequence shell-quoted into one `--args` value, so `[]` clears the arguments. `host_add`/`host_rm` are `host: ip` mappings.
 - `envs` and `env_add` use the [runtime environment transport](../../AGENTS.md#container-environment-transport): eligible values reach the child through per-launch overrides, never argv. Encoding happens before executable lookup, so strict transport rejects without a launch.
 - Validation order for create and update is `timeout`, then rollout policies, then spec options, all before executable lookup. Wrong shapes raise `TypeError`; an unsupported `mode`, a bad port tuple or an out-of-range duration raises `ValueError`. Messages stay value-free.
+- `create(require_gpu=True)` runs after that validation and before the single `service create` launch. Without a nonzero `kind=int` `generic_resources` request it raises `ValueError` and launches nothing. Otherwise `NodeCLI.list(hydrate=True)` (`node ls` plus one batched `node inspect`) runs on the selected manager, outside `timeout`, and `check_generic_resources` (`../system/gpu.py`) raises `GpuSupportError("no_node_capacity")` unless one ready, active node advertises every request. Requests aren't summed across nodes, but duplicate kinds within `generic_resources` are summed (the Docker CLI rejects them) and an amount may carry a leading `+`; placement constraints and running tasks' claims are ignored. Default calls never probe, and success leaves the argv unchanged.
 - `--rollback` and its restrictions on other flags are enforced by the CLI, not locally. Update still adds no probe, retry or convergence wait.
 
 ## Update And Rollback Policies
@@ -62,6 +63,7 @@ Paths are relative to `tests/pywhales/`; read [test-selection hazards](../../../
   zero values, bounds, validation before lookup, and `test_rollback_single_launch`; no daemon required.
 - `components/test_service_cli29.py`: recording fake CLI (`argv_fakes.py`); legacy create argv, one argv case per
   create and update option, handle forwarding, validation order and before lookup, `inspect(pretty=True)` and `ps` filters.
+- `components/test_gpu_service_preflight.py`: fake-CLI `require_gpu` ordering, node eligibility, refusals and unchanged argv; no daemon required.
 - `components/test_task_logs.py`: task logs argv, ownership, validation and deadline against the fake CLI.
 - `test_service_cli29_types.py` and `test_task_logs_types.py`: static `ty` contracts, not pytest execution.
 - `test_service_rollout_types.py`: static `ty` contracts, not pytest execution.
