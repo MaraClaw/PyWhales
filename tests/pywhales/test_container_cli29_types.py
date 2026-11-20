@@ -6,7 +6,13 @@ from typing import assert_type
 
 from pywhales import Container, DockerClient, Image
 from pywhales.components.container.cli_wrapper import PublishedPort
-from pywhales.components.system.gpu import GpuSupport
+from pywhales.components.system.gpu import (
+    GpuRequest,
+    GpuSupport,
+    check_generic_resources,
+    compose_gpu_requests,
+    generic_resource_requests,
+)
 from pywhales.utils import ProcessStream
 
 
@@ -104,4 +110,17 @@ def _check_gpu_preflight(client: DockerClient) -> None:
         client.run("cuda", devices=["nvidia.com/gpu=0"], detach=True, require_gpu=True),
         Container,
     )
-    assert_type(client.system.gpu_support(), GpuSupport)
+    support = client.system.gpu_support()
+    assert_type(support, GpuSupport)
+    assert_type(support.whole_gpus, tuple[str, ...])
+    assert_type(support.gpu_uuids, tuple[str, ...])
+    assert_type(support.mig_devices, tuple[str, ...])
+    assert_type(support.gpu_count, int | None)
+    assert_type(GpuRequest.parse("device=0"), GpuRequest | None)
+    assert_type(GpuRequest.parse(2), GpuRequest | None)
+    assert_type(support.check_requests([GpuRequest(count=1)], ["/dev/fuse"]), None)
+    assert_type(
+        compose_gpu_requests({}), tuple[tuple[GpuRequest, ...], tuple[str, ...]]
+    )
+    assert_type(generic_resource_requests(["gpu=1"]), dict[str, int])
+    assert_type(check_generic_resources(["gpu=1"], client.node.list()), None)

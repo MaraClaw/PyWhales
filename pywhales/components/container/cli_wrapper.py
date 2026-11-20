@@ -1184,7 +1184,8 @@ class ContainerCLI(DockerCLICaller):
             TypeError: `command` is a shell string rather than an argv sequence.
             ValueError: `health_start_interval` is not positive whole seconds,
                 or `require_gpu` is set without a GPU request.
-            GpuSupportError: `require_gpu` found the daemon unable to serve it.
+            GpuSupportError: `require_gpu` found the daemon unable to serve it,
+                including a `gpus` count or selection naming unreported GPUs.
             DockerException: Image acquisition or container creation fails.
         """
         start_interval_seconds = _health_start_interval_seconds(health_start_interval)
@@ -2428,7 +2429,18 @@ class ContainerCLI(DockerCLICaller):
                 the local machine) with one `docker system info` launch and
                 raise `GpuSupportError` unless it reports support for `gpus`
                 and every CDI name in `devices`. Requires at least one such
-                request. The probe is outside `timeout`.
+                request. CDI names in `devices` must be reported exactly. A
+                `gpus` count or device selection is checked too, against the
+                index and `GPU-` UUID names the daemon reports: a count of 2
+                needs `nvidia.com/gpu=0` and `=1` once it reports index names,
+                and an unreported device raises reason `"gpu_device_missing"`.
+                MIG names (`0:1`, `MIG-...`) in a selection aren't verified, nor
+                is a naming family the daemon doesn't report at all. Docker's
+                NVIDIA driver tries CDI first and falls back to the legacy
+                runtime hook on any CDI failure, so a `"gpu_device_missing"`
+                refusal assumes the host's CDI specification is current;
+                regenerate it with `nvidia-ctk cdi generate` after changing
+                GPUs. The probe is outside `timeout`.
             runtime: Runtime to use for this container.
             security_options: Security options
             shm_size: Shared-memory size in bytes or Docker size notation.
@@ -2466,7 +2478,8 @@ class ContainerCLI(DockerCLICaller):
             ValueError: If timeout or health_start_interval is invalid, detach
                 and stream are both true, or require_gpu is set without a GPU
                 request.
-            GpuSupportError: If require_gpu found the daemon unable to serve it.
+            GpuSupportError: If require_gpu found the daemon unable to serve it,
+                including a `gpus` count or selection naming unreported GPUs.
             GpuUnavailable: If the daemon rejected the GPU or CDI device request.
             DockerTimeout: If the selected local run subprocess exceeds timeout.
             DockerException: If image preflight or the Docker command fails.

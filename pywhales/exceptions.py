@@ -127,38 +127,51 @@ class GpuUnavailable(DockerException):
 
 
 type GpuSupportReason = Literal[
-    "not_linux", "no_gpu_driver", "cdi_devices_unreported", "cdi_device_missing"
+    "not_linux",
+    "no_gpu_driver",
+    "cdi_devices_unreported",
+    "cdi_device_missing",
+    "gpu_device_missing",
+    "no_node_capacity",
 ]
 
 
 class GpuSupportError(Exception):
-    """A GPU preflight found the selected daemon unable to satisfy a request.
+    """A GPU preflight found the selected daemon or Swarm unable to satisfy a request.
 
-    Raised before any image pull or container launch. The message names only
-    the reason; requested device names stay in the `devices` attribute.
+    Raised before the launch the preflight guards, and for a container before any
+    image pull. The message names only the reason; requested device names stay in
+    the `devices` attribute.
 
     Attributes:
         reason: ``"not_linux"`` when the daemon doesn't run Linux containers,
             ``"no_gpu_driver"`` when it reports neither a GPU runtime nor a
             known GPU CDI device for `gpus`, ``"cdi_devices_unreported"`` when
             it predates the discovered-device list (Docker 28) so CDI names
-            can't be verified, and ``"cdi_device_missing"`` when requested CDI
-            names aren't among the daemon's discovered devices.
-        devices: The requested CDI device names the daemon doesn't report, in
-            request order; empty for the other reasons.
+            can't be verified, ``"cdi_device_missing"`` when requested CDI
+            names aren't among the daemon's discovered devices,
+            ``"gpu_device_missing"`` when a `gpus` count or device selection
+            resolves to GPU names the daemon's discovered devices lack (MIG names
+            aren't checked there), and
+            ``"no_node_capacity"`` when no ready, active Swarm node advertises
+            enough of a requested generic resource.
+        devices: The unsatisfied CDI device names or, for
+            ``"no_node_capacity"``, the Swarm generic resource requests such as
+            ``"gpu=2"``, in request order; empty for the other reasons.
     """
 
     def __init__(self, reason: GpuSupportReason, devices: tuple[str, ...] = ()) -> None:
         """Record the refusal reason and the unresolved CDI device names.
 
         Args:
-            reason: Why the daemon can't satisfy the request.
-            devices: Requested CDI device names the daemon doesn't report.
+            reason: Why the daemon or Swarm can't satisfy the request.
+            devices: Unsatisfied CDI device names, or generic resource requests
+                for ``"no_node_capacity"``.
         """
         self.reason: GpuSupportReason = reason
         self.devices: tuple[str, ...] = devices
         super().__init__(
-            f"The selected Docker daemon cannot satisfy the GPU request: {reason}."
+            f"The selected Docker daemon or Swarm cannot satisfy the GPU request: {reason}."
         )
 
 
