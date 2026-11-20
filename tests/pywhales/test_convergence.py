@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, NotRequired, TypedDict
 
 import pytest
+from pydantic import JsonValue
 
 from pywhales import DockerClient
 from pywhales._observation import ObservationState
@@ -35,6 +36,7 @@ from pywhales.convergence import (
     capture_service,
     wait,
 )
+from pywhales.convergence import _wire as wire_types
 from pywhales.convergence._service import ServiceObservation
 from pywhales.inventory import InspectionPolicy
 
@@ -5061,3 +5063,121 @@ def test_node_and_service_chunks_are_preceded_by_an_observation_checkpoint(
     inspections = [index for index, event in enumerate(events) if event == "inspect"]
     assert len(inspections) == expected
     assert all(events[index - 1] == "check" for index in inspections)
+
+
+def assert_adapters_built_once(
+    built: list[Any], cycle: Callable[[], None], expected: Sequence[Any]
+) -> None:
+    """Repeat a decode cycle and require each expected adapter built exactly once."""
+    cycle()
+    first = list(built)
+    for _ in range(3):
+        cycle()
+    assert built == first
+    assert all(first.count(kind) == 1 for kind in expected)
+    assert len(first) == len(expected)
+
+
+def test_swarm_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    store(tmp_path, [service()], [task()])
+    target = capture(fake_cli, policy)
+
+    def cycle() -> None:
+        assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [list[wire_types.ServiceWire], list[wire_types.TaskWire]],
+    )
+
+
+def test_node_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    store_nodes(
+        tmp_path,
+        {"node-a": [[node("node-a", manager=True)]], "node-b": [[node("node-b")]]},
+    )
+    target = captured_nodes(fake_cli, policy)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [list[wire_types.NodeWire], list[dict[str, JsonValue]]],
+    )
+
+
+def test_compose_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    members = [container(identity, health="healthy") for identity in (A, B)]
+    for member in members:
+        member["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    store_compose(tmp_path, snapshot(*members))
+    target = compose_target(fake_cli, policy)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [
+            list[wire_types.ContainerWire],
+            list[dict[str, JsonValue]],
+            dict[str, JsonValue],
+            list[str],
+        ],
+    )
+
+
+def test_standalone_decoders_build_each_adapter_once_across_cycles(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    adapter_constructions: list[Any],
+) -> None:
+    members = [standalone(identity, health="healthy") for identity in (A, B)]
+    for member in members:
+        member["Config"]["Healthcheck"] = {"Test": ["CMD", "check"]}
+    store_standalone(tmp_path, {member["Id"]: [[member]] for member in members})
+    target = capture_containers(fake_cli, (A, B), policy=policy, timeout=5)
+    assert isinstance(target, ContainerTarget)
+
+    def cycle() -> None:
+        for limits in (policy, batched(policy, 2)):
+            assert (
+                wait(target, policy=limits, timeout=5, poll_interval=0.01) == Success()
+            )
+
+    assert_adapters_built_once(
+        adapter_constructions,
+        cycle,
+        [
+            list[wire_types.StandaloneContainerWire],
+            list[dict[str, JsonValue]],
+            dict[str, JsonValue],
+            list[str],
+        ],
+    )

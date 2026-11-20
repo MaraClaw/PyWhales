@@ -11,7 +11,6 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
     ValidationError,
     field_validator,
 )
@@ -25,7 +24,7 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationTimeout,
 )
-from pywhales.utils import run
+from pywhales.utils import run, type_adapter
 
 
 class Version(BaseModel):
@@ -154,8 +153,8 @@ class StandaloneConfig(BaseModel):
         """Retain only check presence, never its command or environment values."""
         if value is None:
             return False
-        check = TypeAdapter(dict[str, JsonValue]).validate_python(value, strict=True)
-        test = TypeAdapter(list[str]).validate_python(
+        check = type_adapter(dict[str, JsonValue]).validate_python(value, strict=True)
+        test = type_adapter(list[str]).validate_python(
             check.get("Test", []), strict=True
         )
         return bool(test) and test[0] != "NONE"
@@ -227,7 +226,7 @@ def same_generation(target: ServiceTarget, service: ServiceWire) -> bool:
 def inspect_service(config: ClientConfig, service_id: str) -> ServiceWire:
     """Inspect exactly one immutable service ID."""
     payload = run([*config.docker_cmd, "service", "inspect", service_id])
-    results = TypeAdapter(list[ServiceWire]).validate_json(payload)
+    results = type_adapter(list[ServiceWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != service_id:
         raise ParsingError("Service inspect identity mismatch")
     return results[0]
@@ -245,7 +244,7 @@ def inspect_node(config: ClientConfig, node_id: str) -> NodeWire:
         ):
             raise NodeMissing(error) from error
         raise
-    results = TypeAdapter(list[NodeWire]).validate_json(payload)
+    results = type_adapter(list[NodeWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != node_id:
         raise ParsingError("Node inspect identity mismatch")
     return results[0]
@@ -254,7 +253,7 @@ def inspect_node(config: ClientConfig, node_id: str) -> NodeWire:
 def inspect_task(config: ClientConfig, task_id: str) -> TaskWire:
     """Inspect exactly one listed immutable task ID."""
     payload = run([*config.docker_cmd, "inspect", "--type", "task", task_id])
-    results = TypeAdapter(list[TaskWire]).validate_json(payload)
+    results = type_adapter(list[TaskWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != task_id:
         raise ParsingError("Task inspect identity mismatch")
     return results[0]
@@ -274,7 +273,7 @@ def list_compose_ids(config: ClientConfig, services: tuple[str, ...]) -> list[st
 def inspect_container(config: ClientConfig, container_id: str) -> ContainerWire:
     """Inspect exactly one listed container, requiring its full ID in the reply."""
     payload = run([*config.docker_cmd, "inspect", "--type", "container", container_id])
-    results = TypeAdapter(list[ContainerWire]).validate_json(payload)
+    results = type_adapter(list[ContainerWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != container_id:
         raise ParsingError("Container inspect identity mismatch")
     return results[0]
@@ -283,7 +282,7 @@ def inspect_container(config: ClientConfig, container_id: str) -> ContainerWire:
 def inspect_standalone(config: ClientConfig, reference: str) -> StandaloneContainerWire:
     """Inspect exactly one container without requiring Compose labels."""
     payload = run([*config.docker_cmd, "inspect", "--type", "container", reference])
-    results = TypeAdapter(list[StandaloneContainerWire]).validate_json(payload)
+    results = type_adapter(list[StandaloneContainerWire]).validate_json(payload)
     if len(results) != 1:
         raise ParsingError("Container inspect identity mismatch")
     return results[0]
@@ -326,7 +325,7 @@ def _batch_items[Wire: BaseModel](
     """
     payload = run([*config.docker_cmd, *kind.command, *chunk])
     by_id: dict[str, dict[str, JsonValue]] = {}
-    for item in TypeAdapter(list[dict[str, JsonValue]]).validate_json(payload):
+    for item in type_adapter(list[dict[str, JsonValue]]).validate_json(payload):
         identity = item.get(kind.key)
         if type(identity) is not str or identity in by_id:
             raise ParsingError("Batch inspect identity mismatch")

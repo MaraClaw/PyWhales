@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from types import TracebackType
 from typing import Literal, Self, overload, override
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import JsonValue
 
 from pywhales._json import loads_compat
 from pywhales.client_config import (
@@ -17,7 +17,13 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.models import ImageVariantManifest
 from pywhales.components.manifest.models import ManifestListInspectResult
-from pywhales.utils import custom_parse_object_as, run, to_list, validate_timeout
+from pywhales.utils import (
+    custom_parse_object_as,
+    run,
+    to_list,
+    type_adapter,
+    validate_timeout,
+)
 
 
 def _inspect_command(
@@ -133,7 +139,7 @@ def _inspect_manifest_list_snapshot(
         raise ParsingError("Missing manifest-list reference")
     output = run(_inspect_command(client_config, reference, insecure))
     try:
-        data = TypeAdapter(dict[str, JsonValue]).validate_json(output, strict=True)
+        data = type_adapter(dict[str, JsonValue]).validate_json(output, strict=True)
         for wire, field in (
             ("schemaVersion", "schema_version"),
             ("mediaType", "media_type"),

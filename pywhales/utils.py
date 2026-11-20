@@ -15,6 +15,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from datetime import datetime, timedelta
@@ -26,6 +27,7 @@ from typing import (
     Any,
     Literal,
     Self,
+    cast,
     overload,
     override,
 )
@@ -49,9 +51,50 @@ PROJECT_ROOT = Path(__file__).parents[1]
 
 LOGGER = logging.getLogger(__name__)
 
+_ADAPTERS: dict[Any, pydantic.TypeAdapter[Any]] = {}
+_ADAPTERS_LOCK = threading.RLock()
+
+
+def type_adapter[T](type_: type[T]) -> pydantic.TypeAdapter[T]:
+    """Return the shared Pydantic adapter for a type, building it on first use.
+
+    Building an adapter regenerates the type's core schema and validator, which
+    costs far more than a validation, so each adapter is built once and kept.
+    Construction is lazy, never at import, and serialized by a lock with a
+    second lookup inside it, so concurrent first use builds exactly one adapter.
+
+    Types are keyed by typing's own equality and hash, so two separately
+    evaluated ``list[int]`` objects share an adapter while ``list[int]`` and
+    ``list[str]`` do not. Pass per-call options such as ``strict`` to the
+    validation method, not to the adapter, because every caller of an equal type
+    shares it. Adapters, and the types they hold, live for the process.
+
+    Args:
+        type_: Target model or type accepted by Pydantic's TypeAdapter.
+
+    Returns:
+        The adapter shared by every caller of an equal type. A type that can't be
+        hashed, such as an ``Annotated`` form with unhashable metadata, gets a
+        new uncached adapter on each call.
+    """
+    try:
+        adapter = _ADAPTERS.get(type_)
+    except TypeError:
+        return pydantic.TypeAdapter(type_)
+    if adapter is None:
+        with _ADAPTERS_LOCK:
+            adapter = _ADAPTERS.get(type_)
+            if adapter is None:
+                adapter = pydantic.TypeAdapter(type_)
+                _ADAPTERS[type_] = adapter
+    return cast("pydantic.TypeAdapter[T]", adapter)
+
 
 def custom_parse_object_as[T](type_: type[T], obj: object) -> T:
     """Parse a Python value using Pydantic's adapter for the requested type.
+
+    The adapter comes from ``type_adapter``, so repeated calls for an equal type
+    reuse one adapter.
 
     Args:
         type_: Target model or type accepted by Pydantic's TypeAdapter.
@@ -63,7 +106,7 @@ def custom_parse_object_as[T](type_: type[T], obj: object) -> T:
     Raises:
         pydantic.ValidationError: If the input cannot satisfy the target type.
     """
-    return pydantic.TypeAdapter(type_).validate_python(obj)
+    return type_adapter(type_).validate_python(obj)
 
 
 def title_if_necessary(string: str) -> str:

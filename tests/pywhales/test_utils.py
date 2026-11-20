@@ -6,6 +6,7 @@ does not replace the local process requirements.
 """
 
 import errno
+import json
 import os
 import select
 import signal
@@ -21,9 +22,12 @@ from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
-from typing import Literal, assert_never, override
+from typing import Annotated, Any, Literal, assert_never, override
 
+import pydantic
 import pytest
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import CoreSchema, core_schema
 
 import pywhales._process_stream
 import pywhales._readiness
@@ -47,10 +51,13 @@ from pywhales.exceptions import (
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
+    PROJECT_ROOT,
     MappedProcessStream,
     ProcessStream,
+    custom_parse_object_as,
     format_cpuset,
     stream_stdout_and_stderr,
+    type_adapter,
 )
 
 
@@ -2307,3 +2314,169 @@ def test_scoped_stream_deadline_wait_is_one_wait_for_the_remaining_time(
     finally:
         stream.close()
     _assert_process_released(stream)
+
+
+@dataclass
+class _AtLeast:
+    """Unhashable schema marker: value equality without frozen leaves no hash."""
+
+    minimum: int
+
+    def __get_pydantic_core_schema__(
+        self, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            self._check, handler(source)
+        )
+
+    def _check(self, value: int) -> int:
+        if value < self.minimum:
+            raise ValueError("below the minimum")
+        return value
+
+
+class _WatchedLock:
+    """Re-entrant lock that signals once a second acquisition has been attempted."""
+
+    def __init__(self) -> None:
+        self.contended = Event()
+        self._lock = threading.RLock()
+        self._guard = threading.Lock()
+        self._attempts = 0
+
+    def __enter__(self) -> None:
+        with self._guard:
+            self._attempts += 1
+            if self._attempts == 2:
+                self.contended.set()
+        self._lock.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+@dataclass(eq=False)
+class _SchemaGate:
+    """Hashable schema marker holding each adapter build until contention starts."""
+
+    contended: Event
+    builds: list[int] = field(default_factory=list)
+
+    def __get_pydantic_core_schema__(
+        self, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        self.builds.append(1)
+        self.contended.wait(timeout=10)
+        return handler(source)
+
+
+def test_custom_parse_object_as_builds_one_adapter_per_type(
+    adapter_constructions: list[Any],
+) -> None:
+    for _ in range(3):
+        assert custom_parse_object_as(list[int], ["1", 2]) == [1, 2]
+        assert custom_parse_object_as(list[str], ["a"]) == ["a"]
+
+    assert adapter_constructions == [list[int], list[str]]
+
+
+def test_type_adapter_keeps_types_apart_and_options_per_call(
+    adapter_constructions: list[Any],
+) -> None:
+    ints = type_adapter(list[int])
+
+    assert type_adapter(list[int]) is ints
+    assert type_adapter(list[str]) is not ints
+    assert ints.validate_python(["1"]) == [1]
+    assert ints.validate_json("[1]") == [1]
+    with pytest.raises(pydantic.ValidationError):
+        ints.validate_python(["1"], strict=True)
+    assert ints.validate_python(["1"]) == [1]
+    with pytest.raises(pydantic.ValidationError):
+        custom_parse_object_as(list[str], [1])
+    assert adapter_constructions == [list[int], list[str]]
+
+
+def test_type_adapter_decodes_unhashable_types_without_caching_them(
+    adapter_constructions: list[Any],
+) -> None:
+    target: Any = Annotated[int, _AtLeast(5)]
+    with pytest.raises(TypeError):
+        hash(target)
+
+    assert custom_parse_object_as(target, 7) == 7
+    with pytest.raises(pydantic.ValidationError):
+        custom_parse_object_as(target, 3)
+
+    assert adapter_constructions.count(target) == 2
+    assert pywhales.utils._ADAPTERS == {}
+
+
+def test_type_adapter_concurrent_first_use_builds_one_adapter(
+    adapter_constructions: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = _WatchedLock()
+    monkeypatch.setattr(pywhales.utils, "_ADAPTERS_LOCK", lock)
+    gate = _SchemaGate(lock.contended)
+    target: Any = Annotated[int, gate]
+    workers = 4
+    start = threading.Barrier(workers)
+    adapters: list[object] = []
+
+    def decode() -> None:
+        start.wait(timeout=10)
+        adapters.append(type_adapter(target))
+
+    threads = [Thread(target=decode) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert len(adapters) == workers
+    assert all(adapter is adapters[0] for adapter in adapters)
+    assert gate.builds == [1]
+    assert adapter_constructions.count(target) == 1
+
+
+_IMPORT_PROBE = """
+import json
+import typing
+
+import pydantic
+
+built = []
+build = pydantic.TypeAdapter
+
+
+def counting(type_):
+    built.append(type_)
+    return build(type_)
+
+
+pydantic.TypeAdapter = counting
+
+import pywhales.client_config
+import pywhales.components.manifest.cli_wrapper
+import pywhales.convergence
+import pywhales.utils
+
+generic = [repr(item) for item in built if typing.get_origin(item) is not None]
+print(json.dumps([len(pywhales.utils._ADAPTERS), generic]))
+"""
+
+
+def test_importing_pywhales_builds_no_decode_adapters() -> None:
+    probe = subprocess.run(
+        [sys.executable, "-c", _IMPORT_PROBE],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    cached, generic = json.loads(probe.stdout)
+    assert cached == 0
+    assert generic == []

@@ -1,9 +1,11 @@
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import JsonValue
 
 from pywhales._inventory_dispatch import make_resource
 from pywhales._inventory_staging import stage_resources
@@ -642,6 +644,36 @@ def test_strict_manifest_inspect_rejects_missing_reference_without_launch() -> N
     with run_manifests(MANIFEST_RESPONSE) as run, pytest.raises(ParsingError):
         _inspect_manifest_list_snapshot(config, "")
     run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",
+        "[]",
+        "not json",
+        '{"schemaVersion": "2"}',
+        '{"name": "other", "schemaVersion": 2}',
+    ],
+    ids=["empty", "non-object", "invalid-json", "invalid-model", "other-name"],
+)
+def test_strict_manifest_inspect_rejects_unusable_output(output: str) -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(output), pytest.raises(ParsingError):
+        _inspect_manifest_list_snapshot(config, "ref")
+
+
+def test_strict_manifest_inspect_reuses_one_strict_adapter(
+    adapter_constructions: list[Any],
+) -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(*[MANIFEST_RESPONSE] * 3):
+        for reference in ("a", "b", "c"):
+            assert _inspect_manifest_list_snapshot(config, reference).name == reference
+    with run_manifests('{"schemaVersion": "2"}'), pytest.raises(ParsingError):
+        _inspect_manifest_list_snapshot(config, "d")
+
+    assert adapter_constructions.count(dict[str, JsonValue]) == 1
 
 
 def test_public_manifest_inspect_stays_lenient() -> None:
