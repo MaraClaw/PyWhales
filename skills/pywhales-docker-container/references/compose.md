@@ -76,6 +76,10 @@ these differences.
 `up` and `run` enable dependencies by default; `build`'s separate
 `with_dependencies` option defaults to `False`.
 `quiet=True` is incompatible with `stream_logs=True`.
+`up` and `run` also take opt-in `require_gpu=True`: it reads the project's
+normalized GPU requests (two extra launches, `compose config` and `system info`)
+and raises `GpuSupportError` before the launch. See
+[Swarm Services and Compose](containers-and-output.md#swarm-services-and-compose).
 
 ## Distinguish Timeout Meanings
 

@@ -164,13 +164,15 @@ print(support.gpus_available, support.gpu_devices)
 `gpu_support()` returns a frozen `GpuSupport` from
 `pywhales.components.system.gpu` (the package root doesn't export it):
 
-| Field | Meaning |
+| Attribute | Meaning |
 | --- | --- |
 | `os_type` | Daemon container OS; GPU requests need `"linux"` |
 | `gpu_runtimes` | Registered `nvidia` runtime, meaning the NVIDIA Container Toolkit is installed |
 | `cdi_spec_dirs` | CDI specification directories; empty when CDI is off or unreported |
 | `cdi_devices` | Discovered CDI device names, or `None` on daemons before Docker 28: unknown, not empty |
 | `gpu_devices` | Discovered devices of a `--gpus` kind: `nvidia.com/gpu` or `amd.com/gpu` |
+| `whole_gpus`, `gpu_uuids`, `mig_devices` | `gpu_devices` grouped by name: bare indexes (`nvidia.com/gpu=0`), `GPU-<uuid>` names, and MIG partitions (`0:1` or `MIG-<uuid>`) |
+| `gpu_count` | Number of `whole_gpus`, or `None` when `cdi_devices` is `None`; MIG partitions and aliases such as `all` aren't counted |
 | `gpus_available` | Linux daemon with a GPU runtime or GPU CDI device |
 
 An NVIDIA vGPU is assigned to the VM by the hypervisor, so inside the guest
@@ -216,13 +218,13 @@ get more vGPUs than the VM was assigned, and there's no fractional request. Each
 vGPU's size (for example 8 GB) is fixed by its vGPU profile when the VM is
 created.
 
-`require_gpu=True` doesn't check a count. With `gpus=N` it confirms only that
-the daemon has some GPU path, so `gpus=4` on a VM with one vGPU passes the
-preflight and fails only when the container starts. To have the count checked,
-name each device with `devices=[...]`: every CDI name must be discovered, so N
-names means N verified devices. Count distinct GPUs from `support.gpu_devices`
-by their plain index names (`nvidia.com/gpu=0`, `=1`, ...); the same card also
-appears as `=GPU-<uuid>` and `=all`, and MIG slices as `=0:1`.
+`require_gpu=True` checks a count against the daemon's discovered names. Docker's
+CDI path turns `--gpus N` into the literal names `nvidia.com/gpu=0` through
+`nvidia.com/gpu=<N-1>` (indexes, not any N GPUs), so `gpus=4` on a VM with one
+vGPU raises `gpu_device_missing` before the image pull, with
+`error.devices == ("nvidia.com/gpu=1",)`. A selection such as
+`gpus='"device=0,2"'` or `device=GPU-<uuid>` resolves to `nvidia.com/gpu=<id>` the
+same way. Count the GPUs a host offers with `support.gpu_count`.
 
 Add `require_gpu=True` to container `create()` or any `run()` mode, including
 the `docker.create`/`docker.run` aliases, to check the target first:
@@ -252,14 +254,31 @@ such as `/dev/fuse` aren't checked. With neither a `gpus` value nor a CDI name,
 `require_gpu=True` raises `ValueError` without launching anything. Default calls
 never probe.
 
+The count and selection check is conservative. It refuses a resolved name only
+when the daemon reports at least one name of the same kind and naming family
+(whole index or `GPU-` UUID), so a UUID request on a daemon that reports only
+indexes passes, and so does an index request on a MIG-only daemon. MIG names
+(`0:1`, `MIG-...`) in a count or selection are never verified, because MIG layouts
+change at runtime; explicit CDI names in `devices` still need an exact match
+(`cdi_device_missing`). `gpus="all"` isn't count-checked. A runtime-only host (an
+`nvidia` runtime and no reported CDI devices) passes any count, because there are
+no names to compare. Docker's NVIDIA driver tries CDI first and falls back to the
+legacy runtime hook on any CDI failure, so a `gpu_device_missing` refusal assumes
+the host's CDI spec is current; regenerate it with `nvidia-ctk cdi generate` after
+changing GPUs. `error.devices` lists missing indexes only up to the first one past
+the highest reported index, so a huge count stays bounded.
+
 | `GpuSupportError.reason` | Meaning |
 | --- | --- |
 | `not_linux` | The daemon doesn't run Linux containers |
 | `no_gpu_driver` | `gpus` was requested, but there's no `nvidia` runtime and no GPU CDI device; a count isn't compared |
 | `cdi_devices_unreported` | The daemon predates the discovered-device list, so CDI names can't be verified |
 | `cdi_device_missing` | Requested CDI names aren't discovered; `error.devices` lists them in request order |
+| `gpu_device_missing` | A `gpus` count or device selection resolves to GPU names the daemon doesn't list, never MIG names; `error.devices` lists them, deduplicated, in first-seen order |
+| `no_node_capacity` | Swarm `service.create` only: no ready, active node advertises enough of a requested generic resource; `error.devices` lists the unsatisfied `kind=value` requests |
 
-The message names only the reason. `GpuSupportError` is not a `DockerException`.
+Container and Compose checks refuse in table order, so the first applicable reason
+wins. The message names only the reason. `GpuSupportError` is not a `DockerException`.
 
 The evidence is incomplete in one direction: a host that serves `--gpus` only
 through the toolkit hook, with no registered `nvidia` runtime and no CDI spec,
@@ -275,8 +294,56 @@ stderr to the terminal and raises a plain `DockerException`. With
 `strict_workload_errors=True`, streamed runs also raise exact `DockerException`;
 only detached runs keep `GpuUnavailable`.
 
-Compose, Swarm services, and Buildx get no GPU preflight; request GPUs there
-through their own options.
+### Swarm Services and Compose
+
+Swarm `service.create()` and Compose `up()`/`run()` take `require_gpu=True` too;
+Buildx has no GPU preflight. Each check targets the client's own daemon or Swarm,
+is opt-in, and leaves Docker the final decision. Default calls never probe.
+
+```python
+swarm = DockerClient(host="ssh://ops@manager-01.example")
+swarm.service.create(
+    image, cmd, name="gpu-job", generic_resources=["gpu=2"], require_gpu=True
+)
+
+project = DockerClient(host="ssh://ops@gpu-01.example", compose_files=["compose.yaml"])
+project.compose.up(["trainer"], detach=True, require_gpu=True)
+project.compose.run("trainer", ["nvidia-smi", "-L"], tty=False, require_gpu=True)
+```
+
+For a service, `generic_resources` needs a nonzero `kind=int` request, or the call
+raises `ValueError` without a launch. After the `timeout` and option validation,
+it runs `node ls` plus one batched `node inspect` on the selected manager, outside
+`timeout`, then the single `service create` launch. One ready, active node must
+advertise every request (discrete values plus the count of named resources per
+kind). Requests aren't summed across nodes, though duplicate kinds in
+`generic_resources` are summed (the Docker CLI rejects them) and an amount may
+carry a leading `+`. Drained, paused or not-ready nodes are ignored. Placement constraints and capacity that running tasks claim are
+ignored, so a request can pass and still stay pending, but one that a ready,
+active node advertises is never refused. A refusal has reason `no_node_capacity`;
+on success the argv is unchanged.
+
+For Compose, the check adds two launches, `compose config` (normalized JSON) and
+`docker system info`, with the client's default deadline, outside `run()`'s
+`timeout` (`up()` has none). `config` names the selected services, so profile-gated
+services that `up`/`run` enables are rendered, and an unknown service fails it with
+`DockerException`. It reads `gpus`, `deploy.resources.reservations.devices` entries
+that name an NVIDIA or AMD GPU capability (`gpu`, `nvidia`, `compute`, `utility`,
+`amd` and the like) or use the `nvidia`/`cdi` driver, and `devices` mappings whose
+`source` and `target` are the same CDI name; a reservation with no count and no
+device IDs means all GPUs, which isn't count-checked. It covers the selected
+services (all for `None`) plus their `depends_on` closure unless
+`dependencies=False`. `up()` skips a service whose instance count is 0 (`scales`,
+else `scale`, else `deploy.replicas`) but still checks what it depends on; `run()`
+always checks its own service and skips only dependencies scaled to 0. With no GPU request it raises `ValueError` after `config` and before
+`info`, and `up(services=[])` stays a no-op without a probe. It runs after the
+call's arguments are validated and encoded, just before the launch, so a bad
+argument raises before either probe.
+
+`support.check(gpus=..., devices=...)` runs the container check on a `GpuSupport`
+you hold. `GpuRequest`, `compose_gpu_requests`, `generic_resource_requests` and
+`check_generic_resources` also live in `pywhales.components.system.gpu`; the package
+root exports none of them.
 
 ## Choose the Result Type
 

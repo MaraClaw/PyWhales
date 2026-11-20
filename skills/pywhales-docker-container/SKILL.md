@@ -31,7 +31,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes source APIs for project version 1.3.1, which covers
+This guidance describes source APIs for project version 1.3.2, which covers
 Docker CLI 29.9.3, Buildx v0.39.0, and Compose v5.7.1. PyWhales forwards flags
 without probing, so an older CLI or plugin can reject newer options.
 An installed version string alone isn't proof of support; check actual
@@ -77,7 +77,7 @@ are not part of this workflow.
 | Read when | Reference |
 | --- | --- |
 | Setting up imports, local/remote clients, CLI prerequisites, inherited environment allowlists, default deadlines, strict environment transport, workload-error classification, GPU errors (`GpuUnavailable`, `GpuSupportError`), hydrated listings and snapshot lifetimes, inspect/reload errors, root aliases such as `docker.events` and `docker.port`, the removed `trust` group, context changes, or raw-text option results | [Client, setup, and errors](references/client-and-errors.md) |
-| Translating run/exec/ps, passing container environment values, requesting GPUs, a number of vGPUs, MIG or CDI devices and checking the target daemon's GPU support, setting startup health intervals directly or through approved profiles, waiting on containers, choosing output modes, mounting files, looking up published ports, checkpointing, bounding prune launches, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
+| Translating run/exec/ps, passing container environment values, requesting GPUs, a number of vGPUs, MIG or CDI devices and checking the target daemon's GPU support (also for Swarm services and Compose), setting startup health intervals directly or through approved profiles, waiting on containers, choosing output modes, mounting files, looking up published ports, checkpointing, bounding prune launches, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
 | Pulling, pushing, saving, or loading images and registry archives, including platform selection, all-tags transfers, image history and search, child-aware transfer fanout, shared IO, upload and archive stderr budgets | [Registry transfers and archives](references/registry-and-archives.md) |
 | Building images, passing build args, selecting exporters, streaming builds, checking Dockerfiles, or using Buildx history, policy, replay, and debug output | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, managing a stack, or using stats, cp, wait, bridge, and config queries | [Compose](references/compose.md) |
@@ -92,8 +92,10 @@ are not part of this workflow.
 | `docker run ...` | `docker.run(image, ["arg", ...], ...)` |
 | `docker exec ...` | `docker.execute(container, ["arg", ...])`, not `docker.exec` |
 | `docker run --gpus all ...` | `docker.run(image, [...], gpus="all")`; add `require_gpu=True` to check the target first |
-| `docker run --gpus 2 ...` | `docker.run(image, [...], gpus=2)`; `require_gpu` doesn't check the count, so list CDI names in `devices` to verify N vGPUs |
+| `docker run --gpus 2 ...` | `docker.run(image, [...], gpus=2)`; `require_gpu=True` also checks that the daemon lists GPUs 0 and 1 when it names them by index |
 | `docker run --device nvidia.com/gpu=0:1 ...` | `docker.run(image, [...], devices=["nvidia.com/gpu=0:1"])` for a vGPU or MIG CDI device |
+| `docker service create --generic-resource gpu=2 ...` | `docker.service.create(image, [...], generic_resources=["gpu=2"])`; add `require_gpu=True` to check the Swarm's nodes first |
+| `docker compose up` or `run` for GPU services | `client.compose.up([...], require_gpu=True)` checks the daemon against the project's GPU requests first |
 | `docker ps` | `docker.ps()` or `docker.container.list()` |
 | `docker build ...` | `docker.build(...)`, an alias of `docker.buildx.build(...)` |
 | `docker compose ...` | A scoped `DockerClient(...).compose` namespace |
