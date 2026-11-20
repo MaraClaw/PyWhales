@@ -40,7 +40,7 @@
   then `claim`, then `reconcile`. Every pass inventories first, even after `SUCCEEDED`, so schedule periodic passes.
 - Mutation needs `SUBMITTED`, zero attempts, and `ABSENT` evidence with no resources. The controller commits
   `Progress(UNKNOWN, 1)` and keeps the lease before `apply`. `UNKNOWN` also covers crashes and lost responses, so
-  `AmbiguousMutation`, `DockerException`, `OSError`, or a store outage after launch leave it set.
+  `AmbiguousMutation`, an adapter error from `_controller._ADAPTER_ERRORS`, or a store outage after launch leave it set.
 - After any attempt, `ABSENT` or `INDETERMINATE` evidence stays `UNKNOWN` for an operator to resolve. Never replay.
   `CONFLICT` raises `IdentityConflict`. Preexisting `APPLIED` resources don't unlock mutation.
 - `APPLIED` evidence must be non-empty, unique by kind and identity, and exactly owned: endpoint, owner, class, and
@@ -57,7 +57,11 @@
   and release all use it, so a renewed pass commits exactly what a short one would. A renewal `StoreConflict` or
   `StoreUnavailable` halts that object for good (a failed renewal may have committed, never assume rollback): later
   checks and the post-observe commit re-raise it, even if the adapter swallowed it, with no outcome commit.
-- Observation errors become `AdapterUnavailable` `from None`. Store conflicts and outages halt the pass with no
+- Inventory and observation adapter errors become `AdapterUnavailable` `from None`. `_ADAPTER_ERRORS` is the one
+  tuple for every site: `DockerException`, `OSError` (including `ObservationTimeout`), `ObservationLimitError`,
+  `ObservationCancelled`, `StreamBufferLimitError`, `ParsingError`, `ClientNotFoundError` and pydantic
+  `ValidationError`. Never catch broadly: store, identity and description errors, the lease-renewal `RuntimeError` and
+  `AdmissionError` subclasses propagate unchanged. Store conflicts and outages halt the pass with no
   further adapter action. `AdmittedReconciliation` defers the whole pass; adapters must not nest admission. A spec for
   another endpoint fails in `submit` and `claim`; an admission owner for another endpoint fails at construction.
 
