@@ -35,8 +35,9 @@
 - Manifest lists require per-reference inspection, never generic batching; each handle's `insecure` flag follows its launch. Strict helper and lenient public inspection differ: [manifest guide](components/manifest/AGENTS.md).
 - Stage all groups before any cache/timestamp publication; staged identity equals stored identity exactly without freshness accessors. Any group failure leaves all originals, including pins, unchanged; each distinct handle publishes once through the unpinned setter.
 - This is neither a daemon transaction nor atomic for concurrent readers: groups inspect separately and successful handles publish sequentially.
-- `capture_inventory()` never publishes: ordered detached deep-copied records retain duplicates and leave inputs untouched.
+- `capture_inventory()` never publishes: ordered detached deep-copied records retain duplicates and leave inputs untouched. It doesn't copy the staged handles it discards; `stage_resources()` builds no records.
 - Check reference totals before launching; chunks obey `max_references` and launch limits, with each group's measured environment frozen. Alias drift, inconsistent snapshots, or cross-chunk Swarm ambiguity reject capture.
+- Planning uses one `_launch_limits.LaunchPlanner` per `_stage` call: `os.sysconf` is read at most once per call, never cached across calls, and each group's `LaunchMeasurement` encodes its prefix, environment and each reference once. A measurement must refuse exactly as `check_launch`, which stays the per-launch check; `test_launch_limits.py` compares them over seeded generated input.
 - `_inventory_staging._stage` checks the complete chunk plan against every enclosing launch account's remaining allowance before its first inspect: ordinary chunks, one builder listing per group, singleton manifests. This consumes no reservation; concurrent consumption can still refuse a later launch before any original cache is published.
 - Bulk reload uses bounded staging only with an explicit `policy` or active `observation()`; tests: `tests/pywhales/test_bulk_reload*.py` and `test_inventory*.py`.
 
