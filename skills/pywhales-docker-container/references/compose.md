@@ -103,9 +103,11 @@ concept, the Compose-side `--wait-timeout` bound on service readiness, not a
 local CLI deadline either. `start(wait_timeout=...)` and
 `up(shutdown_timeout=...)` are Compose-side options too.
 
-A local deadline kills and reaps only the local `docker` CLI. The `docker-compose`
-plugin child it started can outlive it, as live checks showed for `attach` and
-`logs`, so don't treat expiry as proof the plugin stopped.
+On POSIX, a local deadline kills the local `docker` CLI's whole process group,
+so the `docker-compose` plugin child dies with it. Launches with `tty=True` or
+an inherited terminal descriptor, and every launch on Windows, kill only the
+`docker` CLI. There the plugin can outlive it, as live checks showed for
+`attach` and `logs`, so don't treat expiry as proof the plugin stopped.
 
 ## One-Off Commands and TTY Defaults
 

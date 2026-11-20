@@ -80,9 +80,12 @@ deadline. A streaming deadline keeps advancing before and between iterations.
 Expiry raises `DockerTimeout` without guaranteeing that the daemon-side build
 stops. See [Prune Build Cache](#prune-build-cache) for `prune`.
 
-A local deadline kills and reaps only the local `docker` CLI. The `docker-buildx`
-plugin child it started can outlive it, as live checks showed for `dap.build` and
-`history.trace`, so don't treat expiry as proof the plugin stopped.
+On POSIX, a local deadline kills the local `docker` CLI's whole process group,
+so the `docker-buildx` plugin child dies with it. Launches with `tty=True`
+(such as `dap.build`) or an inherited terminal descriptor, and every launch on
+Windows, kill only the `docker` CLI. There the plugin can outlive it, as live
+checks showed for `dap.build` and `history.trace`, so don't treat expiry as
+proof the plugin stopped.
 
 ## Return Contracts
 
@@ -229,8 +232,9 @@ for record in docker.buildx.history.list(local=True):
 opens the first one, so call them only where that's intended. Imported records
 don't appear in `history.list()` and can't be passed to `open()`.
 `history.remove(all=True)` deletes every record: require explicit authorization.
-Use `trace()` as a context manager. In compare mode the buildx plugin may keep
-serving after you close it, because closing reaps only the local CLI.
+Use `trace()` as a context manager. On POSIX, closing kills the CLI's process
+group, buildx plugin included, unless stdin is a terminal. With terminal stdin,
+and on Windows, the plugin may keep serving in compare mode after you close it.
 
 `docker.buildx.policy.eval(source, *, file=None, platform=None, fields=None,
 print=False, ...)` and `docker.buildx.policy.test(path, *, filename=None,
