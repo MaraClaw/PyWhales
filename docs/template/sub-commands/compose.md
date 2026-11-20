@@ -58,7 +58,9 @@ resource objects.
 `build(timeout=...)` and `execute(timeout=...)` set a positive finite local CLI
 deadline in every output mode; `None` inherits the client default. Invalid values
 are rejected before lookup, including `build(services=[])`. Expiry kills and reaps
-only the local CLI, not service or daemon-side work. Shutdown timeouts on `down`,
+only the local CLI, not service or daemon-side work. On POSIX a launch without a
+TTY or inherited terminal loses its whole process group, `docker-compose` plugin
+included; terminal-facing launches and Windows kill only the `docker` process. Shutdown timeouts on `down`,
 `restart` and `stop` keep their Docker meaning.
 
 Eligible `build_args` values use child environment transport with name-only
