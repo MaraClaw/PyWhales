@@ -58,8 +58,9 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
   `timeout`; `inspect()` also forwards it to its follow-up listing.
 - `disk_usage()`, `dap.build()` and `dial_stdio()` take the local `timeout`, validated before any lookup.
   The last two run with inherited caller stdio (`run(..., tty=True)`), block until the CLI ends and return
-  `None`; no process stream is offered because DAP and gRPC traffic is not line-delimited. Expiry kills and
-  reaps only the local CLI.
+  `None`; no process stream is offered because DAP and gRPC traffic is not line-delimited. These
+  terminal-facing launches keep the leader-only kill: expiry kills and reaps only the local CLI, and the
+  `docker-buildx` plugin can outlive it.
 
 ## Debug logging and raw text
 
@@ -78,9 +79,10 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
 - `history.py` (`BuildxHistoryCLI`, models in `history_models.py`), `policy.py` (`BuildxPolicyCLI`) and
   `replay.py` (`BuildxReplayCLI`) are wired as `docker.buildx.history`, `.policy` and `.replay`, sharing the
   client config. Tests: `tests/pywhales/test_buildx_history_policy.py` and its `_types.py` contracts.
-- `history.trace()` returns an owned stream. A local deadline or `close()` reaps only the local `docker` CLI;
-  in `compare` mode the `docker-buildx` plugin can keep serving, as live checks showed. Keep that caveat in
-  the docstring.
+- `history.trace()` returns an owned stream. On POSIX a local deadline or `close()` SIGKILLs the CLI's process
+  group, `docker-buildx` included, unless inherited stdin is a terminal. With terminal stdin, and on Windows,
+  only the local `docker` CLI is reaped and in `compare` mode the plugin can keep serving, as live checks
+  showed. Keep that caveat in the docstring.
 - `history.open()` resolves a record in the builder's history and opens its `docker-desktop://` URL in the browser;
   it prints nothing. `history.import_()` uploads bundles to Desktop's `.imported` store (invisible to `list()` and
   `open()`), opens the first URL, and returns the `docker-desktop://` lines Buildx prints on stderr. Both were
