@@ -186,8 +186,16 @@ def test_aggregate_overflow_reaps_child_and_reports_actual_bytes() -> None:
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         children.append(process)
         return process
 

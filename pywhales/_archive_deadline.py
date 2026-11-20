@@ -5,7 +5,7 @@ from collections.abc import Buffer, Iterator
 from contextlib import suppress
 from functools import partial
 from io import BufferedReader, RawIOBase
-from subprocess import Popen
+from subprocess import Popen, TimeoutExpired
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import IO, TYPE_CHECKING, Literal, override
@@ -13,10 +13,13 @@ from typing import IO, TYPE_CHECKING, Literal, override
 from pywhales._readiness import (
     CANCEL_CHECK,
     WakeLatch,
+    await_exit,
     bounded_wait,
-    reap,
+    kill_launch,
+    reap_launch,
     unwind_launch,
     wait_ready,
+    watch_leader,
 )
 from pywhales.exceptions import (
     DockerTimeout,
@@ -32,11 +35,16 @@ type _Stop = Literal["command", "timeout", "cancelled", "limit"]
 
 
 class ArchiveDeadline:
-    """Account for archive pipe I/O and reap an expired local child.
+    """Account for archive pipe I/O and stop an expired local child.
 
     Counters include successful writes and reads, never submitted buffer sizes.
     The pipe lock serializes caller I/O with watchdog drains. Reap the process
     and join thread before publishing counters; a deadline is optional.
+
+    The child's exit is detected without reaping it; ``close()`` reaps it.
+    Every stop goes through ``kill_launch()``, so a launch with its own process
+    group loses the whole group, including a plugin that still holds a pipe
+    after the CLI exited. A transfer that ``wait()`` completed signals nothing.
 
     Pipe waits are readiness waits made under the pipe lock, so the watchdog
     never closes a pipe beneath one. A wait lasts the remaining time to the
@@ -81,7 +89,7 @@ class ArchiveDeadline:
     An archive stderr allowance enables independent output readers for uploads
     and a diagnostic reader for saves. Per-pipe locks protect readiness waits;
     the accounting lock covers only nonblocking operations. The enabled watcher
-    survives child reap until output EOF or closure, so inherited pipes remain
+    survives child exit until output EOF or closure, so inherited pipes remain
     cancellable. Diagnostic reads use their separate shared accounts even after
     reap, and retain at most the effective allowance, excluding the detection byte.
     """
@@ -119,6 +127,7 @@ class ArchiveDeadline:
         self.released = Event()
         self.lock = Lock()
         self._exited = Event()
+        self._finished = False
         self.concurrent = bool(self._scope and self._scope.archive_stderr_accounts)
         self._wake: WakeLatch | None = None
         self._changed = Event()
@@ -143,7 +152,9 @@ class ArchiveDeadline:
                 ):
                     os.set_blocking(pipe.fileno(), False)
             self._reaper = (
-                Thread(target=reap, args=(process, self._publish_exit), daemon=True)
+                Thread(
+                    target=watch_leader, args=(process, self._publish_exit), daemon=True
+                )
                 if self.concurrent
                 or deadline is not None
                 or (
@@ -184,7 +195,7 @@ class ArchiveDeadline:
             raise
 
     def _publish_exit(self) -> None:
-        """Release child capacity before publishing reap, without draining pipes."""
+        """Release child capacity before publishing exit, without draining pipes."""
         if self._reservation is not None:
             self._reservation.release()
         self._exited.set()
@@ -212,7 +223,7 @@ class ArchiveDeadline:
             self._changed.set()
 
     def _watch_concurrent(self) -> None:
-        """Enforce stops through pipe EOF, independently of local child reap."""
+        """Enforce stops through pipe EOF, independently of local child exit."""
         assert self._wake is not None
         try:
             while not self._wake.is_set():
@@ -231,14 +242,20 @@ class ArchiveDeadline:
                     break
                 self._changed.wait(self._remaining(running=running))
                 self._changed.clear()
-            if self._wake.is_set():
-                with suppress(ProcessLookupError):
-                    self.process.kill()
-                self.process.wait()
+            drained = (
+                self._exited.is_set()
+                and self._stdout_done.is_set()
+                and self._stderr_done.is_set()
+            )
+            stopped = self._wake.is_set() and not drained
+            if stopped:
+                kill_launch(self.process)
             for reader in self._readers:
                 reader.join()
             if self._wake.is_set():
                 self._close_concurrent_pipes()
+            if stopped:
+                reap_launch(self.process)
         finally:
             assert self._reaper is not None
             self._reaper.join()
@@ -253,7 +270,12 @@ class ArchiveDeadline:
                         pipe.close()
 
     def close(self) -> None:
-        """Reap and join owned workers without replacing an active caller error."""
+        """Reap and join owned workers without replacing an active caller error.
+
+        A transfer that ``wait()`` has not completed is stopped first, so a
+        process group that still holds a pipe dies before its leader is reaped.
+        Repeated calls are safe.
+        """
         if self.concurrent:
             assert self._wake is not None
             self._wake.set()
@@ -262,11 +284,28 @@ class ArchiveDeadline:
             self._close_concurrent_pipes()
             self._wake.close()
         else:
-            if self.process.poll() is None:
-                with suppress(ProcessLookupError):
-                    self.process.kill()
-            self.process.wait()
+            if not self._finished:
+                kill_launch(self.process)
             self.thread.join()
+        reap_launch(self.process)
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for the child's exit after a completed transfer, without reaping.
+
+        Args:
+            timeout: Longest wait in seconds, or ``None`` to wait without one.
+
+        Returns:
+            The child's exit code, or the negated signal number that ended it.
+
+        Raises:
+            TimeoutExpired: The child still ran after ``timeout`` seconds.
+        """
+        if not self._exited.wait(timeout):
+            assert timeout is not None
+            raise TimeoutExpired(self.command, timeout)
+        self._finished = True
+        return await_exit(self.process)
 
     def output(self) -> bytes:
         """Finish enabled upload output and surface any recorded stop after cleanup."""
@@ -398,7 +437,7 @@ class ArchiveDeadline:
     def _watch(self) -> None:
         try:
             if self._reaper is None:
-                self.process.wait()
+                await_exit(self.process)
                 self._publish_exit()
                 return
             while not self._exited.wait(self._remaining()):
@@ -409,9 +448,8 @@ class ArchiveDeadline:
             if self._exited.is_set() and self._stop != "limit":
                 return
             self.expired = True
-            with suppress(ProcessLookupError):
-                self.process.kill()
-            self.process.wait()
+            kill_launch(self.process)
+            await_exit(self.process)
             with self.lock:
                 self.stdout = self._drain(self.process.stdout)
                 self.stderr = self._drain(self.process.stderr)
@@ -422,6 +460,7 @@ class ArchiveDeadline:
                 ):
                     if pipe is not None and not pipe.closed:
                         pipe.close()
+            reap_launch(self.process)
         finally:
             if self._reaper is not None:
                 self._reaper.join()
@@ -524,7 +563,7 @@ class ArchiveDeadline:
                 raise self._limit
             raise DockerTimeout(
                 self.command,
-                self.process.returncode,
+                await_exit(self.process),
                 self.stdout,
                 self.stderr,
                 raw_diagnostics=self.raw,
@@ -557,8 +596,7 @@ class ArchiveDeadline:
         if self._wake is not None:
             self._wake.set()
             self._changed.set()
-        with suppress(ProcessLookupError):
-            self.process.kill()
+        kill_launch(self.process)
 
     def _charge(self, chunk: bytes, overflow: ObservationLimitError | None) -> bool:
         """Charge a caller-thread read to the stream accounts; the lock is held.

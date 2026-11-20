@@ -98,6 +98,24 @@ class SimulatedExecution:
             raise RuntimeError(command)
         return subprocess.CompletedProcess(list(args), 0, stdout=output, stderr=b"")
 
+    def run_isolated(
+        self, args: list[str], *_settings: object, **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Simulate a launch that ``run()`` would start in its own process group.
+
+        Without a terminal, ``run()`` starts an owned ``Popen`` instead of calling
+        ``subprocess.run``, so the simulator replaces that path too.
+
+        Args:
+            args: Complete command arguments, including the executable slot.
+            *_settings: Positional launch settings, unused by the simulator.
+            **_options: Keyword launch settings, unused by the simulator.
+
+        Returns:
+            The same simulated result as ``run``.
+        """
+        return self.run(args)
+
 
 @dataclass(frozen=True, slots=True)
 class Timing:
@@ -149,7 +167,11 @@ def measure(name: str, operation: Callable[[], None], repetitions: int) -> Measu
     samples = []
     with (
         patch("subprocess.run", new=execution.run),
+        patch("pywhales.utils._run_isolated", new=execution.run_isolated),
         patch("subprocess.Popen", side_effect=RuntimeError("Process execution denied")),
+        patch(
+            "pywhales.utils.Popen", side_effect=RuntimeError("Process execution denied")
+        ),
         patch.dict("os.environ", {"PYWHALES_DEBUG": "0"}),
     ):
         for _ in range(repetitions):

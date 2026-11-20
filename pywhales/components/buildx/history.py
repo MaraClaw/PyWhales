@@ -474,10 +474,12 @@ class BuildxHistoryCLI(DockerCLICaller):
           `Trace available at http://...` line to stderr, and runs until it is
           stopped.
 
-        Closing the stream kills only the local `docker` process, not the
-        `docker-buildx` plugin it launched. Live checks on macOS with Docker CLI
-        29.9.3 and Buildx v0.39.0 found that plugin still serving after `close()`
-        in `compare` mode. Stop that server yourself, or avoid `compare`.
+        On POSIX, closing the stream kills the local `docker` process together
+        with the `docker-buildx` plugin it launched, unless inherited stdin is a
+        terminal. With a terminal on stdin, and on Windows, closing kills only
+        the `docker` process: live checks on macOS with Docker CLI 29.9.3 and
+        Buildx v0.39.0 found the plugin still serving after `close()` in
+        `compare` mode. Stop that server yourself there, or avoid `compare`.
 
         Args:
             ref: Bare record ID or `^N` offset. `None` lets Buildx pick its

@@ -50,6 +50,7 @@ from pywhales.exceptions import (
 )
 from pywhales.inventory import InspectionPolicy, InventoryRequest, capture_inventory
 from pywhales.utils import run, stream_stdout_and_stderr
+from tests.pywhales.process_groups import Grandchild, holder
 
 
 def policy(response: int = 1024, argv: int = 65536) -> InspectionPolicy:
@@ -190,8 +191,16 @@ def test_cancellation_interrupts_read_and_reaps_child() -> None:
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -457,8 +466,16 @@ def test_capture_helper_start_failure_unwinds_child_and_pipes(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -517,6 +534,7 @@ def children() -> Generator[list[subprocess.Popen[bytes]]]:
         pass_fds: Sequence[int] = (),
         stdin: int | None = None,
         bufsize: int = -1,
+        start_new_session: bool = False,
     ) -> subprocess.Popen[bytes]:
         process = popen(
             args,
@@ -526,6 +544,7 @@ def children() -> Generator[list[subprocess.Popen[bytes]]]:
             env=env,
             pass_fds=pass_fds,
             bufsize=bufsize,
+            start_new_session=start_new_session,
         )
         processes.append(process)
         return process
@@ -2130,3 +2149,64 @@ def test_archive_diagnostics_cancel_inherited_pipes_after_reap(
         assert os.read(status_read, 1) == b""
         os.close(status_read)
     assert_released(children[0])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize(
+    ("stop", "tail"),
+    [
+        ("deadline", "signal.pause()\n"),
+        ("scope", "signal.pause()\n"),
+        ("scope", "os._exit(0)\n"),
+        ("cancel", "signal.pause()\n"),
+        ("limit", "os.write(1, b'x' * 2048)\nsignal.pause()\n"),
+    ],
+    ids=["deadline", "scope-running", "scope-exited", "cancel", "limit"],
+)
+def test_observed_run_stop_kills_the_cli_process_group(
+    stop: Literal["deadline", "scope", "cancel", "limit"], tail: str
+) -> None:
+    cancel = Event()
+    expected: type[Exception] = {
+        "deadline": DockerTimeout,
+        "scope": ObservationTimeout,
+        "cancel": ObservationCancelled,
+        "limit": ObservationLimitError,
+    }[stop]
+    with Grandchild() as grandchild:
+        # Given an observed run with piped stdin whose CLI, running or exited,
+        # has a grandchild holding stdout and stderr.
+        def cancel_once_started() -> None:
+            grandchild.started()
+            cancel.set()
+
+        canceller = Thread(target=cancel_once_started, daemon=True)
+
+        # When the command or scope deadline expires, the scope is cancelled, or
+        # the response overflows its limit.
+        with (
+            pytest.raises(expected) as raised,
+            observation(
+                replace(policy(), max_total_stdin_bytes=16),
+                deadline=time.monotonic() + (0.5 if stop == "scope" else 30),
+                cancel=cancel,
+            ),
+        ):
+            if stop == "cancel":
+                canceller.start()
+            run(
+                [sys.executable, "-c", holder(tail), *grandchild.argv],
+                pass_fds=grandchild.fds,
+                input=b"",
+                timeout=0.5 if stop == "deadline" else None,
+            )
+
+        # Then the grandchild died with the CLI's process group.
+        if stop == "cancel":
+            canceller.join(timeout=5)
+            assert not canceller.is_alive()
+        else:
+            grandchild.started()
+        grandchild.assert_gone()
+        if isinstance(raised.value, DockerTimeout):
+            assert raised.value.return_code == -signal.SIGKILL

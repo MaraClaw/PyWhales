@@ -1,9 +1,10 @@
 """Process-backed output iteration, deadlines, and local CLI cleanup.
 
-Reader threads, a child-reaping thread, and a watchdog keep running independently
+Reader threads, a child-exit watcher, and a watchdog keep running independently
 of stream consumption. On POSIX they wait on readiness: no timer runs while idle,
 and every stop path wakes the readers through the stop latch. Cleanup controls
-only the local process, not daemon-managed resources. The threads reference an
+only the local CLI, together with its process group when the launch has one,
+not daemon-managed resources. The threads reference an
 internal core rather than the public handle, so a handle dropped without
 closing can be collected and its core closed by the shared reclaimer.
 """
@@ -24,9 +25,12 @@ from pywhales._readiness import (
     CANCEL_CHECK,
     WakeLatch,
     bounded_wait,
-    reap,
+    kill_launch,
+    leader_status,
+    reap_launch,
     unwind_launch,
     wait_ready,
+    watch_leader,
 )
 from pywhales._reclaim import watch
 from pywhales._stream_buffer import StreamBuffer
@@ -120,6 +124,7 @@ class _ProcessCore:
         self._timeout_stdout: bytes | None = None
         self._remaining_readers = 2
         self._live_readers = 2
+        self._drained_pipes = 0
         self._stderr = bytearray()
         self._pending = {"stdout": bytearray(), "stderr": bytearray()}
         self._pending_bytes = {"stdout": 0, "stderr": 0}
@@ -138,7 +143,7 @@ class _ProcessCore:
                 )
             )
             self._reaper = Thread(
-                target=reap, args=(process, self._publish_exit), daemon=True
+                target=watch_leader, args=(process, self._publish_exit), daemon=True
             )
             self._watchdog = Thread(target=self._monitor, daemon=True)
             for thread in (*self._threads, self._reaper, self._watchdog):
@@ -199,7 +204,7 @@ class _ProcessCore:
     def _notify_exit_failure(self) -> None:
         """Notify a registered owner if the child has exited unsuccessfully."""
         with self._queue.condition:
-            exit_code = self._process.returncode if self._exited else None
+            exit_code = leader_status(self._process) if self._exited else None
             if exit_code is None or exit_code == 0 or self._failure_callback is None:
                 return
             stderr = bytes(self._stderr)
@@ -229,6 +234,7 @@ class _ProcessCore:
         pending = self._pending[name]
         chunk = b""
         offset = 0
+        drained = False
         try:
             with pipe:
                 os.set_blocking(pipe.fileno(), False)
@@ -257,6 +263,7 @@ class _ProcessCore:
                                 pending.clear()
                                 self._pending_bytes[name] = 0
                                 self._publish(name, record)
+                        drained = True
                         break
                     if name == "stderr":
                         with self._queue.condition:
@@ -291,6 +298,7 @@ class _ProcessCore:
                 pending.clear()
                 self._pending_bytes[name] = 0
                 self._live_readers -= 1
+                self._drained_pipes += drained
             self._queue.finish()
 
     def _read(self, pipe: IO[bytes]) -> tuple[bytes, ObservationLimitError | None]:
@@ -446,10 +454,12 @@ class _ProcessCore:
         """Enforce deadlines and scope, and reap the child independently of iteration.
 
         Sleep until stop, child exit, or the next deadline or cancel check, never
-        on a fixed interval. Kill a running child when stopped, join the child
-        reaper, and then, for an observed stream, keep the scope in force until
-        the readers finish. Join the readers, close piped stdin, then close the
-        stop latch's wake descriptor, which no thread waits on any longer,
+        on a fixed interval. Kill a running child when stopped, join the exit
+        watcher, and then, for an observed stream, keep the scope in force until
+        the readers finish. Join the readers; if a stop left a pipe short of EOF,
+        kill the launch again so descendants holding it die while the exited
+        leader is still unreaped. Reap the leader, close piped stdin, then close
+        the stop latch's wake descriptor, which no thread waits on any longer,
         before signalling that owned resources have been released.
         """
         try:
@@ -460,8 +470,7 @@ class _ProcessCore:
                         self._queue.condition.wait(self._wake_in())
                 exited = self._exited
             if self._stop.is_set() and not exited:
-                with suppress(ProcessLookupError):
-                    self._process.kill()
+                kill_launch(self._process)
             self._reaper.join()
             self._notify_exit_failure()
             if self._observation is not None:
@@ -472,6 +481,9 @@ class _ProcessCore:
                             self._queue.condition.wait(self._wake_in())
             for thread in self._threads:
                 thread.join()
+            if self._stop.is_set() and self._drained_pipes < len(self._threads):
+                kill_launch(self._process)
+            reap_launch(self._process)
             if self.stdin is not None and not self.stdin.closed:
                 os.set_blocking(self.stdin.fileno(), False)
                 with suppress(BrokenPipeError, BlockingIOError):
@@ -617,9 +629,15 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     closing is closed by a shared background reclaimer once it is garbage
     collected, which may be later and isn't guaranteed before interpreter exit.
     Closing kills a running local CLI and waits for cleanup, never removing
-    daemon-managed resources. Recorded terminal errors are delivered once
-    through iteration or clean context exit, without replacing an exception
-    from the context body.
+    daemon-managed resources. On POSIX, when inherited stdin is not a terminal,
+    the CLI runs in its own process group and every stop, including closure,
+    deadlines, scope stops and reclamation, SIGKILLs the group while its leader
+    is unreaped, so plugins holding the pipes die even after the CLI exited.
+    An interpreter-exit hook does the same for streams still unclosed then.
+    Terminal-facing launches and Windows kill only the CLI process. A stream
+    that ends with EOF on both pipes signals nothing. Recorded terminal errors
+    are delivered once through iteration or clean context exit, without
+    replacing an exception from the context body.
 
     A stream launched inside an observation keeps that scope's deadline and
     cancel tokens after the scope exits. When one trips first, the local CLI is

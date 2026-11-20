@@ -9,14 +9,18 @@ import logging
 import subprocess
 import tempfile
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import assert_never
 
 import pytest
 
+import pywhales.utils
 from pywhales import DockerClient
 from pywhales._reclaim import _ensure_worker
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
+
+_STDLIB_RUN = subprocess.run
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,58 @@ def stream_reclaimer() -> None:
     one-time start as a leaked worker thread.
     """
     _ensure_worker()
+
+
+@pytest.fixture(autouse=True)
+def plain_launch_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Send isolated plain launches to a test's ``subprocess.run`` replacement.
+
+    CLI fakes and launch guards in this suite replace ``subprocess.run``, which
+    ``run()`` calls only for terminal-facing launches; a launch with its own
+    process group starts an owned ``Popen`` instead. While a test has replaced
+    ``subprocess.run``, a launch without timeout or input goes to the
+    replacement with the arguments the plain branch passes it, so no fake is
+    bypassed. Unpatched tests keep the real group-owning launch.
+
+    Args:
+        monkeypatch: Wraps the isolated launch for this test only.
+    """
+    isolated = pywhales.utils._run_isolated
+
+    def route(
+        args: list[str],
+        env: Mapping[str, str],
+        pass_fds: Sequence[int],
+        input: bytes | Iterable[bytes] | None,
+        deadline: float | None,
+        telemetry: ExecutionTelemetry,
+        *,
+        capture_stdout: bool,
+        capture_stderr: bool,
+        raw_diagnostics: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if subprocess.run is _STDLIB_RUN or deadline is not None or input is not None:
+            return isolated(
+                args,
+                env,
+                pass_fds,
+                input,
+                deadline,
+                telemetry,
+                capture_stdout=capture_stdout,
+                capture_stderr=capture_stderr,
+                raw_diagnostics=raw_diagnostics,
+            )
+        return subprocess.run(
+            args,
+            input=input,
+            stdout=subprocess.PIPE if capture_stdout else None,
+            stderr=subprocess.PIPE if capture_stderr else None,
+            env=env,
+            pass_fds=pass_fds,
+        )
+
+    monkeypatch.setattr(pywhales.utils, "_run_isolated", route)
 
 
 @pytest.fixture(scope="session")

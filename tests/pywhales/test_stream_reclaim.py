@@ -7,6 +7,7 @@ handle, collect it, and wait on events or bounded joins; nothing sleeps.
 import gc
 import logging
 import signal
+import subprocess
 import sys
 import threading
 import weakref
@@ -22,7 +23,13 @@ from pywhales._reclaim import watch
 from pywhales.client_config import ClientConfig
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry import CompletionRecord, TelemetryRecord
-from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+from pywhales.utils import (
+    PROJECT_ROOT,
+    MappedProcessStream,
+    ProcessStream,
+    stream_stdout_and_stderr,
+)
+from tests.pywhales.process_groups import Grandchild, holder
 
 BOUNDED_WAIT = 5.0
 WAITING_CHILD = "print('ready', flush=True); input()"
@@ -203,3 +210,72 @@ def test_reclaimer_logs_failures_by_type_and_keeps_running(
         "Reclaiming an abandoned stream raised RuntimeError; details withheld"
     ]
     assert all(r.exc_info is None for r in caplog.records)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize(
+    ("tail", "code"),
+    [("signal.pause()\n", -signal.SIGKILL), ("os._exit(0)\n", 0)],
+    ids=["running", "exited"],
+)
+def test_dropped_stream_kills_the_cli_process_group(tail: str, code: int) -> None:
+    with Grandchild() as grandchild:
+        # Given a stream whose CLI, running or exited, has a grandchild holding
+        # both pipes.
+        stream = stream_stdout_and_stderr(
+            [sys.executable, "-c", holder(tail), *grandchild.argv],
+            pass_fds=grandchild.fds,
+            pipe_stdin=True,
+        )
+        core = stream._core
+        grandchild.started()
+        handle = weakref.ref(stream)
+
+        # When the caller drops it unclosed.
+        del stream
+        gc.collect()
+
+        # Then reclamation reaped the CLI and its grandchild died with the group.
+        assert handle() is None
+        assert core._released.wait(BOUNDED_WAIT)
+        assert core._process.returncode == code
+        grandchild.assert_gone()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+def test_interpreter_exit_kills_the_group_of_an_unclosed_stream() -> None:
+    with Grandchild() as grandchild:
+        # Given an interpreter holding an unclosed stream whose CLI has a
+        # grandchild holding both pipes.
+        code = holder("os.write(1, b'started\\n')\nsignal.pause()\n")
+        script = "\n".join(
+            (
+                "import sys",
+                "from pywhales.utils import stream_stdout_and_stderr",
+                "fds = tuple(map(int, sys.argv[1:3]))",
+                f"command = [sys.executable, '-c', {code!r}, *sys.argv[1:3]]",
+                "stream = stream_stdout_and_stderr(",
+                "    command, pass_fds=fds, pipe_stdin=True",
+                ")",
+                "assert next(stream) == ('stdout', b'started\\n')",
+                "print('exiting', flush=True)",
+            )
+        )
+
+        # When that interpreter exits.
+        completed = subprocess.run(
+            [sys.executable, "-c", script, *grandchild.argv],
+            cwd=PROJECT_ROOT,
+            pass_fds=grandchild.fds,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+
+        # Then its exit hook killed the CLI's group, grandchild included.
+        assert (completed.returncode, completed.stdout) == (0, b"exiting\n"), (
+            completed.stderr.decode(errors="replace")
+        )
+        grandchild.started()
+        grandchild.assert_gone()

@@ -390,8 +390,16 @@ def test_cancellation_reaps_hung_fake_cli(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         if "ps" in args:
             launched.set()
@@ -440,8 +448,16 @@ def test_deadline_reaps_hung_child(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -777,9 +793,17 @@ def test_partial_cycles_never_replace_complete_detail_and_hung_children_are_reap
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         nonlocal matching
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         if args[-len(command) :] == command:
             matching += 1
@@ -1303,8 +1327,16 @@ def test_global_partial_recheck_retains_previous_complete_cycle_and_reaps_child(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 
@@ -1453,8 +1485,16 @@ def track_processes(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
-        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        process = popen(
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
+        )
         processes.append(process)
         return process
 

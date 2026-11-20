@@ -3,13 +3,12 @@
 import errno
 import os
 from collections.abc import Buffer, Iterable
-from contextlib import suppress
 from subprocess import Popen
 from threading import Thread
 from types import TracebackType
 from typing import TYPE_CHECKING, Self
 
-from pywhales._readiness import WakeLatch, wait_ready
+from pywhales._readiness import WakeLatch, await_exit, kill_launch, wait_ready
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 
 if TYPE_CHECKING:
@@ -28,7 +27,9 @@ class StdinPump:
     lazily, never buffering the whole iterable. Iterator code is the caller's:
     stopping the pump cannot interrupt it, so joining waits for a chunk in flight.
     A failing iterator, a write error, or an exhausted stdin budget kills the
-    child and is raised on a clean exit; an active body exception wins.
+    child and is raised on a clean exit; an active body exception wins. Kills go
+    through ``kill_launch()``, so an isolated launch loses its whole process
+    group, and waits leave the leader unreaped for its owner to reap.
 
     With an ``observation``, every write is limited by and charged to its stdin
     accounts, so bytes the pipe accepted are the only bytes counted.
@@ -67,8 +68,7 @@ class StdinPump:
         except OSError, RuntimeError:
             if stop is not None:
                 stop.close()
-            with suppress(ProcessLookupError):
-                self._process.kill()
+            kill_launch(self._process)
             raise
         self._stop = stop
         self._thread = thread
@@ -105,8 +105,7 @@ class StdinPump:
     def _fail(self, error: Exception) -> None:
         """Keep the first failure for the caller and stop the child."""
         self._error = error
-        with suppress(ProcessLookupError):
-            self._process.kill()
+        kill_launch(self._process)
 
     def _write(self, stop: WakeLatch) -> None:
         assert self._pipe is not None
@@ -135,9 +134,8 @@ class StdinPump:
             self._stop.set()
         try:
             if exc_type is not None:
-                with suppress(ProcessLookupError):
-                    self._process.kill()
-                self._process.wait()
+                kill_launch(self._process)
+                await_exit(self._process)
         finally:
             if self._thread is not None:
                 self._thread.join()

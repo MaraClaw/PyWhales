@@ -39,9 +39,15 @@ def test_bounded_capture_deadlines_preserve_timeout_type_and_partial_bytes(
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         process = real_popen(
-            args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
         )
         children.append(process)
         return process
@@ -135,9 +141,15 @@ def test_bounded_failure_reports_reaped_native_status(mode: str) -> None:
         stderr: int,
         env: Mapping[str, str],
         pass_fds: Sequence[int],
+        start_new_session: bool,
     ) -> subprocess.Popen[bytes]:
         process = real_popen(
-            args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+            args,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
         )
         children.append(process)
         if mode == "cancel":
@@ -266,9 +278,16 @@ def test_overlapping_captures_correlate_reverse_completion(mode: str) -> None:
         stderr: int | None = None,
         env: Mapping[str, str] | None = None,
         pass_fds: Sequence[int] = (),
+        start_new_session: bool = False,
     ) -> subprocess.Popen[bytes]:
         process = real_popen(
-            args, stdin=stdin, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+            pass_fds=pass_fds,
+            start_new_session=start_new_session,
         )
         children.append(process)
         started[len(children) - 1].set()
