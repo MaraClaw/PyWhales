@@ -3,8 +3,16 @@
 from dataclasses import replace
 from typing import assert_never
 
+from pydantic import ValidationError
+
+from pywhales.client_config import ClientNotFoundError, ParsingError
 from pywhales.convergence import Cancelled, Deadline, Failure, Outcome, Success
-from pywhales.exceptions import DockerException
+from pywhales.exceptions import (
+    DockerException,
+    ObservationCancelled,
+    ObservationLimitError,
+    StreamBufferLimitError,
+)
 from pywhales.reconciliation._adapters import (
     ActionContext,
     AdmittedReconciliation,
@@ -28,6 +36,20 @@ from pywhales.reconciliation._journal import (
     Transition,
 )
 from pywhales.reconciliation._store import JournalStore
+
+# Adapter failures that leave no usable evidence; ``OSError`` also covers
+# ``ObservationTimeout``. None of them is a base of the store, identity, lease
+# renewal (``RuntimeError``) or admission errors, which must propagate unchanged.
+_ADAPTER_ERRORS = (
+    DockerException,
+    OSError,
+    ObservationLimitError,
+    ObservationCancelled,
+    StreamBufferLimitError,
+    ParsingError,
+    ClientNotFoundError,
+    ValidationError,
+)
 
 
 def _outcome(progress: Progress, outcome: Outcome) -> Progress:
@@ -178,7 +200,7 @@ class Controller:
         context = self._context(entry)
         try:
             return self.adapters.inventory.inventory(context)
-        except DockerException, OSError:
+        except _ADAPTER_ERRORS:
             raise AdapterUnavailable() from None
 
     def _commit(
@@ -231,7 +253,7 @@ class Controller:
                 context = self._context(intent)
                 try:
                     self.adapters.mutation.apply(context)
-                except AmbiguousMutation, DockerException, OSError:
+                except (AmbiguousMutation, *_ADAPTER_ERRORS):
                     return self._commit(intent, intent.progress)
                 return self._pass(intent)
             case unreachable:
@@ -269,7 +291,7 @@ class Controller:
         context = ActionContext(spec, lease.check_current, lease.renew)
         try:
             outcome = self.adapters.convergence.observe(context, evidence.resources)
-        except DockerException, OSError:
+        except _ADAPTER_ERRORS:
             raise AdapterUnavailable() from None
         latest = lease.entry
         return self._commit(latest, _outcome(latest.progress, outcome))

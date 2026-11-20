@@ -1,12 +1,23 @@
 import json
+import traceback
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import override
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from pywhales import DockerClient
-from pywhales.admission import EndpointIdentity
+from pywhales.admission import (
+    AdmissionCancelled,
+    AdmissionQueueTimeout,
+    AdmissionReentryError,
+    AdmissionRejected,
+    EndpointIdentity,
+    RejectionReason,
+)
+from pywhales.client_config import ClientNotFoundError, ParsingError
 from pywhales.convergence import (
     Cancelled,
     ComposeTarget,
@@ -18,9 +29,17 @@ from pywhales.convergence import (
     capture_compose,
     wait,
 )
+from pywhales.exceptions import (
+    DockerException,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+    StreamBufferLimitError,
+)
 from pywhales.inventory import InspectionPolicy
 from pywhales.reconciliation import (
     ActionContext,
+    AdapterUnavailable,
     AmbiguousMutation,
     AttemptState,
     Controller,
@@ -36,6 +55,8 @@ from pywhales.reconciliation import (
     OperationSpec,
     ReconciliationAdapters,
     ResourceIdentity,
+    StoreConflict,
+    StoreUnavailable,
 )
 from tests.pywhales.test_convergence import (
     A,
@@ -447,6 +468,128 @@ def test_renewal_hook_stays_out_of_context_repr_and_equality() -> None:
     hooked = ActionContext(spec(), lambda: None, lambda ttl: None)
     assert plain == hooked
     assert "renew" not in repr(hooked)
+
+
+PAYLOAD = "credential-payload"
+
+
+def validation_error() -> ValidationError:
+    try:
+        TypeAdapter(int).validate_python(PAYLOAD)
+    except ValidationError as error:
+        return error
+    raise AssertionError("validation unexpectedly passed")
+
+
+MAPPED_ERRORS = [
+    pytest.param(
+        lambda: DockerException(["docker", PAYLOAD], 1, stderr=PAYLOAD.encode()),
+        id="docker",
+    ),
+    pytest.param(lambda: OSError(PAYLOAD), id="os"),
+    pytest.param(ObservationTimeout, id="observation-timeout"),
+    pytest.param(lambda: ObservationLimitError("max_references", 1, 2), id="limit"),
+    pytest.param(ObservationCancelled, id="observation-cancelled"),
+    pytest.param(lambda: StreamBufferLimitError(PAYLOAD, "output_record"), id="buffer"),
+    pytest.param(lambda: ParsingError(PAYLOAD), id="parsing"),
+    pytest.param(lambda: ClientNotFoundError(PAYLOAD), id="client-not-found"),
+    pytest.param(validation_error, id="validation"),
+]
+
+PROPAGATED_ERRORS = [
+    pytest.param(StoreConflict, id="store-conflict"),
+    pytest.param(StoreUnavailable, id="store-unavailable"),
+    pytest.param(IdentityConflict, id="identity-conflict"),
+    pytest.param(InvalidDescription, id="invalid-description"),
+    pytest.param(
+        lambda: RuntimeError("Lease renewal is only available while observing"),
+        id="renewal",
+    ),
+    pytest.param(lambda: AdmissionRejected(RejectionReason.BUSY), id="rejected"),
+    pytest.param(AdmissionCancelled, id="admission-cancelled"),
+    pytest.param(AdmissionQueueTimeout, id="queue-timeout"),
+    pytest.param(AdmissionReentryError, id="reentry"),
+]
+
+
+class FailingEndpoint(Endpoint):
+    """Raise one error after the named adapter stage has done its work."""
+
+    def __init__(self, stage: str, error: BaseException) -> None:
+        super().__init__()
+        self.stage, self.error = stage, error
+
+    def fail(self, stage: str) -> None:
+        if stage == self.stage:
+            raise self.error
+
+    @override
+    def inventory(self, context: ActionContext) -> InventoryEvidence:
+        evidence = super().inventory(context)
+        self.fail("inventory")
+        return evidence
+
+    @override
+    def apply(self, context: ActionContext) -> None:
+        super().apply(context)
+        self.fail("apply")
+
+    @override
+    def observe(
+        self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+    ) -> Outcome:
+        outcome = super().observe(context, resources)
+        self.fail("observe")
+        return outcome
+
+
+@pytest.mark.parametrize(
+    "stage,state",
+    [("inventory", AttemptState.SUBMITTED), ("observe", AttemptState.OBSERVING)],
+)
+@pytest.mark.parametrize("error", MAPPED_ERRORS)
+def test_inventory_and_observation_errors_become_adapter_unavailable(
+    stage: str, state: AttemptState, error: Callable[[], BaseException]
+) -> None:
+    store = MemoryJournalStore()
+    owner = controller(store, FailingEndpoint(stage, error()))
+    with pytest.raises(AdapterUnavailable) as raised:
+        owner.reconcile(owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30)))
+    assert type(raised.value) is AdapterUnavailable
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    assert PAYLOAD not in "".join(traceback.format_exception(raised.value))
+    current = store.read(spec().key)
+    assert current is not None and current.progress.state is state
+    assert PAYLOAD not in repr(current)
+
+
+@pytest.mark.parametrize("error", MAPPED_ERRORS)
+def test_mutation_errors_commit_unknown_progress(
+    error: Callable[[], BaseException],
+) -> None:
+    store = MemoryJournalStore()
+    endpoint = FailingEndpoint("apply", error())
+    owner = controller(store, endpoint)
+    result = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert result.progress.state is AttemptState.UNKNOWN
+    assert result.progress.attempts == 1
+    assert endpoint.trace == ["inventory", "mutate"]
+    assert store.read(spec().key) == result
+    assert PAYLOAD not in repr(result)
+
+
+@pytest.mark.parametrize("stage", ["inventory", "apply", "observe"])
+@pytest.mark.parametrize("error", PROPAGATED_ERRORS)
+def test_store_identity_lease_and_admission_errors_propagate_unchanged(
+    stage: str, error: Callable[[], BaseException]
+) -> None:
+    expected = error()
+    owner = controller(MemoryJournalStore(), FailingEndpoint(stage, expected))
+    with pytest.raises(type(expected)) as raised:
+        owner.reconcile(owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30)))
+    assert raised.value is expected
 
 
 def test_real_cli_deadline_is_journaled_and_repeated_passes_only_observe(
