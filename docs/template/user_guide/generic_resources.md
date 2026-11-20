@@ -166,6 +166,14 @@ go as long as you used UUID as your hamster's names.
 
 A more in depth guide can be found [here](https://gist.github.com/tomlankhorst/33da3c4b9edbde5c83fc1244f010815c).
 
+From Python, `service.create(..., generic_resources=["gpu=2"], require_gpu=True)`
+checks the Swarm before it creates the service. It raises `GpuSupportError` with
+reason `no_node_capacity` unless one ready, active node advertises enough of every
+requested resource. Requests for one kind are summed, although the Docker CLI
+rejects duplicate kinds. `check_generic_resources(requests, nodes)` in
+`pywhales.components.system.gpu` runs the same comparison on node handles you pass
+in. See [Checking a Swarm service](gpus.md#checking-a-swarm-service).
+
 
 
 
