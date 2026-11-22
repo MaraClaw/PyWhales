@@ -3,6 +3,7 @@
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from . import limits
 from .api import GitHub, Rejected, require
@@ -24,8 +25,10 @@ from .trust import (
     trusted_run,
 )
 
+type ArtifactKind = Literal["dist", "site", "seal", "receipt"]
 
-def name(kind: str, run: Run) -> str:
+
+def name(kind: ArtifactKind, run: Run) -> str:
     """Qualify every artifact name by both run and attempt."""
     return f"delivery-{kind}-{run.id}-{run.run_attempt}"
 
@@ -35,9 +38,11 @@ def job_named(jobs: tuple[Job, ...], name: str) -> Job:
     return next(job for job in jobs if job.name == name)
 
 
-def bundle(api: GitHub, run: Run, jobs: tuple[Job, ...], kind: str) -> Artifact:
+def bundle(
+    api: GitHub, run: Run, jobs: tuple[Job, ...], kind: ArtifactKind
+) -> Artifact:
     """Select and link one known artifact kind to its producing job."""
-    owners = {
+    owners: dict[ArtifactKind, str] = {
         "dist": "Build tested distributions",
         "site": "Render docs",
         "seal": SEAL_JOB,
