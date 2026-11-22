@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import assert_type
 
-from pywhales import DockerClient, Service, Stack, Task
+from pywhales import DockerClient, Service, Stack, Task, enums
 from pywhales.components.service.cli_wrapper import ServiceListFilter
 from pywhales.components.stack.cli_wrapper import StackPsFilter
 
@@ -17,6 +17,11 @@ def _check_stack_config(client: DockerClient) -> None:
 
 def _check_stack_deploy(client: DockerClient) -> None:
     assert_type(client.stack.deploy("web", "a.yml"), Stack)
+    assert_type(client.stack.deploy("web", "a.yml", False, "never"), Stack)
+    assert_type(
+        client.stack.deploy("web", resolve_image=enums.ImageResolutionMode.CHANGED),
+        Stack,
+    )
     assert_type(client.stack.deploy("web", "a.yml", detach=None, quiet=False), Stack)
     assert_type(client.stack.deploy("web", "a.yml", detach=True, quiet=True), Stack)
     assert_type(

@@ -11,6 +11,7 @@ from typing import Literal, override
 import pywhales.components.service.cli_wrapper
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.enums import ImageResolutionModeInput
 from pywhales.utils import (
     ValidPath,
     format_filters_for_cli,
@@ -124,7 +125,7 @@ class StackCLI(DockerCLICaller):
         name: str,
         compose_files: ValidPath | Sequence[ValidPath] = (),
         prune: bool = False,
-        resolve_image: str = "always",
+        resolve_image: ImageResolutionModeInput = "always",
         with_registry_auth: bool = False,
         env_files: Sequence[ValidPath] = (),
         variables: Mapping[str, str] = MappingProxyType({}),
