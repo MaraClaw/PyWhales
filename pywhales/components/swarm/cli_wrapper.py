@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 
 from pywhales.client_config import Command, DockerCLICaller
+from pywhales.enums import NodeAvailabilityInput
 from pywhales.utils import ValidPath, run, validate_timeout
 
 
@@ -72,7 +73,7 @@ class SwarmCLI(DockerCLICaller):
         self,
         advertise_address: str | None = None,
         autolock: bool = False,
-        availability: str = "active",
+        availability: NodeAvailabilityInput = "active",
         data_path_address: str | None = None,
         data_path_port: int | None = None,
         listen_address: str | None = None,
@@ -155,7 +156,7 @@ class SwarmCLI(DockerCLICaller):
         self,
         manager_address: str,
         advertise_address: str | None = None,
-        availability: str = "active",
+        availability: NodeAvailabilityInput = "active",
         data_path_address: str | None = None,
         listen_address: str | None = None,
         token: str | None = None,

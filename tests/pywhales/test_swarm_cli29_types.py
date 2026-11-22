@@ -4,11 +4,12 @@ from collections.abc import Iterator
 from datetime import timedelta
 from typing import assert_type
 
-from pywhales import DockerClient
+from pywhales import DockerClient, enums
 
 
 def _check_swarm_init(client: DockerClient, pools: Iterator[str]) -> None:
     assert_type(client.swarm.init(), None)
+    assert_type(client.swarm.init(availability=enums.NodeAvailability.ACTIVE), None)
     assert_type(
         client.swarm.init("10.0.0.1", True, "drain", "eth0", 4789, "0.0.0.0:2377"),
         None,
@@ -35,6 +36,15 @@ def _check_swarm_init(client: DockerClient, pools: Iterator[str]) -> None:
         None,
     )
     assert_type(client.swarm.init(default_addr_pools=pools), None)
+
+
+def _check_swarm_join(client: DockerClient) -> None:
+    """Check that join accepts both literal and enum availability."""
+    assert_type(client.swarm.join("manager:2377", None, "pause"), None)
+    assert_type(
+        client.swarm.join("manager:2377", availability=enums.NodeAvailability.DRAIN),
+        None,
+    )
 
 
 def _check_swarm_update(client: DockerClient) -> None:
