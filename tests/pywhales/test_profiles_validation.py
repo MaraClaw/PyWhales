@@ -78,6 +78,32 @@ def test_malformed_mount_path_is_typed_error(field: str, value: object) -> None:
     assert "payload-private" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("error_field", "reason"),
+    [
+        ("logging.driver", PolicyReason.UNSUPPORTED),
+        ("mounts.kind", PolicyReason.UNSUPPORTED),
+        ("pull", PolicyReason.INVALID),
+    ],
+)
+def test_unknown_profile_choices_raise_policy_error(
+    error_field: str, reason: PolicyReason, create_request: CreateRequest
+) -> None:
+    owner, _, field = error_field.rpartition(".")
+    component = {
+        "logging": create_request.logging,
+        "mounts": create_request.mounts[0],
+        "": create_request,
+    }[owner]
+
+    with pytest.raises(PolicyError) as caught:
+        replace(component, **{field: "private-choice"})
+
+    assert (caught.value.field, caught.value.reason) == (error_field, reason)
+    assert str(caught.value) == f"profile rejected {error_field}: {reason.value}"
+    assert "private-choice" not in repr(caught.value)
+
+
 def test_execution_owned_resolution_is_reusable_then_prefix_is_fixed(
     client: DockerClient, profile: SecurityProfile, create_request: CreateRequest
 ) -> None:
