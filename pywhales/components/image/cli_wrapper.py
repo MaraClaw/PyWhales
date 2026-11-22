@@ -48,6 +48,7 @@ from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.container.cli_wrapper import (
     ContainerCLI,
     ContainerConfig,
+    ContainerPullPolicy,
 )
 from pywhales.components.image.models import (
     ImageGraphDriver,
@@ -509,7 +510,7 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         self,
         path_in_image: ValidPath,
         destination: ValidPath,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         *,
         timeout: float | None = None,
     ) -> None:
@@ -538,7 +539,7 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         local_path: ValidPath,
         path_in_image: ValidPath,
         new_tag: str | None = None,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         *,
         timeout: float | None = None,
     ) -> Image:
@@ -2106,7 +2107,7 @@ class ImageCLI(DockerCLICaller):
         image: ValidImage,
         path_in_image: ValidPath,
         destination: ValidPath,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         *,
         timeout: float | None = None,
     ) -> None:
@@ -2148,7 +2149,7 @@ class ImageCLI(DockerCLICaller):
         local_path: ValidPath,
         path_in_image: ValidPath,
         new_tag: str | None = None,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         *,
         timeout: float | None = None,
     ) -> Image:

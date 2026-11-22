@@ -91,6 +91,8 @@ type ContainerListFilter = (
 )
 
 type AttachStream = Literal["stdin", "stdout", "stderr"]
+type CgroupnsMode = Literal["", "host", "private"]
+type ContainerPullPolicy = Literal["always", "missing", "never"]
 
 
 class ExecuteArgs(TypedDict, total=False, closed=True):
@@ -827,7 +829,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     cap_add: Iterable[str]
     cap_drop: Iterable[str]
     cgroup_parent: str | None
-    cgroupns: str | None
+    cgroupns: CgroupnsMode | None
     cidfile: ValidPath | None
     cpu_count: int | None
     cpu_percent: int | None
@@ -871,7 +873,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     ip: str | None
     ip6: str | None
     ipc: str | None
-    isolation: str | None
+    isolation: IsolationInput | None
     labels: Mapping[str, str]
     label_files: Iterable[ValidPath]
     link: Iterable[ValidContainer]
@@ -895,7 +897,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     privileged: bool
     publish: Iterable[ValidPortMapping]
     publish_all: bool
-    pull: str
+    pull: ContainerPullPolicy
     quiet: bool
     read_only: bool
     restart: str | None
@@ -1067,7 +1069,7 @@ class ContainerCLI(DockerCLICaller):
         cap_add: Iterable[str] = (),
         cap_drop: Iterable[str] = (),
         cgroup_parent: str | None = None,
-        cgroupns: str | None = None,
+        cgroupns: CgroupnsMode | None = None,
         cidfile: ValidPath | None = None,
         cpu_count: int | None = None,
         cpu_percent: int | None = None,
@@ -1111,7 +1113,7 @@ class ContainerCLI(DockerCLICaller):
         ip: str | None = None,
         ip6: str | None = None,
         ipc: str | None = None,
-        isolation: str | None = None,
+        isolation: IsolationInput | None = None,
         labels: Mapping[str, str] = {},
         label_files: Iterable[ValidPath] = (),
         link: Iterable[ValidContainer] = (),
@@ -1135,7 +1137,7 @@ class ContainerCLI(DockerCLICaller):
         privileged: bool = False,
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         quiet: bool = False,
         read_only: bool = False,
         restart: str | None = None,
@@ -2211,7 +2213,7 @@ class ContainerCLI(DockerCLICaller):
         cap_add: Iterable[str] = (),
         cap_drop: Iterable[str] = (),
         cgroup_parent: str | None = None,
-        cgroupns: str | None = None,
+        cgroupns: CgroupnsMode | None = None,
         cidfile: ValidPath | None = None,
         cpu_count: int | None = None,
         cpu_percent: int | None = None,
@@ -2256,7 +2258,7 @@ class ContainerCLI(DockerCLICaller):
         ip: str | None = None,
         ip6: str | None = None,
         ipc: str | None = None,
-        isolation: str | None = None,
+        isolation: IsolationInput | None = None,
         labels: Mapping[str, str] = {},
         label_files: Iterable[ValidPath] = (),
         link: Iterable[ValidContainer] = (),
@@ -2280,7 +2282,7 @@ class ContainerCLI(DockerCLICaller):
         privileged: bool = False,
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
-        pull: str = "missing",
+        pull: ContainerPullPolicy = "missing",
         quiet: bool = False,
         read_only: bool = False,
         restart: str | None = None,
@@ -2334,7 +2336,8 @@ class ContainerCLI(DockerCLICaller):
             cap_add: Linux capabilities to add.
             cap_drop: Linux capabilities to drop.
             cgroup_parent: Parent cgroup; None omits the option.
-            cgroupns: Cgroup namespace mode to use, one of 'host' or 'private'.
+            cgroupns: Use the host or a private cgroup namespace. Pass `""` to
+                explicitly select the daemon default, or `None` to omit the flag.
             cidfile: Local file in which the CLI writes the container ID.
             cpu_count: CPU count (Windows only).
             cpu_percent: CPU percent (Windows only).

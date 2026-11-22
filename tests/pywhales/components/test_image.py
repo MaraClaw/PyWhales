@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
+from operator import methodcaller
 from pathlib import Path
 from queue import Queue
 from subprocess import CompletedProcess, Popen
@@ -2618,12 +2619,14 @@ def test_copy_from_pull(container_mock: Mock) -> None:
     test_image_name = "test_dummy_image"
     test_pull_flag = "test_pull_flag_value"
 
-    docker.image.copy_from(
+    # Exercise raw runtime forwarding independently of the typed API contract.
+    methodcaller(
+        "copy_from",
         test_image_name,
         "test_path_in_image",
         "test_local_destination",
         pull=test_pull_flag,
-    )
+    )(docker.image)
 
     container_cli_mock.create.assert_called_with(test_image_name, pull=test_pull_flag)
 
@@ -2650,12 +2653,14 @@ def test_copy_to_pull(container_mock: Mock) -> None:
     test_image_name = "test_dummy_image"
     test_pull_flag = "test_pull_flag_value"
 
-    docker.image.copy_to(
+    # Exercise raw runtime forwarding independently of the typed API contract.
+    methodcaller(
+        "copy_to",
         test_image_name,
         "test_local_destination",
         "test_path_in_image",
         pull=test_pull_flag,
-    )
+    )(docker.image)
 
     container_cli_mock.create.assert_called_with(test_image_name, pull=test_pull_flag)
 
