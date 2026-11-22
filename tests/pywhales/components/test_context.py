@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pywhales import DockerClient
+from pywhales import DockerClient, DockerContextConfigDict
 from pywhales.client_config import ParsingError
 from pywhales.components.context.cli_wrapper import Context, DockerContextConfig
 from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
@@ -196,7 +196,7 @@ def test_create_context_with_endpoint_options(as_dict: bool) -> None:
     client = DockerClient(host="origin")
     client.client_config._client_call_with_path = ["docker-test"]
     source = Context(client.client_config, "source", is_immutable_id=True)
-    docker = (
+    docker: DockerContextConfigDict | DockerContextConfig = (
         {
             "from_": source,
             "host": "ssh://example",

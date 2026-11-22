@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self, overload, override
+from typing import Self, TypeIs, overload, override
 
 from pydantic import JsonValue
+from typing_extensions import TypedDict
 
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
@@ -104,7 +105,7 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
     def update(
         self,
         description: str | None = None,
-        docker: dict[str, Any] | DockerContextConfig | None = None,
+        docker: DockerContextConfigDict | DockerContextConfig | None = None,
     ) -> None:
         """Update this context's description or Docker endpoint, then reload it.
 
@@ -128,6 +129,17 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
 
 
 ValidContext = Context | str
+
+
+class DockerContextConfigDict(TypedDict, total=False, closed=True):
+    """Dictionary form of DockerContextConfig, with every option omittable."""
+
+    from_: ValidContext | None
+    host: str | None
+    certificate_authority: Path | str | None
+    certificate: Path | str | None
+    key: Path | str | None
+    skip_tls_verify: bool
 
 
 @dataclass
@@ -185,13 +197,20 @@ class KubernetesContextConfig:
         return ",".join(list_of_args)
 
 
+def _is_docker_context_config(
+    docker: DockerContextConfigDict | DockerContextConfig,
+) -> TypeIs[DockerContextConfig]:
+    """Narrow the endpoint union without changing which values count as dicts."""
+    return not isinstance(docker, dict)
+
+
 def _docker_endpoint_option(
-    docker: dict[str, Any] | DockerContextConfig | None,
+    docker: DockerContextConfigDict | DockerContextConfig | None,
 ) -> str | None:
     """Return the `--docker` option value, or None when no endpoint is set."""
     if docker is None:
         return None
-    if isinstance(docker, dict):
+    if not _is_docker_context_config(docker):
         docker = DockerContextConfig(**docker)
     return docker.format_for_docker_cli()
 
@@ -218,8 +237,8 @@ class ContextCLI(DockerCLICaller):
         default_stack_orchestrator: str | None = None,
         description: str | None = None,
         from_: ValidContext | None = None,
-        docker: dict[str, Any] | DockerContextConfig | None = None,
-        kubernetes: dict[str, Any] | KubernetesContextConfig | None = None,
+        docker: DockerContextConfigDict | DockerContextConfig | None = None,
+        kubernetes: Mapping[str, object] | KubernetesContextConfig | None = None,
     ) -> Context:
         """Create and inspect a Docker context.
 
@@ -411,7 +430,7 @@ class ContextCLI(DockerCLICaller):
         self,
         context: ValidContext,
         description: str | None = None,
-        docker: dict[str, Any] | DockerContextConfig | None = None,
+        docker: DockerContextConfigDict | DockerContextConfig | None = None,
     ) -> Context:
         """Update a context's description or Docker endpoint and inspect it.
 
