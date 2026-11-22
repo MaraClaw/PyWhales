@@ -28,6 +28,7 @@ from pywhales.components.node.models import (
     NodeStatus,
     NodeVersion,
 )
+from pywhales.enums import NodeAvailabilityInput, NodeRoleInput
 from pywhales.exceptions import DockerException
 from pywhales.utils import format_filters_for_cli, run, to_list
 
@@ -110,10 +111,10 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
 
     def update(
         self,
-        availability: str | None = None,
+        availability: NodeAvailabilityInput | None = None,
         labels_add: Mapping[str, str] = MappingProxyType({}),
         rm_labels: Sequence[str] = (),
-        role: str | None = None,
+        role: NodeRoleInput | None = None,
     ) -> None:
         """Update this Swarm node.
 
@@ -380,10 +381,10 @@ class NodeCLI(DockerCLICaller):
     def update(
         self,
         node: ValidNode,
-        availability: str | None = None,
+        availability: NodeAvailabilityInput | None = None,
         labels_add: Mapping[str, str] = MappingProxyType({}),
         rm_labels: Sequence[str] = (),
-        role: str | None = None,
+        role: NodeRoleInput | None = None,
     ) -> None:
         """Update a Swarm node.
 
