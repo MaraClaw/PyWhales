@@ -88,6 +88,8 @@ select = [
 
 [tool.ty.environment]
 python-version = "3.14"
+# Resolve checkout imports for the PEP 723 benchmark.
+extra-paths = ["."]
 
 [tool.ty.rules]
 all = "error"
@@ -99,7 +101,7 @@ error-on-warning = true
 respect-type-ignore-comments = false
 
 [tool.ty.src]
-include = ["pywhales", "tests", "docs"]
+include = ["pywhales", "tests", "docs", "scripts"]
 exclude = ["docs/site"]
 
 [tool.pytest.ini_options]

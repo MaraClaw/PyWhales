@@ -112,8 +112,8 @@ After the build, CI runs `python -m scripts.delivery smoke`. The seal, prepare, 
 - Follow [the Python docstring standard](docs/python-docstrings.md) for new or changed Python module, class, function, and method docstrings; do not rewrite unrelated docstrings.
 - Treat Ruff and ty settings in `pyproject.toml` as authoritative, not legacy `.flake8` or `.isort.cfg` files.
 - Ruff targets Python 3.14 and handles import sorting as well as linting and formatting. Its checks cover `scripts/` too.
-- ty checks `pywhales`, `tests`, and `docs`; all rules are errors and warnings fail the check.
-- Root ty excludes `scripts/`, including `scripts/delivery`. Use the scoped ty commands in `scripts/delivery/AGENTS.md` and `scripts/fleet_contract/README.md`.
+- ty checks `pywhales`, `tests`, `docs`, and `scripts` by default; all rules are errors and warnings fail the check.
+- Pass paths to `uv run --locked ty check` to scope a local check without changing the configuration.
 - ty doesn't respect type-ignore suppression comments; fix types rather than adding those comments.
 - Static `assert_type` contracts in `tests/pywhales/test_type_contracts.py` and related files are checked by ty, not exercised by pytest.
 - Coverage is measured for `pywhales` with a 90% minimum; `coverage report` enforces it.

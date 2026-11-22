@@ -231,12 +231,11 @@ uv run --offline --locked pytest tests/pywhales/test_fleet_contract.py \
 uv run --offline --locked ruff check ./
 uv run --offline --locked ruff format --check ./
 uv run --offline --locked ty check
-uv run --offline --locked ty check \
-  --config 'src.include = ["scripts/fleet_contract"]' scripts/fleet_contract
+uv run --offline --locked ty check scripts/fleet_contract
 ```
 
-The explicit ty include matters: repository defaults include SDK/tests/docs, not
-`scripts`. Tests deny subprocess/socket/DNS contact while parsing unsafe inputs,
+The path limits ty to the fleet contract package. Tests deny
+subprocess/socket/DNS contact while parsing unsafe inputs,
 exercise the actual CLI with Docker absent from PATH, and check incomplete and
 success-only reports. No test pins this prose. Do not run the destructive full
 integration suite or CI daemon provisioning on a workstation for this increment.
