@@ -201,7 +201,7 @@ and member payloads, **not total parser/decompressor memory or CPU** or resource
 uv run --locked pytest tests/pywhales/test_delivery_workflows.py
 uv run --locked ruff check scripts/delivery tests/pywhales/test_delivery_workflows.py
 uv run --locked ruff format --check scripts/delivery tests/pywhales/test_delivery_workflows.py
-uv run --locked ty check --config 'src.include = ["scripts/delivery", "tests/pywhales/test_delivery_workflows.py"]' scripts/delivery tests/pywhales/test_delivery_workflows.py
+uv run --locked ty check scripts/delivery tests/pywhales/test_delivery_workflows.py
 uv run --locked python -m scripts.delivery --help
 ```
 

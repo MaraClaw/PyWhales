@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.3.3
+
+### Static Typing
+
+- Closed string options now use `Literal` annotations, including container
+  pull policies, cgroup namespace and isolation modes, Compose image removal
+  modes, Swarm node roles and availability, service endpoint modes, stack
+  image resolution, and create-profile options. Type checkers can flag typos
+  without changing runtime validation or the arguments sent to Docker.
+- Docker endpoint dictionaries passed to `context.create()` or `context.update()`
+  (including `Context.update()`) can be annotated with `DockerContextConfigDict`,
+  exported from `pywhales`. Type checkers flag unknown keys and incorrect value
+  types; existing `DockerContextConfig` objects remain supported.
+
+### Internals
+
+- The default strict `ty` check now includes contributor scripts alongside the
+  library, tests, and documentation code. The internal native JSON decoder
+  exposes a recursive JSON value type rather than `Any`.
+
 ## 1.3.2
 
 ### New Features

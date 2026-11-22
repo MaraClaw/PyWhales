@@ -4,7 +4,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Final, override
+from typing import Final, Literal, override
 
 from pywhales.admission import EndpointIdentity
 
@@ -79,7 +79,7 @@ class LogPolicy:
     Blocking delivery accepts backpressure; neither mode guarantees audit delivery.
     """
 
-    driver: str
+    driver: Literal["json-file", "local"]
     max_size_bytes: int
     max_files: int
     mode: LogMode
@@ -115,7 +115,7 @@ class LogPolicy:
 class Mount:
     """Exact approved bind or volume mount, not a raw CLI fragment."""
 
-    kind: str
+    kind: Literal["bind", "volume"]
     source: str = field(repr=False)
     target: str = field(repr=False)
     read_only: bool
@@ -196,7 +196,7 @@ class CreateRequest:
     logging: LogPolicy
     runtime: str
     rootless: bool
-    pull: str
+    pull: Literal["never", "missing", "always"]
     health_start_interval: int | None = None
 
     def __post_init__(self) -> None:

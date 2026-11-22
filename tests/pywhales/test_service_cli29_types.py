@@ -5,6 +5,7 @@ from typing import assert_type
 
 from pywhales import DockerClient, Service
 from pywhales.components.task.cli_wrapper import Task
+from pywhales.enums import EndpointMode, Isolation
 
 
 def _check_service_create(client: DockerClient) -> None:
@@ -15,6 +16,8 @@ def _check_service_create(client: DockerClient) -> None:
             name="web",
             replicas=2,
             mode="global-job",
+            endpoint_mode="vip",
+            isolation="default",
             publish=[(80,), (8080, 80), (8080, 80, "tcp"), {"published": 8080}],
             config=[{"source": "c", "uid": 1000}],
             user="1000:1000",
@@ -49,6 +52,12 @@ def _check_service_create(client: DockerClient) -> None:
         Service,
     )
     assert_type(client.service.create("img", None, mode="replicated"), Service)
+    assert_type(
+        client.service.create(
+            "img", None, endpoint_mode=EndpointMode.DNSRR, isolation=Isolation.PROCESS
+        ),
+        Service,
+    )
     assert_type(
         client.service.create(
             "img", None, generic_resources=["gpu=1"], require_gpu=True
@@ -159,6 +168,17 @@ def _check_service_update(client: DockerClient, service: Service) -> None:
             rollback=True,
             timeout=1.0,
         ),
+        None,
+    )
+    assert_type(
+        client.service.update(
+            "svc", endpoint_mode=EndpointMode.VIP, isolation=Isolation.DEFAULT
+        ),
+        None,
+    )
+    assert_type(service.update(endpoint_mode="vip", isolation="hyperv"), None)
+    assert_type(
+        service.update(endpoint_mode=EndpointMode.DNSRR, isolation=Isolation.HYPERV),
         None,
     )
 

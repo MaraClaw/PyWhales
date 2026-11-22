@@ -84,8 +84,8 @@ and overlap (simultaneous arrivals, lease retries/exhaustion, original deadlines
 `test_transport_experiment.py` covers comparisons, `test_fleet_report.py` overlapping exports, `test_json_tooling.py` digests/SDK independence.
 `test_fleet_binding.py` covers canonicalization, same-revision declaration changes, environment tampering, malformed and legacy imports, export rebinding and baseline mismatches. Preserve process/socket/DNS denial boundaries and Docker-absent CLI checks.
 `test_fleet_backoff.py` covers fixed/exponential delays, caps, overflow/subnormal values, mixed policies, rejected-plan versions, ties, capacity exclusion, deadline clipping, exhaustion, stop/drain, independent histories, tampered imports and legacy digests. `test_fleet_binding.py` also checks changed exponential-policy digest comparisons with binding v1; backoff export and CLI imports live beside immediate-retry regressions.
-Root ty omits scripts. Include both packages explicitly for a scoped check from the repository root:
+To check just the fleet contract and harness packages from the repository root:
 
 ```bash
-uv run --offline --locked ty check --config 'src.include = ["scripts/fleet_contract", "scripts/fleet_harness"]' scripts/fleet_contract scripts/fleet_harness
+uv run --offline --locked ty check scripts/fleet_contract scripts/fleet_harness
 ```

@@ -15,6 +15,7 @@ from .components.container.cli_wrapper import Container, ContainerStats
 from .components.context.cli_wrapper import (
     Context,
     DockerContextConfig,
+    DockerContextConfigDict,
     KubernetesContextConfig,
 )
 from .components.image.cli_wrapper import Image
@@ -58,6 +59,7 @@ __all__ = [
     "Context",
     "DockerClient",
     "DockerContextConfig",
+    "DockerContextConfigDict",
     "DockerException",
     "Image",
     "InspectionPolicy",

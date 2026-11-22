@@ -36,7 +36,14 @@ from scripts.delivery.api import (
     Transport,
 )
 from scripts.delivery.artifacts import describe, download, inventory, sha256
-from scripts.delivery.chain import name, producer, project_version, receipt, seal
+from scripts.delivery.chain import (
+    ArtifactKind,
+    name,
+    producer,
+    project_version,
+    receipt,
+    seal,
+)
 from scripts.delivery.deadline import command_deadline, remaining
 from scripts.delivery.distributions import inspect, smoke
 from scripts.delivery.models import (
@@ -233,7 +240,7 @@ class Service(Transport):
         )
 
     def artifact(
-        self, number: int, kind: str, run: Run, files: dict[str, bytes]
+        self, number: int, kind: ArtifactKind, run: Run, files: dict[str, bytes]
     ) -> Artifact:
         data = zipped(files)
         self.routes[("GET", BASE_URL + f"actions/artifacts/{number}/zip")] = Response(

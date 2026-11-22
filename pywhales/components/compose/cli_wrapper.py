@@ -66,6 +66,7 @@ type ComposeConfigNames = Literal[
     "services", "volumes", "profiles", "images", "networks", "models"
 ]
 type ComposePullPolicyInput = Literal["missing", "always"]
+type ComposeRemoveImages = Literal["local", "all"]
 
 _CONFIG_NAMES = get_args(ComposeConfigNames.__value__)
 _COMMITTED_IMAGE = re.compile(r"Committed as (sha256:[0-9a-f]{64})")
@@ -894,7 +895,7 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | str | None = ...,
         remove_orphans: bool = ...,
-        remove_images: str | None = ...,
+        remove_images: ComposeRemoveImages | None = ...,
         timeout: int | None = ...,
         volumes: bool = ...,
         quiet: bool = ...,
@@ -907,7 +908,7 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | str | None = ...,
         remove_orphans: bool = ...,
-        remove_images: str | None = ...,
+        remove_images: ComposeRemoveImages | None = ...,
         timeout: int | None = ...,
         volumes: bool = ...,
         quiet: bool = ...,
@@ -919,7 +920,7 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | str | None = None,
         remove_orphans: bool = False,
-        remove_images: str | None = None,
+        remove_images: ComposeRemoveImages | None = None,
         timeout: int | None = None,
         volumes: bool = False,
         quiet: bool = False,
@@ -930,7 +931,7 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | str | None = None,
         remove_orphans: bool = False,
-        remove_images: str | None = None,
+        remove_images: ComposeRemoveImages | None = None,
         timeout: int | None = None,
         volumes: bool = False,
         quiet: bool = False,

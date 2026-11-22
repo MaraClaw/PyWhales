@@ -7,9 +7,21 @@ choose a path explicitly; neither falls back to the other.
 """
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import orjson
+from pydantic import JsonValue
+
+if TYPE_CHECKING:
+    # orjson documents a JSON value result for loads, but its stub returns Any.
+    class _NativeDecoder(Protocol):
+        def loads(
+            self, payload: str | bytes | bytearray | memoryview, /
+        ) -> JsonValue: ...
+
+    _native_decoder: _NativeDecoder
+else:
+    _native_decoder = orjson
 
 
 def dumps(value: object) -> bytes:
@@ -29,8 +41,7 @@ def dumps(value: object) -> bytes:
     return orjson.dumps(value)
 
 
-# The decoder stub returns arbitrary JSON; concrete callers validate its shape.
-def loads(payload: str | bytes | bytearray | memoryview) -> Any:  # noqa: ANN401
+def loads(payload: str | bytes | bytearray | memoryview) -> JsonValue:
     """Decode a JSON document with orjson.
 
     Args:
@@ -43,7 +54,7 @@ def loads(payload: str | bytes | bytearray | memoryview) -> Any:  # noqa: ANN401
         orjson.JSONDecodeError: If the payload is malformed, isn't valid UTF-8, or
             holds NaN, Infinity, or a lone surrogate escape.
     """
-    return orjson.loads(payload)
+    return _native_decoder.loads(payload)
 
 
 def dumps_compat(
@@ -83,7 +94,8 @@ def dumps_compat(
     )
 
 
-# Match the stdlib decoder stub; concrete callers validate the JSON shape.
+# Keep the stdlib stub's dynamic result for CLI callers that handle their own
+# shapes, including callers that rely on direct keyword unpacking's TypeError.
 def loads_compat(payload: str | bytes | bytearray) -> Any:  # noqa: ANN401
     """Decode a JSON document exactly as the standard library does.
 

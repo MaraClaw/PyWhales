@@ -78,12 +78,12 @@ Pages deployment workflow. `pages` and `verify-pages` remain CLI helpers.
 
 ## Scoped Checks
 
-These come from the README; root ty excludes `scripts/`, so ty needs the override.
+These come from the README. The ty paths narrow the repository-wide default check.
 
 ```bash
 uv run --locked pytest tests/pywhales/test_delivery_workflows.py
 uv run --locked ruff check scripts/delivery tests/pywhales/test_delivery_workflows.py
 uv run --locked ruff format --check scripts/delivery tests/pywhales/test_delivery_workflows.py
-uv run --locked ty check --config 'src.include = ["scripts/delivery", "tests/pywhales/test_delivery_workflows.py"]' scripts/delivery tests/pywhales/test_delivery_workflows.py
+uv run --locked ty check scripts/delivery tests/pywhales/test_delivery_workflows.py
 uv run --locked python -m scripts.delivery --help
 ```

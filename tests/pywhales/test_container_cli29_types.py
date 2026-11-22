@@ -4,8 +4,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import assert_type
 
-from pywhales import Container, DockerClient, Image
-from pywhales.components.container.cli_wrapper import PublishedPort
+from pywhales import Container, DockerClient, Image, docker
+from pywhales.components.container.cli_wrapper import PublishedPort, RunArgs
 from pywhales.components.system.gpu import (
     GpuRequest,
     GpuSupport,
@@ -13,6 +13,7 @@ from pywhales.components.system.gpu import (
     compose_gpu_requests,
     generic_resource_requests,
 )
+from pywhales.enums import Isolation
 from pywhales.utils import ProcessStream
 
 
@@ -21,10 +22,12 @@ def _check_create_and_run(client: DockerClient) -> None:
         client.container.create(
             "alpine",
             annotations={"k": "v"},
+            cgroupns="host",
             cpu_count=1,
             cpu_percent=50,
             io_maxbandwidth="10mb",
             io_maxiops=100,
+            isolation=Isolation.PROCESS,
             quiet=True,
             umask="022",
             use_api_socket=True,
@@ -36,11 +39,13 @@ def _check_create_and_run(client: DockerClient) -> None:
             "alpine",
             annotations={"k": "v"},
             attach=["stdout", "stderr"],
+            cgroupns="private",
             cpu_count=1,
             cpu_percent=50,
             detach_keys="ctrl-x",
             io_maxbandwidth=1024,
             io_maxiops=100,
+            isolation="process",
             quiet=True,
             umask="022",
             use_api_socket=True,
@@ -51,6 +56,13 @@ def _check_create_and_run(client: DockerClient) -> None:
     assert_type(
         client.container.run("alpine", attach=("stdout",), stream=True), ProcessStream
     )
+    assert_type(client.create("alpine", cgroupns="", isolation="default"), Container)
+    assert_type(
+        client.run("alpine", cgroupns="", isolation=Isolation.HYPERV, detach=True),
+        Container,
+    )
+    run_args: RunArgs = {"cgroupns": "host", "isolation": "hyperv"}
+    assert_type(docker.run("alpine", stream=True, **run_args), ProcessStream)
 
 
 def _check_commit_and_copy(client: DockerClient, container: Container) -> None:

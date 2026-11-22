@@ -106,6 +106,22 @@ def _check_ps(client: DockerClient, names: bool) -> None:
     assert_type(compose.ps(service_names=names), list[Container] | list[str])
 
 
+def _check_down(
+    client: DockerClient,
+    stream_logs: bool,
+    remove_images: Literal["local", "all"] | None,
+) -> None:
+    compose = client.compose
+    assert_type(compose.down(remove_images="local"), None)
+    assert_type(
+        compose.down(remove_images="all", stream_logs=True), ProcessStream | None
+    )
+    assert_type(
+        compose.down(remove_images=remove_images, stream_logs=stream_logs),
+        ProcessStream | None,
+    )
+
+
 def _check_existing_commands_with_new_options(client: DockerClient) -> None:
     compose = client.compose
     assert_type(compose.build("app", memory="512m"), None)

@@ -38,8 +38,7 @@ This guide maps edits; `../AGENTS.md` covers the surrounding contributor tooling
 
 ## Checks And Test Navigation
 
-Use the README's **Focused Checks**, including its explicit scoped ty include: root `ty check`
-doesn't include `scripts/`. Don't replace Python validation with schema-only acceptance.
+Use the README's **Focused Checks**. Don't replace Python validation with schema-only acceptance.
 Tests live under `tests/pywhales/`, relative to the repository root:
 
 | Test | Contract |
