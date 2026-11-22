@@ -273,6 +273,12 @@ type HealthStatusInput = (
 type IsolationInput = Isolation | Literal["default", "process", "hyperv"]
 type ResourceScopeInput = ResourceScope | Literal["swarm", "global", "local"]
 type RestartConditionInput = RestartCondition | Literal["none", "on-failure", "any"]
+type NodeRoleInput = NodeRole | Literal["worker", "manager"]
+type NodeAvailabilityInput = NodeAvailability | Literal["active", "pause", "drain"]
+type EndpointModeInput = EndpointMode | Literal["vip", "dnsrr"]
+type ImageResolutionModeInput = (
+    ImageResolutionMode | Literal["always", "changed", "never"]
+)
 type UpdateOrderInput = UpdateOrder | Literal["stop-first", "start-first"]
 type UpdateFailureActionInput = FailureAction | Literal["pause", "continue", "rollback"]
 type RollbackFailureActionInput = Literal[
