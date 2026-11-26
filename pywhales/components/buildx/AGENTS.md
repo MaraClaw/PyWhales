@@ -27,6 +27,7 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
   put `--debug` immediately after the subcommand path.
 - `cgroup_parent`, `policies`, `quiet`, `resources` (repeated `--resource key=value`), `shm_size` and `ulimits`
   default to omitted. `dap build` options are identical to `build` options; it adds only `iidfile`.
+- `format_dict_for_buildx()` delegates to `utils.format_csv_fields_for_cli()`: `--output`, `--cache-from`, `--cache-to`, `--attest`, `--provenance`, `--sbom` and `--driver-opt` fields containing a comma, double quote, CR or LF are quoted whole. Options are pre-formatted before the `Command` is built, so an unrepresentable key raises `ValueError` before executable lookup; `buildx/replay.py` reuses the same formatter.
 - Every build launch branch passes the snapshot-bound child environment returned by the shared
   `container_environment` eligibility seam for `build_args`. Strict fallback rejection precedes
   lookup and builder inspect; compatibility mode keeps literal fallback. Bake `--set` is unchanged.
@@ -40,7 +41,7 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
 - Reports return text; streams return `MappedProcessStream[str]`. Neither performs a follow-up config query.
 - `list="targets"` or `"variables"` (`--list`) is a report: one launch, table text (or a stream), no config query,
   `return_config` ignored. The CLI rejects it with `--print`, so the wrapper raises before any launch.
-- `variables` sets the launch environment; `variables_set` emits repeated `--var name=value`. `provenance` and
+- `variables` sets the launch environment; every `bake()` path first runs `validate_interpolation_environment()` on its names (loader names `LD_*`/`DYLD_*` in any case; the full reserved set with `strict_interpolation_environment=True`), raising a value-free `ValueError` before lookup. `variables_set` and `--set` values stay unchecked. `print=True` and the `return_config` follow-up decode through `JsonOutputParser`, so malformed or deeply nested JSON is a `ParsingError` (no cause or context in safe mode), not a decoder error. `variables_set` emits repeated `--var name=value`. `provenance` and
   `sbom` encode like build (`--provenance=true` for booleans, `key=value` pairs for mappings).
 
 ## Local launch deadlines
@@ -90,6 +91,7 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
 
 ## Builder snapshots
 
+- `Builder.__repr__` reads only `_held_inspect_result()` and shows `<not loaded>` otherwise; it never inspects or lists.
 - `Builder` reloads by matching its name in line-delimited JSON from `buildx ls --format "{{json . }}"`.
 - Public `list()` keeps its lenient contract: lines pass through a `set` (existing dedupe, unspecified order),
   parse with `json.loads`, and seed one handle each. Don't route it through the strict parser or sort it.

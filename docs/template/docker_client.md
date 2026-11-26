@@ -83,6 +83,30 @@ Compose also uses the child environment for `${VAR}` interpolation and name-only
 service `environment` entries. Transported values can therefore affect project
 configuration beyond the selected build argument or container assignment.
 
+## Interpolation environment
+
+`stack.deploy()` (env files and `variables`) and `buildx.bake()` (`variables`) pass
+their names to the child as an environment overlay that Compose or Bake uses for
+`${VAR}` interpolation. Both reject dynamic-loader names (`LD_*` and `DYLD_*`, in any
+case) with a `ValueError` before the executable is looked up. The message names
+neither the variable nor its value. `DockerClient(strict_interpolation_environment=True)`
+(also a `ClientConfig` setting, off by default) extends the check to every name the
+container `envs` transport reserves, such as `DOCKER_*`, `PYTHON*`, `LC_*` and proxy
+names. Bake `variables_set` and `--set` values aren't checked, and container
+environment transport is unchanged.
+
+## Captured output cap
+
+`DockerClient(max_captured_output_bytes=1_048_576)` caps the combined stdout and
+stderr that one captured CLI launch may produce outside an `observation()` scope.
+The default `None` leaves it unbounded. When a launch exceeds the cap, PyWhales
+kills and reaps the local CLI without waiting to drain it and raises
+`ObservationLimitError` with reason `response` and the cap as its limit; telemetry
+records one `limit` completion with stop reason `response`. Inside an observation
+scope, the smaller of the cap and the policy's `max_response_bytes` applies. The cap
+counts captured bytes only: it doesn't limit streams or archives, bound memory
+beyond the captured output, or stop work the daemon already started.
+
 ## Sub-commands
 
 * [`docker.buildx`](sub-commands/buildx.md)

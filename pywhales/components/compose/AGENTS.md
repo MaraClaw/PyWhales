@@ -25,6 +25,7 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 
 - `None` selects all services and `[]` skips execution for `build`, `create`, `down`,
   `kill`, `pause`, `pull`, `push`, `restart`, `rm`, `start`, `stop`, `unpause`, `up`, and `watch`.
+- Service-name operands are validated by `validate_operands()` after timeout validation and before lookup; the `command` of `run()`/`execute()` is workload argv and stays untouched. See the [operand contract](../../AGENTS.md#operands-and-csv-fields).
 - `top([])` returns an empty `ComposeTopResult`, or `""` with `raw=True`, without CLI lookup.
 - Don't generalize empty-selection behavior: `ps([])`, `logs([])`, and `events([])` select all.
 - The read-only listings `images`, `volumes` and `config_hashes` also treat `None` and `[]` as all services. Mutating

@@ -26,6 +26,8 @@ Importing PyWhales or constructing a client doesn't check that the CLI, daemon o
 uv pip install pywhales
 ```
 
+`DockerClient.login_ecr()` needs botocore, which isn't installed by default. Install `pywhales[ecr]` to use it.
+
 ## Quickstart
 
 ```python

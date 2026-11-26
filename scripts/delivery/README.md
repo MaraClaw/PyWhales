@@ -1,14 +1,15 @@
 # Tested Delivery Chain
 
 These helpers are contributor CI tools, not installed PyWhales APIs. They use
-the existing locked Python/Pydantic environment and runner `curl`. Local tests
+the existing locked Python/Pydantic environment and runner curl 8.3 or newer. Local tests
 replace every external service with inert fixtures. Do not run publication,
 release or deployment operations locally against the production repository.
 
 ## Handoffs
 
 1. `python-package.yml` keeps every original required job. It builds one wheel
-   and sdist, inspects metadata and typed-package contents, and separately
+   and sdist with the hash-pinned setuptools constraint, checks their member
+   and dependency allowlists without reading the checkout, and separately
    installs both exact artifacts using isolated Python outside the checkout.
    The rendered site and distributions are uploaded under run/attempt-qualified
    names. `Seal tested delivery` depends on every check, including each matrix
@@ -45,7 +46,11 @@ release or deployment operations locally against the production repository.
    Existing wheel/sdist files must have the exact filenames, package types and
    SHA256 hashes. Only missing files are offered to the uploader. A failed,
    skipped or concurrent upload can yield a receipt only if a fresh destination
-   inventory confirms both exact distributions. Unexpected/conflicting files
+   inventory confirms both exact distributions and the Integrity API reports
+   PEP 740 provenance for each, with a GitHub publisher matching the repository
+   and `python-publish.yml` and an in-toto subject matching its filename and sealed
+   SHA-256. The uploader uses PyPI Trusted Publishing and emits attestations.
+   Unexpected/conflicting files
    fail closed. A matching import or version string is not publication evidence.
    If files are missing, `confirm` rechecks the full inventory up to 12 times,
    five seconds apart, to allow for PyPI visibility delays. Conflicting,
@@ -127,7 +132,7 @@ overrides.
 
 PyWhales distributes pure Python, type markers and metadata, not native binaries
 or bundled datasets. A 16 MiB compressed distribution and 64 MiB expanded
-distribution leave substantial room for sources and tests. Static MkDocs output
+distribution leave substantial room for sources and packaging metadata. Static MkDocs output
 gets twice that aggregate allowance and 8,192 files/directories for API pages,
 search data and assets. The 160 MiB Pages wrapper accommodates 128 MiB of site
 payload plus tar headers, padding and path metadata. The 64 MiB network allowance
@@ -178,8 +183,9 @@ sizes only permit early rejection, never exemption from actual accounting.
 Curl's final four-byte status suffix has a separate framing allowance; stderr
 goes directly to the null device (zero retained bytes). The existing 10-second
 connect, 120-second curl and 130-second supervisor deadlines, HTTPS-only
-redirects and host-scoped authorization remain in effect. Every aborted owned
-curl is killed and reaped.
+redirects remain in effect. Curl expands `GH_TOKEN` from its environment only
+for GitHub API requests, never from argv. Every aborted owned curl is killed
+and reaped.
 
 Transient read faults are retried inside `Curl.request`, never by callers.
 Only `GET` retries, at most three times with 1, 2, then 4 seconds of backoff
@@ -215,4 +221,5 @@ documentation, package builds, and destructive disposable-daemon coverage.
 - [Attempt-specific jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt)
 - [Run-scoped artifact inventory and ZIP download](https://docs.github.com/en/rest/actions/artifacts)
 - [PyPI release JSON file inventory](https://docs.pypi.org/api/json/)
+- [PyPI Integrity API](https://docs.pypi.org/api/integrity/) and [PEP 740](https://peps.python.org/pep-0740/)
 - [Token-trigger restrictions](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)
