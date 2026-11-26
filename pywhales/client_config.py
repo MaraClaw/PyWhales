@@ -178,6 +178,9 @@ class ClientConfig:
             resources no service uses; only true emits it.
         compose_ansi: Compose control-character mode (``"never"``, ``"always"``
             or ``"auto"``); ``None`` omits the option.
+        max_captured_output_bytes: Positive cap on combined captured stdout and
+            stderr bytes per launch, or ``None`` for no client cap. A tighter
+            observation response limit still applies.
     """
 
     config: ValidPath | None = None
@@ -215,6 +218,7 @@ class ClientConfig:
     inherited_environment_names: Collection[str] | None = None
     compose_all_resources: bool = False
     compose_ansi: Literal["never", "always", "auto"] | None = None
+    max_captured_output_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.
@@ -235,6 +239,7 @@ class ClientConfig:
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
             ("stream_buffer_bytes", self.stream_buffer_bytes),
+            ("max_captured_output_bytes", self.max_captured_output_bytes),
         ):
             if budget is not None and (type(budget) is not int or budget <= 0):
                 raise ValueError(f"{name} must be a positive integer or None")

@@ -163,6 +163,7 @@ class DockerClient(DockerCLICaller):
         inherited_environment_names: Collection[str] | None = None,
         compose_all_resources: bool = False,
         compose_ansi: Literal["never", "always", "auto"] | None = None,
+        max_captured_output_bytes: int | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -238,6 +239,9 @@ class DockerClient(DockerCLICaller):
                 resources no service uses, only when true.
             compose_ansi: Compose control-character mode (`"never"`, `"always"`
                 or `"auto"`); `None` omits `--ansi`.
+            max_captured_output_bytes: Positive cap on combined captured stdout and
+                stderr bytes per CLI launch, or `None` for no client cap. A tighter
+                observation response limit still applies.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -281,6 +285,7 @@ class DockerClient(DockerCLICaller):
                 inherited_environment_names=inherited_environment_names,
                 compose_all_resources=compose_all_resources,
                 compose_ansi=compose_ansi,
+                max_captured_output_bytes=max_captured_output_bytes,
             )
         super().__init__(client_config)
 

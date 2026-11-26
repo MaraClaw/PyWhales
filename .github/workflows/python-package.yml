@@ -200,6 +200,8 @@ jobs:
             }
           }
           throw "Docker API did not become ready after 12 attempts (5 seconds apart). Last docker info exit code: $LASTEXITCODE"
+      - name: Test capped pipe capture
+        run: uv run --locked pytest -q tests/pywhales/test_telemetry_stop_runtime.py::test_client_capture_cap_records_one_response_stop
       - name: Run single test
         run: |
           uv run --locked pytest -vv --no-runtime-skip tests/pywhales/components/test_volume.py::test_simple_volume

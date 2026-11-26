@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from subprocess import PIPE, Popen
 from time import monotonic
@@ -242,7 +243,10 @@ def _log_command(
         LOGGER.debug("Running command (%d arguments; details withheld)", len(args))
 
 
-def _run_isolated(
+def _run_owned_capture(
+    isolated: bool,
+    cap: int | None,
+    /,
     args: list[str],
     env: Mapping[str, str],
     pass_fds: Sequence[int],
@@ -254,15 +258,18 @@ def _run_isolated(
     capture_stderr: bool,
     raw_diagnostics: bool,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run an unobserved launch in its own process group until it ends.
+    """Drain an unobserved launch, isolated or subject to a client byte cap.
 
     Output is drained like ``Popen.communicate()``, but the leader is reaped
     only once the call stops waiting, so each stop still reaches the group: a
     deadline expiring while the leader runs, pipes that a descendant still
     holds one second after the deadline, or any exception, KeyboardInterrupt
-    included, SIGKILLs it. A launch ending with EOF on every pipe signals nothing.
+    included, SIGKILLs it. Without isolation only the leader is stopped.
+    A launch ending with EOF on every pipe signals nothing.
 
     Args:
+        isolated: Start and track a new process group for this launch.
+        cap: Combined limit on captured bytes, or None for unlimited output.
         args: Complete stringified command.
         env: Effective child environment.
         pass_fds: Descriptors kept open in the child.
@@ -280,6 +287,7 @@ def _run_isolated(
 
     Raises:
         DockerTimeout: The leader still ran when the deadline expired.
+        ObservationLimitError: A read exceeded the combined captured output cap.
     """
     process = Popen(
         args,
@@ -288,9 +296,9 @@ def _run_isolated(
         stderr=PIPE if capture_stderr else None,
         env=env,
         pass_fds=pass_fds,
-        start_new_session=True,
+        start_new_session=isolated,
     )
-    track(process, True)
+    track(process, isolated)
     stdout = None if process.stdout is None else bytearray()
     stderr = None if process.stderr is None else bytearray()
     output = {
@@ -306,6 +314,7 @@ def _run_isolated(
             CapturePipes(pipes, exited) as ready,
             StdinPump(process, input, telemetry),
         ):
+            remaining = cap
             limit, grace = deadline, False
             while ready or not exited.is_set():
                 now = monotonic()
@@ -319,11 +328,30 @@ def _run_isolated(
                         kill_launch(process)
                     limit, grace = now + 1, True
                     continue
-                for fd, _ in ready.ready(None if limit is None else limit - now):
-                    if chunk := os.read(fd, 65536):
-                        output[fd].extend(chunk)
-                    else:
+                for fd, available in ready.ready(
+                    None if limit is None else limit - now
+                ):
+                    size = min(65536, available)
+                    if remaining is not None:
+                        size = min(size, remaining + 1)
+                    chunk = os.read(fd, size) if size else b""
+                    if not chunk:
                         ready.discard(fd)
+                        continue
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                        if remaining < 0:
+                            assert cap is not None
+                            # Count the detection read; the buffers die with the raise.
+                            output[fd].extend(chunk)
+                            telemetry.stdout_bytes = (
+                                None if stdout is None else len(stdout)
+                            )
+                            telemetry.stderr_bytes = (
+                                None if stderr is None else len(stderr)
+                            )
+                            raise ObservationLimitError("response", cap, cap + 1)
+                    output[fd].extend(chunk)
     finally:
         for pipe in (process.stdin, *pipes):
             if pipe is not None:
@@ -345,6 +373,10 @@ def _run_isolated(
             raw_diagnostics=raw_diagnostics,
         )
     return completed
+
+
+# Keep the plain isolated launch seam separate from opt-in capped launches.
+_run_isolated = partial(_run_owned_capture, True, None)
 
 
 @overload
@@ -450,8 +482,9 @@ def run(
         ValueError: If timeout is boolean, nonfinite, zero, or negative; or, inside
             an observation, if output is uncaptured, tty is set, or input is
             supplied without a stdin budget.
-        ObservationLimitError: With reason ``total_stdin`` when the input exceeds
-            an enclosing stdin budget.
+        ObservationLimitError: With reason ``response`` when combined captured output
+            exceeds the client or observation response limit, or ``total_stdin``
+            when the input exceeds an enclosing stdin budget.
         OSError: If the executable cannot be launched.
         DockerException: If the command exits unsuccessfully, with a subtype
             selected from captured stderr when available.
@@ -491,6 +524,11 @@ def run(
     _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
     inherited = ((0, input), (1, stdout_dest), (2, stderr_dest))
     isolated = isolates(*(fd for fd, dest in inherited if dest is None), tty=tty)
+    capped_capture = (
+        policy.max_captured_output_bytes is not None
+        and not tty
+        and (capture_stdout or capture_stderr)
+    )
     with ExecutionTelemetry(policy.telemetry_observer, "captured") as telemetry:
         if observation is not None:
             if (
@@ -515,9 +553,14 @@ def run(
                 telemetry=telemetry,
                 input=input,
             )
-        elif isolated:
+        elif isolated or capped_capture:
+            launch = (
+                partial(_run_owned_capture, isolated, policy.max_captured_output_bytes)
+                if capped_capture
+                else _run_isolated
+            )
             telemetry.start()
-            completed_process = _run_isolated(
+            completed_process = launch(
                 args,
                 subprocess_env,
                 pass_fds,

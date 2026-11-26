@@ -16,6 +16,7 @@ import threading
 import traceback
 from collections import Counter
 from collections.abc import Buffer, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1685,6 +1686,98 @@ def test_run_stop_kills_the_isolated_cli_process_group(
                 assert raised.value.return_code == -signal.SIGKILL
     finally:
         signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("branch", ["isolated", "terminal", "communicate"])
+def test_client_capture_overflow_stops_only_owned_processes(
+    branch: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated = branch == "isolated"
+    monkeypatch.setattr(pywhales.utils, "isolates", lambda *fds, tty=False: isolated)
+    config = ClientConfig(client_call=[sys.executable], max_captured_output_bytes=4)
+    data = b"go" if branch == "communicate" else None
+    exact = [
+        *config.docker_cmd,
+        "-c",
+        "import os; os.write(1,b'ab'); os.write(2,b'cd')",
+    ]
+    assert pywhales.utils.run(exact, input=data, return_stderr=True) == ("ab", "cd")
+    children: list[subprocess.Popen[bytes]] = []
+
+    def track(process: subprocess.Popen[bytes], isolated: bool) -> None:
+        children.append(process)
+        pywhales._readiness.track(process, isolated)
+
+    monkeypatch.setattr(pywhales.utils, "track", track)
+    read_fd, write_fd = os.pipe()
+    before = set(threading.enumerate())
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        Grandchild() as grandchild,
+        os.fdopen(read_fd, "rb") as gate,
+        os.fdopen(write_fd, "wb") as release,
+    ):
+        # The CLI cannot exit naturally until the test releases its gate.
+        tail = "os.write(1,b'abc'); os.write(2,b'de'); os.read(int(sys.argv[3]), 1)"
+        command = [
+            *config.docker_cmd,
+            "-c",
+            holder(tail),
+            *grandchild.argv,
+            gate.fileno(),
+        ]
+        result = pool.submit(
+            pywhales.utils.run,
+            command,
+            input=data,
+            pass_fds=(*grandchild.fds, gate.fileno()),
+        )
+        grandchild.started()
+        try:
+            with pytest.raises(ObservationLimitError) as error:
+                result.result(timeout=5)
+            assert (error.value.reason, error.value.limit, error.value.measured) == (
+                "response",
+                4,
+                5,
+            )
+            (child,) = children
+            assert child.returncode is not None
+            assert all(
+                pipe.closed
+                for pipe in (child.stdin, child.stdout, child.stderr)
+                if pipe is not None
+            )
+            if isolated:
+                grandchild.assert_gone()
+            else:
+                grandchild.assert_alive()
+        finally:
+            release.close()
+    assert set(threading.enumerate()) == before
+
+
+@pytest.mark.parametrize("captured", [1, 2])
+def test_client_capture_cap_ignores_inherited_output(
+    captured: int, capfd: pytest.CaptureFixture[str]
+) -> None:
+    config = ClientConfig(client_call=[sys.executable], max_captured_output_bytes=2)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        f"import os; os.write({captured}, b'ok'); os.write({3 - captured}, b'inherited')",
+    ]
+    result = pywhales.utils.run(
+        command,
+        capture_stdout=captured == 1,
+        capture_stderr=captured == 2,
+        return_stderr=True,
+    )
+    assert result == (("ok", "") if captured == 1 else ("", "ok"))
+    assert capfd.readouterr() == (
+        ("", "inherited") if captured == 1 else ("inherited", "")
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminals")

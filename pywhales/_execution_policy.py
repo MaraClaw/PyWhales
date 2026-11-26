@@ -45,6 +45,11 @@ class ExecutionPolicySource(Protocol):
         ...
 
     @property
+    def max_captured_output_bytes(self) -> int | None:
+        """Return the combined stdout and stderr cap for a captured launch."""
+        ...
+
+    @property
     def raw_diagnostics(self) -> bool:
         """Return whether new launches may expose raw diagnostic values."""
         ...
@@ -86,6 +91,7 @@ class ExecutionPolicy:
             a bound container environment supersedes either during resolution.
         default_timeout: Default local CLI deadline in seconds, or None.
         strict_workload_errors: Whether marked workload failures remain generic.
+        max_captured_output_bytes: Combined captured output limit, or None.
     """
 
     stream_buffer_bytes: int | None = None
@@ -99,6 +105,7 @@ class ExecutionPolicy:
     )
     default_timeout: float | None = None
     strict_workload_errors: bool = False
+    max_captured_output_bytes: int | None = None
 
 
 class BufferDefault(Enum):
@@ -230,5 +237,6 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
             frozen,
             _scoped_timeout(source),
             source.strict_workload_errors,
+            source.max_captured_output_bytes,
         )
     return ExecutionPolicy()

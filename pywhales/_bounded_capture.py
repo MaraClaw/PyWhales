@@ -95,7 +95,7 @@ def bounded_capture(
         env: Effective child environment.
         pass_fds: Descriptors kept open in the child.
         timeout: Positive finite seconds from launch, or ``None``.
-        policy: Execution policy snapshot for diagnostics.
+        policy: Snapshot of the client response limit and diagnostics settings.
         observation: Scope whose bounds and tokens apply to this launch.
         telemetry: Measurements for this launch.
         input: Bytes, or an iterable of byte chunks pulled lazily on the writer
@@ -125,6 +125,9 @@ def bounded_capture(
         raise
 
     assert process.stdout is not None and process.stderr is not None
+    response_limit = observation.policy.max_response_bytes
+    if policy.max_captured_output_bytes is not None:
+        response_limit = min(response_limit, policy.max_captured_output_bytes)
     stdout = bytearray()
     stderr = bytearray()
     read_bytes = {process.stdout.fileno(): 0, process.stderr.fileno(): 0}
@@ -174,11 +177,7 @@ def bounded_capture(
                     if available == 0:
                         pipes.discard(fd)
                         continue
-                    remaining = (
-                        observation.policy.max_response_bytes
-                        - len(stdout)
-                        - len(stderr)
-                    )
+                    remaining = response_limit - len(stdout) - len(stderr)
                     allowance = observation.response_allowance(remaining)
                     chunk, overflow = observation.read_io(
                         min(available, allowance + 1, 65536), partial(os.read, fd)
@@ -191,8 +190,8 @@ def bounded_capture(
                     elif len(chunk) > remaining:
                         raise ObservationLimitError(
                             "response",
-                            observation.policy.max_response_bytes,
-                            observation.policy.max_response_bytes + 1,
+                            response_limit,
+                            response_limit + 1,
                         )
                     elif overflow is not None:
                         raise overflow

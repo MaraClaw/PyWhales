@@ -24,8 +24,9 @@ from pywhales.client_config import (
     ReloadableObject,
     bulk_reload,
 )
+from pywhales.exceptions import ObservationLimitError
 from pywhales.test_utils import set_cache_validity_period
-from pywhales.utils import PROJECT_ROOT
+from pywhales.utils import PROJECT_ROOT, run
 from tests.pywhales.components.hydration_fakes import FakeCli, fake_daemon
 
 
@@ -34,6 +35,43 @@ def test_default_timeout_rejects_invalid_values_before_lookup(timeout: float) ->
     with patch("shutil.which") as lookup, pytest.raises(ValueError):
         ClientConfig(default_timeout=timeout)
     lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("cap", [False, True, 0, -2, 1.5, "secret", b"secret"])
+def test_capture_cap_rejects_invalid_values(cap: int) -> None:
+    for constructor in (ClientConfig, DockerClient):
+        with pytest.raises(ValueError) as error:
+            constructor(max_captured_output_bytes=cap)
+        assert (
+            str(error.value)
+            == "max_captured_output_bytes must be a positive integer or None"
+        )
+
+
+def test_capture_cap_config_equality_and_precedence() -> None:
+    config = ClientConfig(max_captured_output_bytes=1)
+    assert config != ClientConfig()
+    assert config == DockerClient(max_captured_output_bytes=1).client_config
+    client = DockerClient(client_config=config, max_captured_output_bytes=False)
+    assert client.client_config is config
+
+
+def test_capture_cap_is_snapshotted_before_child_input() -> None:
+    client = DockerClient(client_call=[sys.executable], max_captured_output_bytes=3)
+    command = [
+        *client.docker_cmd,
+        "-c",
+        "import sys; sys.stdin.buffer.read(); print('ok')",
+    ]
+
+    def after_launch() -> Generator[bytes]:
+        client.client_config.max_captured_output_bytes = 2
+        yield b"go"
+
+    assert run(command, input=after_launch()) == "ok"
+    with pytest.raises(ObservationLimitError) as error:
+        run(command, input=b"")
+    assert (error.value.reason, error.value.limit) == ("response", 2)
 
 
 def test_default_timeout_respects_supplied_config() -> None:

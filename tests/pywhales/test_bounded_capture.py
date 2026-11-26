@@ -93,6 +93,31 @@ def test_unterminated_output_over_limit_is_rejected(descriptor: int) -> None:
     )
 
 
+@pytest.mark.parametrize(("client_cap", "scope_cap"), [(5, 8), (8, 5), (None, 5)])
+def test_effective_response_cap_precedes_total_io(
+    client_cap: int | None, scope_cap: int
+) -> None:
+    config = ClientConfig(
+        client_call=[sys.executable], max_captured_output_bytes=client_cap
+    )
+    limits = replace(policy(scope_cap), max_total_io_bytes=5, max_total_stream_bytes=1)
+    with observation(limits) as state, pytest.raises(ObservationLimitError) as error:
+        run(
+            [
+                *config.docker_cmd,
+                "-c",
+                "import os; os.write(1,b'abc'); os.write(2,b'def')",
+            ]
+        )
+    assert (error.value.reason, error.value.limit, error.value.measured) == (
+        "response",
+        5,
+        6,
+    )
+    assert state.io_accounts[0].consumed == 6
+    assert state.stream_accounts[0].consumed == 0
+
+
 def test_stdout_and_stderr_share_the_budget() -> None:
     with observation(policy(8)), pytest.raises(ObservationLimitError):
         run(
