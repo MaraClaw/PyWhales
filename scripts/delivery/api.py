@@ -63,9 +63,12 @@ class Curl:
             "\n%{http_code}",
         ]
         if url.startswith("https://api.github.com/"):
+            require(bool(os.environ.get("GH_TOKEN")), "GitHub token missing")
             command += [
-                "--header",
-                f"Authorization: Bearer {os.environ['GH_TOKEN']}",
+                "--variable",
+                "%GH_TOKEN",
+                "--expand-header",
+                "Authorization: Bearer {{GH_TOKEN}}",
                 "--header",
                 "X-GitHub-Api-Version: 2022-11-28",
             ]

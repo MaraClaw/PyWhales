@@ -2370,7 +2370,14 @@ def test_curl_discards_stderr_and_preserves_binary_body_status_and_auth(
         "https://api.github.com.evil/fixture",
     ):
         assert Curl().request("POST", url, payload) == Response(201, payload)
-    assert "Authorization: Bearer fixture-secret-token" in commands[0]
+    assert all(
+        "fixture-secret-token" not in arg for command in commands for arg in command
+    )
+    assert commands[0][commands[0].index("--variable") + 1] == "%GH_TOKEN"
+    assert (
+        commands[0][commands[0].index("--expand-header") + 1]
+        == "Authorization: Bearer {{GH_TOKEN}}"
+    )
     assert all(
         not any("Authorization:" in arg for arg in command) for command in commands[1:]
     )
