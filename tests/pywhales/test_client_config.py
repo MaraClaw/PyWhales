@@ -28,6 +28,7 @@ from pywhales.exceptions import ObservationLimitError
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, run
 from tests.pywhales.components.hydration_fakes import FakeCli, fake_daemon
+from tests.pywhales.components.repr_fakes import without_process_launches
 
 
 @pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("nan")])
@@ -575,6 +576,36 @@ def _published_at(clock: float, *, pinned: bool = False) -> _Handle:
         else:
             handle._set_inspect_result(_Snapshot("ref", 0))
     return handle
+
+
+@pytest.mark.parametrize("state", ["lazy", "fresh", "expired", "pinned"])
+def test_held_inspect_result_leaves_cache_unchanged(state: str) -> None:
+    handle = _Handle()
+    snapshot = _Snapshot("ref", 0)
+    with patch("pywhales.client_config.monotonic", return_value=100.0):
+        if state == "pinned":
+            handle._set_pinned_inspect_result(snapshot)
+        elif state != "lazy":
+            handle._set_inspect_result(snapshot)
+
+    before = (handle._refreshed_at, handle._last_refreshed_time, handle._pinned)
+    now = 100.0 if state == "fresh" else 120.0
+    with (
+        without_process_launches(),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 10),
+        patch("pywhales.client_config.monotonic", return_value=now),
+    ):
+        assert handle._held_inspect_result() is (None if state == "lazy" else snapshot)
+
+    assert (handle._refreshed_at, handle._last_refreshed_time, handle._pinned) == before
+    assert handle.generation == 0
+
+
+def test_held_inspect_result_on_uninitialized_handle() -> None:
+    handle = object.__new__(_Handle)
+    with without_process_launches():
+        assert handle._held_inspect_result() is None
+    assert vars(handle) == {}
 
 
 @pytest.mark.parametrize(

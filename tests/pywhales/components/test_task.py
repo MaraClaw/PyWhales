@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, docker
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.task.cli_wrapper import Task, TaskCLI
 from pywhales.components.task.models import TaskInspectResult
 from pywhales.exceptions import DockerException
@@ -19,6 +19,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_task_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdefghijklmno"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Task(config, identity, is_immutable_id=True)
+    snapshot = TaskInspectResult(id=identity, name="service.1")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Task(id='0123456789ab', name=<not loaded>)",
+        loaded="pywhales.Task(id='0123456789ab', name=service.1)",
+        partial="pywhales.Task(id='None', name=<not loaded>)",
+    )
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("tasks"))

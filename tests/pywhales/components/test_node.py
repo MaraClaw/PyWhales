@@ -10,8 +10,8 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, Node
-from pywhales.client_config import ParsingError
-from pywhales.components.node.models import NodeInspectResult
+from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.components.node.models import NodeDescription, NodeInspectResult, NodeSpec
 from pywhales.exceptions import DockerException
 from pywhales.test_utils import get_all_jsons
 from tests.pywhales.components.hydration_fakes import (
@@ -20,6 +20,47 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import (
+    assert_handle_reprs,
+    without_process_launches,
+)
+
+
+def test_node_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdefghijklmno"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Node(config, identity, is_immutable_id=True)
+    snapshot = NodeInspectResult(
+        id=identity,
+        description=NodeDescription(hostname="swarm-host"),
+        spec=NodeSpec(role="manager"),
+    )
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Node(id='0123456789ab', hostname='<not loaded>', role='<not loaded>')",
+        loaded="pywhales.Node(id='0123456789ab', hostname='swarm-host', role='manager')",
+        partial="pywhales.Node(id='None', hostname='<not loaded>', role='<not loaded>')",
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        NodeInspectResult(),
+        NodeInspectResult(description=NodeDescription(), spec=NodeSpec()),
+    ],
+)
+def test_node_repr_with_missing_nested_fields(snapshot: NodeInspectResult) -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Node(config, "0123456789abcdefghijklmno", is_immutable_id=True)
+    handle._set_inspect_result(snapshot)
+
+    with without_process_launches():
+        assert (
+            repr(handle)
+            == "pywhales.Node(id='0123456789ab', hostname='None', role='None')"
+        )
 
 
 def test_batch_inspect_matches_node_hostnames_and_hydrates_cache() -> None:

@@ -7,11 +7,34 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, DockerContextConfigDict
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.context.cli_wrapper import Context, DockerContextConfig
 from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
 from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_context_repr_uses_only_held_snapshot() -> None:
+    identity = None
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Context(config, identity, is_immutable_id=True)
+    snapshot = ContextInspectResult(
+        name="selected",
+        endpoints={
+            "docker": ContextEndpoint(host="ssh://remote", skip_tls_verify=True)
+        },
+    )
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Context(name='None', endpoints=<not loaded>)",
+        loaded=(
+            "pywhales.Context(name='None', endpoints={'docker': "
+            "ContextEndpoint(host='ssh://remote', skip_tls_verify=True)})"
+        ),
+        partial="pywhales.Context(name='None', endpoints=<not loaded>)",
+    )
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("contexts"))

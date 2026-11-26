@@ -7,11 +7,27 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.plugin.models import PluginInspectResult
 from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_plugin_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Plugin(config, identity, is_immutable_id=True)
+    snapshot = PluginInspectResult(id=identity, name="repo/plugin:latest")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Plugin(id='0123456789ab', name='<not loaded>')",
+        loaded="pywhales.Plugin(id='0123456789ab', name='repo/plugin:latest')",
+        partial="pywhales.Plugin(id='None', name='<not loaded>')",
+    )
+
 
 test_plugin_name = "vieux/sshfs:latest"
 

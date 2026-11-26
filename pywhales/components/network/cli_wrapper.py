@@ -17,6 +17,7 @@ from pydantic import JsonValue
 
 import pywhales.components.container.cli_wrapper
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -149,7 +150,11 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Network(id='{self.id[:12]}', name={self.name})"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Network(id='{short_id}', name={name})"
 
     def exists(self) -> bool:
         """Return whether this network can still be inspected."""

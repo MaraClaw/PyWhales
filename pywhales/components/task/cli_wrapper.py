@@ -12,6 +12,7 @@ from pydantic import JsonValue
 import pywhales.components.service.cli_wrapper
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -109,7 +110,11 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Task(id='{self.id[:12]}', name={self.name})"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Task(id='{short_id}', name={name})"
 
 
 ValidTask = str | Task

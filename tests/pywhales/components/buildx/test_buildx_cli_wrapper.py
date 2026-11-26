@@ -21,9 +21,27 @@ from pydantic import ValidationError
 import pywhales.components.buildx.cli_wrapper
 from pywhales import DockerClient, docker
 from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_builder_repr_uses_only_held_snapshot() -> None:
+    identity = "repr-builder"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Builder(config, identity, is_immutable_id=True)
+    snapshot = BuilderInspectResult(name=identity, driver="docker-container")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Builder(name='repr-builder', driver='<not loaded>')",
+        loaded="pywhales.Builder(name='repr-builder', driver='docker-container')",
+        partial="pywhales.Builder(name='None', driver='<not loaded>')",
+    )
+
 
 dockerfile_content1 = """
 FROM busybox

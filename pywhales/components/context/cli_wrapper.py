@@ -14,6 +14,7 @@ from typing_extensions import TypedDict
 
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -125,7 +126,10 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Context(name='{self.name}', endpoints={self.endpoints})"
+        name = getattr(self, "_immutable_id", None)
+        snapshot = self._held_inspect_result()
+        endpoints = snapshot.endpoints if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Context(name='{name}', endpoints={endpoints})"
 
 
 ValidContext = Context | str

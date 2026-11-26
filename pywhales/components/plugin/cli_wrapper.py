@@ -11,6 +11,7 @@ from pydantic import JsonValue
 
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -118,7 +119,11 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Plugin(id='{self.id[:12]}', name='{self.name}')"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Plugin(id='{short_id}', name='{name}')"
 
     def disable(self, force: bool = False) -> None:
         """Disable this plugin, optionally forcing an active plugin to stop."""

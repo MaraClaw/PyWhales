@@ -24,6 +24,7 @@ import pywhales.components.container.cli_wrapper
 import pywhales.components.image.cli_wrapper
 from pywhales._execution_policy import execution_timeout
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -129,7 +130,10 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Volume(name='{self.name}', driver={self.driver})"
+        name = getattr(self, "_immutable_id", None)
+        snapshot = self._held_inspect_result()
+        driver = snapshot.driver if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Volume(name='{name}', driver={driver})"
 
     def remove(self, *, force: bool = False) -> None:
         """Remove this volume through the configured Docker CLI.

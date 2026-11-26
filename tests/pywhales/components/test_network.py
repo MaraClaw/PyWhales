@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, Network
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.container.models import ContainerEndpointIPAMConfig
 from pywhales.components.network.cli_wrapper import NetworkInspectResult
 from pywhales.exceptions import (
@@ -24,6 +24,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_network_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Network(config, identity, is_immutable_id=True)
+    snapshot = NetworkInspectResult(id=identity, name="repr-network")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Network(id='0123456789ab', name=<not loaded>)",
+        loaded="pywhales.Network(id='0123456789ab', name=repr-network)",
+        partial="pywhales.Network(id='None', name=<not loaded>)",
+    )
 
 
 def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:

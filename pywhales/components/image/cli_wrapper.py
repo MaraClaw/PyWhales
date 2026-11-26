@@ -36,6 +36,7 @@ from pywhales._execution_policy import (
 )
 from pywhales._json import loads_compat
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -402,7 +403,11 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Image(id='{self.id[:20]}', tags={self.repo_tags})"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:20] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        repo_tags = snapshot.repo_tags if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Image(id='{short_id}', tags={repo_tags})"
 
     def remove(
         self,

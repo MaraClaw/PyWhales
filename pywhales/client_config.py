@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .inventory import InspectionPolicy
 
 CACHE_VALIDITY_PERIOD: float = 0.01
+_NOT_LOADED = "<not loaded>"
 
 
 class ParsingError(Exception):
@@ -517,6 +518,12 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
             NotImplementedError: When this base hook is called directly.
         """
         raise NotImplementedError
+
+    def _held_inspect_result(self) -> InspectResultT | None:
+        """Return the held snapshot without consulting or changing cache freshness."""
+        if getattr(self, "_inspect_result", None) is None:
+            return None
+        return self._inspect_result
 
     def _get_inspect_result(self) -> InspectResultT:
         """Return cached data, fetching when it is absent or expired.

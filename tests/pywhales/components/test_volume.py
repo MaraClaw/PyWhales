@@ -13,7 +13,7 @@ from pytest_mock import MockerFixture
 
 from pywhales import Container, DockerClient, Image, Volume
 from pywhales._execution_policy import get_execution_policy
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.container.cli_wrapper import ContainerCLI
 from pywhales.components.image.cli_wrapper import ImageCLI
@@ -32,6 +32,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_volume_repr_uses_only_held_snapshot() -> None:
+    identity = "repr-volume"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Volume(config, identity, is_immutable_id=True)
+    snapshot = VolumeInspectResult(name=identity, driver="local")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Volume(name='repr-volume', driver=<not loaded>)",
+        loaded="pywhales.Volume(name='repr-volume', driver=local)",
+        partial="pywhales.Volume(name='None', driver=<not loaded>)",
+    )
 
 
 def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
@@ -512,7 +527,7 @@ def test_simple_volume(ctr_client: DockerClient) -> None:
     assert some_volume.exists()
     assert some_volume.name in repr(ctr_client.volume.list())
     assert some_volume.driver is not None
-    assert some_volume.driver in repr(ctr_client.volume.list())
+    assert some_volume.driver in repr(ctr_client.volume.list(hydrate=True))
     ctr_client.volume.remove(some_volume)
 
 

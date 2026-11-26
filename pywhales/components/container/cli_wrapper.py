@@ -31,6 +31,7 @@ import pywhales.components.volume.cli_wrapper
 from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -270,7 +271,13 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Container(id='{self.id[:12]}', name='{self.name}')"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        if name is not None:
+            name = name.removeprefix("/")
+        return f"pywhales.Container(id='{short_id}', name='{name}')"
 
     # --------------------------------------------------------------------
     # public methods

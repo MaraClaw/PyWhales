@@ -19,7 +19,7 @@ from pytest_mock import MockerFixture
 
 import pywhales
 from pywhales import DockerClient, Image, docker
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.container.cli_wrapper import ContainerStats
 from pywhales.components.container.models import (
     ContainerInspectResult,
@@ -40,6 +40,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_container_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = pywhales.Container(config, identity, is_immutable_id=True)
+    snapshot = ContainerInspectResult(id=identity, name="/repr-container")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Container(id='0123456789ab', name='<not loaded>')",
+        loaded="pywhales.Container(id='0123456789ab', name='repr-container')",
+        partial="pywhales.Container(id='None', name='<not loaded>')",
+    )
 
 
 @patch("pywhales.components.container.cli_wrapper.run")

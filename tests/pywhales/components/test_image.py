@@ -29,7 +29,7 @@ from pywhales import DockerClient, Image, docker
 from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._execution_policy import get_execution_policy
 from pywhales._observation import ObservationState, get_observation, observation
-from pywhales.client_config import Command, ParsingError
+from pywhales.client_config import ClientConfig, Command, ParsingError
 from pywhales.components.image.cli_wrapper import ImageCLI
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
@@ -51,7 +51,22 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
 from tests.pywhales.process_groups import stdin_from
+
+
+def test_image_repr_uses_only_held_snapshot() -> None:
+    identity = "sha256:" + "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Image(config, identity, is_immutable_id=True)
+    snapshot = ImageInspectResult(id=identity, repo_tags=["repo:test", "repo:other"])
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Image(id='sha256:0123456789abc', tags=<not loaded>)",
+        loaded="pywhales.Image(id='sha256:0123456789abc', tags=['repo:test', 'repo:other'])",
+        partial="pywhales.Image(id='None', tags=<not loaded>)",
+    )
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
@@ -2274,8 +2289,9 @@ def test_load_json(json_file: Path) -> None:
 def test_image_repr(ctr_client: DockerClient) -> None:
     ctr_client.image.pull("busybox:1", quiet=True)
     ctr_client.image.pull("busybox:1.32", quiet=True)
-    assert "busybox:1" in repr(ctr_client.image.list())
-    assert "busybox:1.32" in repr(ctr_client.image.list())
+    images = ctr_client.image.list(hydrate=True)
+    assert "busybox:1" in repr(images)
+    assert "busybox:1.32" in repr(images)
     ctr_client.image.remove(["busybox:1", "busybox:1.32"])
 
 

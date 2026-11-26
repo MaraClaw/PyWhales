@@ -13,6 +13,7 @@ from pydantic import JsonValue
 
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -101,13 +102,15 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        description = self.description
-        spec = self.spec
-        hostname = description.hostname if description is not None else None
-        role = spec.role if spec is not None else None
-        return (
-            f"pywhales.Node(id='{self.id[:12]}', hostname='{hostname}', role='{role}')"
-        )
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        if snapshot is None:
+            hostname = role = _NOT_LOADED
+        else:
+            hostname = getattr(getattr(snapshot, "description", None), "hostname", None)
+            role = getattr(getattr(snapshot, "spec", None), "role", None)
+        return f"pywhales.Node(id='{short_id}', hostname='{hostname}', role='{role}')"
 
     def update(
         self,

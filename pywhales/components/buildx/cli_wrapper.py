@@ -31,6 +31,7 @@ from pywhales._environment import (
 )
 from pywhales._json import loads_compat
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -153,7 +154,10 @@ class Builder(ReloadableObject[BuilderInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Builder(name='{self.name}', driver='{self.driver}')"
+        name = getattr(self, "_immutable_id", None)
+        snapshot = self._held_inspect_result()
+        driver = snapshot.driver if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Builder(name='{name}', driver='{driver}')"
 
     def remove(
         self,
