@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -537,3 +539,58 @@ def test_context_removed_inside_its_context_exits_cleanly(
         assert not new_context.exists()
     assert not new_context.exists()
     assert not docker_client.context.exists("pywhales-removed-in-context")
+
+
+def _pflag_string_to_string(value: str) -> dict[str, str]:
+    """Port of pflag's stringToString Set, which parses `--docker` values."""
+    if value.count("=") == 1:
+        pairs = [value.strip('"')]
+    else:
+        pairs = next(csv.reader(io.StringIO(value, newline=""), strict=True))
+    parsed = {}
+    for pair in pairs:
+        key, separator, item = pair.partition("=")
+        assert separator
+        parsed[key] = item
+    return parsed
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            DockerContextConfig(host="tcp://h:1,x"),
+            {"host": "tcp://h:1,x", "skip-tls-verify": "False"},
+        ),
+        (
+            DockerContextConfig(
+                host="ssh://example",
+                certificate_authority=Path('/certs/a"b.pem'),
+                certificate="/certs/c,d.pem",
+                key=Path("/certs/key=1.pem"),
+                skip_tls_verify=True,
+            ),
+            {
+                "host": "ssh://example",
+                "ca": '/certs/a"b.pem',
+                "cert": "/certs/c,d.pem",
+                "key": "/certs/key=1.pem",
+                "skip-tls-verify": "True",
+            },
+        ),
+        (DockerContextConfig(), {"skip-tls-verify": "False"}),
+    ],
+)
+def test_docker_endpoint_fields_round_trip_through_pflag(
+    config: DockerContextConfig, expected: dict[str, str]
+) -> None:
+    assert _pflag_string_to_string(config.format_for_docker_cli()) == expected
+
+
+def test_docker_endpoint_without_csv_syntax_keeps_its_text() -> None:
+    config = DockerContextConfig(
+        host="unix:///var/run/docker.sock", key=Path("/certs/key.pem")
+    )
+    assert config.format_for_docker_cli() == (
+        "host=unix:///var/run/docker.sock,key=/certs/key.pem,skip-tls-verify=False"
+    )

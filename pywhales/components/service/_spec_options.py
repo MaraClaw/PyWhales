@@ -20,7 +20,7 @@ from pywhales.client_config import ClientConfig, Command
 from pywhales.components.service._update_options import _duration
 from pywhales.utils import (
     ValidPortMapping,
-    format_mapping_for_cli,
+    format_csv_fields_for_cli,
     format_port_arg,
     to_list,
     to_seconds,
@@ -86,12 +86,12 @@ def _mapping(separator: str = "=") -> _Encode:
 def _long_form(value: object) -> str:
     if not isinstance(value, Mapping):
         raise TypeError("long-form options must be mappings")
-    return ",".join(format_mapping_for_cli(value))
+    return format_csv_fields_for_cli(value)
 
 
 def _port(value: object) -> str:
     if isinstance(value, Mapping):
-        return ",".join(format_mapping_for_cli(value))
+        return format_csv_fields_for_cli(value)
     if isinstance(value, tuple):
         return format_port_arg(value)
     raise TypeError("ports must be tuples or mappings")

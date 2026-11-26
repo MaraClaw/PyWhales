@@ -26,6 +26,7 @@ from time import monotonic
 from types import MappingProxyType, TracebackType
 from typing import (
     Any,
+    Final,
     Literal,
     Self,
     cast,
@@ -1065,6 +1066,41 @@ def format_mapping_for_cli(
         One formatted string per mapping entry.
     """
     return [f"{key}{separator}{value}" for key, value in mapping.items()]
+
+
+_CSV_SPECIAL: Final = (",", '"', "\r", "\n")
+
+
+def format_csv_fields_for_cli(mapping: Mapping[str, object]) -> str:
+    """Join mapping entries as one comma-separated option value.
+
+    Each ``key=value`` field that contains a comma, double quote, CR or LF is
+    wrapped in double quotes with embedded quotes doubled, the whole-field
+    quoting that Docker's CSV option readers decode back into one field. Other
+    fields are joined verbatim, so ordinary values keep their exact text.
+
+    Args:
+        mapping: Field keys and values in mapping iteration order; values are
+            formatted with ``str``.
+
+    Returns:
+        The joined fields, or an empty string for an empty mapping.
+
+    Raises:
+        ValueError: If a key contains ``=``, a comma, a double quote, CR or
+            LF, which no field encoding can represent. The message names no key
+            or value.
+    """
+    fields = []
+    for key, value in mapping.items():
+        name = str(key)
+        if "=" in name or any(char in name for char in _CSV_SPECIAL):
+            raise ValueError("An option field key cannot be represented")
+        field = f"{name}={value}"
+        if any(char in field for char in _CSV_SPECIAL):
+            field = '"' + field.replace('"', '""') + '"'
+        fields.append(field)
+    return ",".join(fields)
 
 
 def format_filters_for_cli(

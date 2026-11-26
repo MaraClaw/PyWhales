@@ -55,6 +55,7 @@ from pywhales.enums import BuildxReportCall as BuildxReportCall
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    format_csv_fields_for_cli,
     format_filters_for_cli,
     format_mapping_for_cli,
     run,
@@ -633,6 +634,8 @@ class BuildxCLI(DockerCLICaller):
         if print and report:
             raise ValueError("print=True cannot be combined with a report call.")
 
+        provenance_option = _attestation_option("--provenance", provenance)
+        sbom_option = _attestation_option("--sbom", sbom)
         env = dict(variables)
         validate_interpolation_environment(
             env, strict=self.client_config.strict_interpolation_environment
@@ -651,8 +654,8 @@ class BuildxCLI(DockerCLICaller):
         full_cmd.add_args_iterable_or_single("--allow", allow)
         full_cmd.add_simple_arg("--list", list)
         full_cmd.add_args_iterable_or_single("--policy", policies)
-        full_cmd += _attestation_option("--provenance", provenance)
-        full_cmd += _attestation_option("--sbom", sbom)
+        full_cmd += provenance_option
+        full_cmd += sbom_option
         full_cmd.add_args_iterable_or_single(
             "--var", format_mapping_for_cli(variables_set)
         )
@@ -1316,6 +1319,9 @@ class BuildxCLI(DockerCLICaller):
             `leave=True`, because Buildx then prints nothing to identify a
             builder.
         """
+        driver_option = (
+            format_dict_for_buildx(driver_options) if driver_options != {} else None
+        )
         full_cmd = Command([*self.docker_cmd, "buildx", "create"])
 
         full_cmd.add_flag("--debug", debug)
@@ -1326,10 +1332,8 @@ class BuildxCLI(DockerCLICaller):
         if platforms is not None:
             full_cmd += ["--platform", ",".join(platforms)]
         full_cmd.add_simple_arg("--driver", driver)
-        if driver_options != {}:
-            full_cmd.add_simple_arg(
-                "--driver-opt", format_dict_for_buildx(driver_options)
-            )
+        if driver_option is not None:
+            full_cmd.add_simple_arg("--driver-opt", driver_option)
         full_cmd.add_simple_arg("--name", name)
         full_cmd.add_flag("--use", use)
         full_cmd.add_flag("--leave", leave)
@@ -1888,7 +1892,12 @@ class BuildxCLI(DockerCLICaller):
 
 
 def format_dict_for_buildx(options: BuildxOptions) -> str:
-    return ",".join(format_mapping_for_cli(options, separator="="))
+    """Join Buildx option fields, quoting any field that holds CSV syntax.
+
+    Raises:
+        ValueError: If a key contains `=`, a comma, a double quote, CR or LF.
+    """
+    return format_csv_fields_for_cli(options)
 
 
 def _run_with_debug_log(
@@ -2003,6 +2012,21 @@ def _build_command(
         overrides for build arguments.
     """
     build_arguments, child_env = container_environment(build_args, client_config)
+    # Format CSV option values first, so an unrepresentable key fails before lookup.
+    attest_option = format_dict_for_buildx(attest) if isinstance(attest, dict) else None
+    provenance_option = _attestation_option("--provenance", provenance)
+    sbom_option = _attestation_option("--sbom", sbom)
+    cache_from_options: builtins.list[str | None]
+    if isinstance(cache_from, list):
+        cache_from_options = [format_dict_for_buildx(item) for item in cache_from]
+    elif isinstance(cache_from, Mapping):
+        cache_from_options = [format_dict_for_buildx(cache_from)]
+    else:
+        cache_from_options = [cache_from]
+    cache_to_option = (
+        format_dict_for_buildx(cache_to) if isinstance(cache_to, Mapping) else cache_to
+    )
+    output_option = format_dict_for_buildx(output) if output != {} else None
     full_cmd = Command([*client_config.docker_cmd, *subcommand])
 
     full_cmd.add_flag("--debug", debug)
@@ -2013,8 +2037,8 @@ def _build_command(
         "--add-host", format_mapping_for_cli(add_hosts, separator=":")
     )
     full_cmd.add_args_iterable_or_single("--allow", allow)
-    if isinstance(attest, dict):
-        full_cmd.add_simple_arg("--attest", format_dict_for_buildx(attest))
+    if attest_option is not None:
+        full_cmd.add_simple_arg("--attest", attest_option)
     full_cmd.add_args_iterable("--build-arg", build_arguments)
     full_cmd.add_args_iterable_or_single(
         "--build-context", format_mapping_for_cli(build_contexts)
@@ -2024,28 +2048,20 @@ def _build_command(
 
     full_cmd.add_simple_arg("--ssh", ssh)
 
-    full_cmd += _attestation_option("--provenance", provenance)
+    full_cmd += provenance_option
     full_cmd.add_flag("--pull", pull)
     full_cmd.add_flag("--push", push)
-    full_cmd += _attestation_option("--sbom", sbom)
+    full_cmd += sbom_option
     full_cmd.add_flag("--load", load)
     full_cmd.add_simple_arg("--metadata-file", metadata_file)
     full_cmd.add_simple_arg("--file", file)
     full_cmd.add_simple_arg("--target", target)
-    if isinstance(cache_from, list):
-        for item in cache_from:
-            full_cmd.add_simple_arg("--cache-from", format_dict_for_buildx(item))
-    elif isinstance(cache_from, Mapping):
-        full_cmd.add_simple_arg("--cache-from", format_dict_for_buildx(cache_from))
-    else:
-        full_cmd.add_simple_arg("--cache-from", cache_from)
-    if isinstance(cache_to, Mapping):
-        full_cmd.add_simple_arg("--cache-to", format_dict_for_buildx(cache_to))
-    else:
-        full_cmd.add_simple_arg("--cache-to", cache_to)
+    for item in cache_from_options:
+        full_cmd.add_simple_arg("--cache-from", item)
+    full_cmd.add_simple_arg("--cache-to", cache_to_option)
     full_cmd.add_args_iterable_or_single("--secret", to_list(secrets))
-    if output != {}:
-        full_cmd += ["--output", format_dict_for_buildx(output)]
+    if output_option is not None:
+        full_cmd += ["--output", output_option]
     if platforms is not None:
         full_cmd += ["--platform", ",".join(platforms)]
     full_cmd.add_simple_arg("--network", network)

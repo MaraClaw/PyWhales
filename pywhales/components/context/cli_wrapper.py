@@ -27,7 +27,13 @@ from pywhales.components.context.models import (
     ContextStorage,
 )
 from pywhales.exceptions import NoSuchContext
-from pywhales.utils import ValidPath, run, to_list, validate_timeout
+from pywhales.utils import (
+    ValidPath,
+    format_csv_fields_for_cli,
+    run,
+    to_list,
+    validate_timeout,
+)
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
@@ -158,21 +164,23 @@ class DockerContextConfig:
     skip_tls_verify: bool = False
 
     def format_for_docker_cli(self) -> str:
-        """Return comma-separated endpoint options, omitting None-valued fields."""
-        list_of_args = []
-        if self.from_ is not None:
-            list_of_args.append(f"from={self.from_}")
-        if self.host is not None:
-            list_of_args.append(f"host={self.host}")
-        if self.certificate_authority is not None:
-            list_of_args.append(f"ca={self.certificate_authority}")
-        if self.certificate is not None:
-            list_of_args.append(f"cert={self.certificate}")
-        if self.key is not None:
-            list_of_args.append(f"key={self.key}")
-        list_of_args.append(f"skip-tls-verify={self.skip_tls_verify}")
+        """Return comma-separated endpoint options, omitting None-valued fields.
 
-        return ",".join(list_of_args)
+        A field holding a comma, double quote, CR or LF is quoted as one CSV
+        field. The `skip-tls-verify` field is always present, so any other field
+        gives Docker's `--docker` map at least two `=` and its CSV reader.
+        """
+        fields: dict[str, object] = {
+            "from": self.from_,
+            "host": self.host,
+            "ca": self.certificate_authority,
+            "cert": self.certificate,
+            "key": self.key,
+        }
+        present = {key: value for key, value in fields.items() if value is not None}
+        return format_csv_fields_for_cli(
+            present | {"skip-tls-verify": self.skip_tls_verify}
+        )
 
 
 @dataclass

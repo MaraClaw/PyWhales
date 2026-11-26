@@ -3,8 +3,10 @@
 Every case runs a recording Python script as the Docker CLI, so no daemon is used.
 """
 
+import csv
+import io
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -919,3 +921,108 @@ def test_new_calls_inherit_non_default_client_settings(tmp_path: Path) -> None:
             "b",
         ]
     ]
+
+
+MISSING_CLI = ["missing-pywhales-test-executable"]
+
+
+def _csv_fields(value: str) -> list[str]:
+    return next(csv.reader(io.StringIO(value, newline=""), strict=True))
+
+
+def test_build_quotes_csv_fields_in_every_structured_option(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.buildx.build(
+        ".",
+        attest={"type": "sbom", "generator": "img,x"},
+        cache_from=[{"type": "local", "src": 'a"b'}, {"type": "gha"}],
+        cache_to={"type": "local", "dest": "c,d"},
+        output={"type": "local", "dest": "out,push=true"},
+        provenance={"mode": "max", "builder-id": "x,y"},
+        sbom={"generator": "g,h"},
+    )
+    argv = calls(log)
+    assert argv == [
+        [
+            "buildx",
+            "build",
+            "--attest",
+            'type=sbom,"generator=img,x"',
+            "--provenance",
+            'mode=max,"builder-id=x,y"',
+            "--sbom",
+            '"generator=g,h"',
+            "--cache-from",
+            'type=local,"src=a""b"',
+            "--cache-from",
+            "type=gha",
+            "--cache-to",
+            'type=local,"dest=c,d"',
+            "--output",
+            'type=local,"dest=out,push=true"',
+            ".",
+        ]
+    ]
+    output = argv[0][argv[0].index("--output") + 1]
+    assert _csv_fields(output) == ["type=local", "dest=out,push=true"]
+
+
+def test_bake_create_and_replay_quote_csv_fields(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path, _create_rules("made"))
+    client.buildx.bake(provenance={"builder-id": "x,y"}, return_config=False)
+    client.buildx.create(driver_options={"network": "host,x"}, name="made")
+    client.buildx.replay.build("subject", outputs={"type": "local", "dest": "a,b"})
+    recorded = calls(log)
+    assert recorded[0] == ["buildx", "bake", "--provenance", '"builder-id=x,y"']
+    assert recorded[1] == [
+        "buildx",
+        "create",
+        "--driver-opt",
+        '"network=host,x"',
+        "--name",
+        "made",
+    ]
+    assert recorded[-1] == [
+        "buildx",
+        "replay",
+        "build",
+        "--output",
+        'type=local,"dest=a,b"',
+        "subject",
+    ]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.buildx.build(".", output={"ty=pe": "secret-value"}),
+        lambda c: c.buildx.build(
+            ".", cache_from=[{"type": "gha"}, {"a,b": "secret-value"}]
+        ),
+        lambda c: c.buildx.build(".", cache_to={'a"b': "secret-value"}),
+        lambda c: c.buildx.build(".", attest={"a\nb": "secret-value"}),
+        lambda c: c.buildx.build(".", provenance={"a=b": "secret-value"}),
+        lambda c: c.buildx.dap.build(".", sbom={"a=b": "secret-value"}),
+        lambda c: c.buildx.bake(provenance={"a=b": "secret-value"}),
+        lambda c: c.buildx.create(driver_options={"a=b": "secret-value"}),
+        lambda c: c.buildx.replay.build("subject", outputs={"a=b": "secret-value"}),
+    ],
+    ids=[
+        "output",
+        "cache-from",
+        "cache-to",
+        "attest",
+        "provenance",
+        "dap-sbom",
+        "bake",
+        "driver-opt",
+        "replay-output",
+    ],
+)
+def test_unrepresentable_csv_keys_are_rejected_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    client = DockerClient(client_call=MISSING_CLI)
+    with pytest.raises(ValueError) as raised:
+        call(client)
+    assert "secret-value" not in str(raised.value)

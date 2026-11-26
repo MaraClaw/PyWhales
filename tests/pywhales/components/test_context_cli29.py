@@ -175,3 +175,21 @@ def test_create_rejects_removed_parameters_before_launch(
     assert "swarm" not in str(raised.value)
     assert "/kube/config" not in str(raised.value)
     assert calls(log) == []
+
+
+def test_create_sends_a_comma_host_as_one_docker_field(tmp_path: Path) -> None:
+    client, log = make_fake_cli(
+        tmp_path,
+        [
+            Rule(match=("create",), stdout="ctx\n"),
+            INSPECT_RULE,
+        ],
+    )
+    client.context.create("ctx", docker=DockerContextConfig(host="tcp://h:1,x"))
+    assert calls(log)[0] == [
+        "context",
+        "create",
+        "--docker",
+        '"host=tcp://h:1,x",skip-tls-verify=False',
+        "ctx",
+    ]

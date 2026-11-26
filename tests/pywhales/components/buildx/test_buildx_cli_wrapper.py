@@ -1308,3 +1308,13 @@ def test_owned_buildx_api_propagates_stream_ownership(
 
         assert raw._process.poll() is not None
         assert all(not thread.is_alive() for thread in raw._threads)
+
+
+def test_format_dict_for_buildx_quotes_only_fields_that_need_it() -> None:
+    format_dict = pywhales.components.buildx.cli_wrapper.format_dict_for_buildx
+    assert format_dict({"type": "registry", "ref": "user/app:cache"}) == (
+        "type=registry,ref=user/app:cache"
+    )
+    assert format_dict({"type": "local", "dest": 'a,b"c'}) == 'type=local,"dest=a,b""c"'
+    with pytest.raises(ValueError):
+        format_dict({"dest=x": "y"})
