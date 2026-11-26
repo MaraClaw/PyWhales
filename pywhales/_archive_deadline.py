@@ -1,14 +1,13 @@
 """Deadline ownership for direct binary archive subprocesses."""
 
 import os
-from collections.abc import Buffer, Iterator
+from collections.abc import Iterator
 from contextlib import suppress
 from functools import partial
-from io import BufferedReader, RawIOBase
-from subprocess import Popen, TimeoutExpired
+from subprocess import Popen
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import IO, TYPE_CHECKING, Literal, override
+from typing import IO, TYPE_CHECKING, Final, Literal
 
 from pywhales._readiness import (
     CANCEL_CHECK,
@@ -32,6 +31,8 @@ if TYPE_CHECKING:
     from pywhales._observation import ObservationState, _ChildReservation
 
 type _Stop = Literal["command", "timeout", "cancelled", "limit"]
+
+_CHUNK_BYTES: Final = 65536
 
 
 class ArchiveDeadline:
@@ -289,21 +290,13 @@ class ArchiveDeadline:
             self.thread.join()
         reap_launch(self.process)
 
-    def wait(self, timeout: float | None = None) -> int:
+    def wait(self) -> int:
         """Wait for the child's exit after a completed transfer, without reaping.
-
-        Args:
-            timeout: Longest wait in seconds, or ``None`` to wait without one.
 
         Returns:
             The child's exit code, or the negated signal number that ended it.
-
-        Raises:
-            TimeoutExpired: The child still ran after ``timeout`` seconds.
         """
-        if not self._exited.wait(timeout):
-            assert timeout is not None
-            raise TimeoutExpired(self.command, timeout)
+        self._exited.wait()
         self._finished = True
         return await_exit(self.process)
 
@@ -651,10 +644,21 @@ class ArchiveDeadline:
             if settle:
                 self.released.wait()
 
-    def lines(self, pipe: IO[bytes]) -> Iterator[bytes]:
-        """Yield buffered lines, counting raw reads including read-ahead."""
-        with BufferedReader(_ArchiveReader(self, pipe)) as reader:
-            yield from reader
+    def chunks(self, pipe: IO[bytes]) -> Iterator[bytes]:
+        """Yield 64 KiB blocks and a final short block from an unbounded archive.
+
+        Each read requests only what the current block still needs, so output
+        is never read ahead of the block being assembled and counted bytes
+        match what was read for it.
+        """
+        block = bytearray()
+        while chunk := self.read(pipe, _CHUNK_BYTES - len(block)):
+            block += chunk
+            if len(block) == _CHUNK_BYTES:
+                yield bytes(block)
+                block.clear()
+        if block:
+            yield bytes(block)
 
     def write(self, pipe: IO[bytes], data: bytes) -> None:
         self.check()
@@ -687,23 +691,3 @@ class ArchiveDeadline:
                     offset += written
             if settle:
                 self.released.wait()
-
-
-class _ArchiveReader(RawIOBase):
-    """Adapt measured reads without taking ownership of the Popen-owned pipe."""
-
-    def __init__(self, owner: ArchiveDeadline, pipe: IO[bytes]) -> None:
-        super().__init__()
-        self._owner = owner
-        self._pipe = pipe
-
-    @override
-    def readable(self) -> bool:
-        return True
-
-    @override
-    def readinto(self, buffer: Buffer) -> int:
-        view = memoryview(buffer)
-        chunk = self._owner.read(self._pipe, len(view))
-        view[: len(chunk)] = chunk
-        return len(chunk)

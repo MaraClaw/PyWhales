@@ -8,6 +8,7 @@ images, and require disposable daemon state.
 import contextlib
 import inspect
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator
@@ -50,6 +51,7 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.process_groups import stdin_from
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
@@ -989,14 +991,52 @@ def test_archive_path_save_uses_each_client_environment(
     assert [output.read_text() for output in outputs] == ["first", "second"]
 
 
+def test_unbounded_save_waits_for_exit_after_stdout_eof() -> None:
+    # The final short block proves stdout reached EOF; the gate still holds the CLI alive.
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os, sys; sys.stdout.buffer.write(bytes(range(256))*513); "
+            "sys.stdout.flush(); os.close(1); os.read(0, 1)",
+        ]
+    )
+    reached_eof = Event()
+
+    def collect() -> list[bytes]:
+        blocks = []
+        for block in client.image.save("sample"):
+            blocks.append(block)
+            if len(block) < 65536:
+                reached_eof.set()
+        return blocks
+
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "rb") as gate,
+        stdin_from(gate.fileno()),
+        patch.object(client.image, "inspect", return_value=[]),
+        ThreadPoolExecutor(max_workers=1) as pool,
+        os.fdopen(write_fd, "wb") as release,
+    ):
+        result = pool.submit(collect)
+        assert reached_eof.wait(timeout=5)
+        # The CLI can't exit before the gate opens, so the save is still waiting.
+        assert not result.done()
+        release.close()
+        blocks = result.result(timeout=5)
+    assert list(map(len, blocks)) == [65536, 65536, 256]
+    assert b"".join(blocks) == bytes(range(256)) * 513
+
+
 def test_archive_lazy_save_snapshots_environment_at_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
     code = (
-        "import os; "
-        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True); "
-        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True)"
+        "import os, sys; "
+        "value = os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing').encode(); "
+        "sys.stdout.buffer.write(value.ljust(65536) + value)"
     )
     clients = [
         DockerClient(
@@ -1020,10 +1060,10 @@ def test_archive_lazy_save_snapshots_environment_at_launch(
     with contextlib.closing(first), contextlib.closing(second):
         first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "first"
         second_environment["PYWHALES_ARCHIVE_SENTINEL"] = "second"
-        assert next(first) == b"first\n"
+        assert next(first) == b"first".ljust(65536)
         first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "changed"
-        assert list(second) == [b"second\n", b"second\n"]
-        assert list(first) == [b"first\n"]
+        assert list(second) == [b"second".ljust(65536), b"second"]
+        assert list(first) == [b"first"]
     assert first.gi_frame is None
     assert second.gi_frame is None
 

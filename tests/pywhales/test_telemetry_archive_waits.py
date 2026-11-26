@@ -462,7 +462,7 @@ def test_policy_only_scope_adds_no_monitoring() -> None:
 
         assert not owner.bounded
         assert process.stdout is not None
-        assert b"".join(owner.lines(process.stdout)) == b"x\n"
+        assert b"".join(owner.chunks(process.stdout)) == b"x\n"
         owner.thread.join(timeout=3)
 
 
@@ -571,14 +571,14 @@ def test_save_closure_kills_the_group_but_completion_signals_nothing(
         # Given an unbounded save whose CLI's grandchild holds its output, or
         # lets it reach EOF when the CLI exits.
         code = (
-            holder("os.write(1, b'x\\n')\nsignal.pause()\n")
+            holder("os.write(1, b'x'*65536)\nsignal.pause()\n")
             if ending == "close"
             else holder("os.write(1, b'x\\n')\n", holds_output=False)
         )
         archive = _archive_client(code, grandchild, monkeypatch).image.save("sample")
 
-        # When the caller closes the archive after one line, or exhausts it.
-        assert next(archive) == b"x\n"
+        # When the caller closes the archive after one block, or exhausts it.
+        assert next(archive) == (b"x" * 65536 if ending == "close" else b"x\n")
         if ending == "close":
             assert isinstance(archive, Generator)
             archive.close()

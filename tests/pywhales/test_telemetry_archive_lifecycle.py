@@ -81,7 +81,7 @@ def test_archive_save_close_completes_after_pipe_process_and_thread_cleanup(
         owners.append(owner)
         return owner
 
-    code = "import os,threading; os.write(1,b'first\\n'); threading.Event().wait()"
+    code = "import os,threading; os.write(1,b'first\\n'); os.close(1); threading.Event().wait()"
     client = DockerClient(
         client_call=[sys.executable, "-c", code],
         default_timeout=timeout,

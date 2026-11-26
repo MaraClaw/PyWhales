@@ -1973,14 +1973,13 @@ class ImageCLI(DockerCLICaller):
                 )
                 try:
                     if not owner.bounded:
-                        yield from owner.lines(process.stdout)
-                        exit_code = owner.wait(0.1)
+                        yield from owner.chunks(process.stdout)
                     else:
                         while chunk := owner.read(process.stdout):
                             yield chunk
-                        owner.check()
-                        exit_code = owner.wait()
-                        owner.check()
+                    owner.check()
+                    exit_code = owner.wait()
+                    owner.check()
                     stderr = owner.diagnostics() if owner.concurrent else b""
                     if exit_code != 0:
                         if not owner.concurrent:
