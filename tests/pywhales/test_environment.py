@@ -5,6 +5,7 @@ import sys
 from collections.abc import Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy, deepcopy
+from inspect import Parameter, signature
 from pathlib import Path
 from threading import Barrier
 from typing import override
@@ -15,6 +16,7 @@ import pytest
 import pywhales._environment as environment_module
 from pywhales import DockerClient
 from pywhales._environment import (
+    container_environment,
     finalize_environment,
     frozen_environment_scope,
     resolve_environment,
@@ -62,6 +64,42 @@ def test_client_copies_inherited_names_and_supplied_config_wins() -> None:
     )
     assert client.client_config != ClientConfig(inherited_environment_names=names)
     lookup.assert_not_called()
+
+
+def test_strict_interpolation_environment_configuration() -> None:
+    default = ClientConfig()
+    client = DockerClient(strict_interpolation_environment=True)
+    option = signature(DockerClient).parameters["strict_interpolation_environment"]
+
+    assert option.kind is Parameter.KEYWORD_ONLY
+    assert option.default is False
+    assert default.strict_interpolation_environment is False
+    assert client.client_config.strict_interpolation_environment is True
+    assert client.client_config == ClientConfig(strict_interpolation_environment=True)
+    assert client.client_config != default
+
+
+@pytest.mark.parametrize("strict_transport", [False, True])
+def test_strict_interpolation_environment_does_not_change_container_transport(
+    strict_transport: bool,
+) -> None:
+    config = ClientConfig(
+        strict_interpolation_environment=True,
+        strict_env_transport=strict_transport,
+        inherited_environment_names=(),
+    )
+    assignments = {"lc_messages": "container-locale"}
+    if strict_transport:
+        with pytest.raises(ValueError) as rejected:
+            container_environment(assignments, config)
+        assert rejected.value.args == (
+            "strict_env_transport requires environment-only assignments",
+        )
+    else:
+        assert container_environment(assignments, config) == (
+            ["lc_messages=container-locale"],
+            {},
+        )
 
 
 @pytest.mark.parametrize(

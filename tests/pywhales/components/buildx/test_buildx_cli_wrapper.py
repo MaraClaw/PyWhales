@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 import pywhales.components.buildx.cli_wrapper
 from pywhales import DockerClient, docker
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
@@ -44,6 +44,57 @@ dockerfile_content4 = """
 FROM busybox
 COPY --from=test_context /dada /dada
 """
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+@pytest.mark.parametrize(
+    "mode", ["print", "build", "no-config", "stream", "report", "list"]
+)
+def test_bake_rejects_loader_overlay_before_lookup(
+    mode: Literal["print", "build", "no-config", "stream", "report", "list"],
+    raw_diagnostics: bool,
+) -> None:
+    client = DockerClient(raw_diagnostics=raw_diagnostics)
+    name, value = "dyld_insert_libraries", "bake-interpolation-secret"
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.buildx.cli_wrapper.run",
+            side_effect=AssertionError("captured launch"),
+        ),
+        patch(
+            "pywhales.components.buildx.cli_wrapper.stream_buildx_logs",
+            side_effect=AssertionError("streamed launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        variables = {name: value}
+        match mode:
+            case "print":
+                client.buildx.bake(print=True, variables=variables)
+            case "build":
+                client.buildx.bake(variables=variables)
+            case "no-config":
+                client.buildx.bake(return_config=False, variables=variables)
+            case "stream":
+                client.buildx.bake(stream_logs=True, variables=variables)
+            case "report":
+                client.buildx.bake(call="outline", variables=variables)
+            case "list":
+                client.buildx.bake(list="targets", variables=variables)
+            case unreachable:
+                assert_never(unreachable)
+
+    for private in (name, name.upper(), value):
+        assert private not in str(rejected.value)
+        assert private not in repr(rejected.value.args)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__context__ is None
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ import json
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -434,6 +435,58 @@ def test_bake_boolean_attestations_use_equals_form(tmp_path: Path) -> None:
     client, log = make_fake_cli(tmp_path)
     client.buildx.bake(provenance=True, sbom=True, return_config=False)
     assert calls(log) == [["buildx", "bake", "--provenance=true", "--sbom=true"]]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_bake_preserves_interpolation_environment_and_var_argv(
+    tmp_path: Path, strict: bool
+) -> None:
+    name = "APP_REGISTRY" if strict else "DOCKER_REGISTRY"
+    cli, log = fake_cli_call(
+        tmp_path,
+        [
+            Rule(match=("--print",), stdout='{"target": {}}', env=(name,)),
+            Rule(env=(name,)),
+        ],
+    )
+    client = DockerClient(
+        client_call=cli,
+        strict_interpolation_environment=strict,
+        strict_env_transport=True,
+    )
+    assert client.buildx.bake(
+        "app", variables={name: "registry"}, variables_set={"LD_PRELOAD": "bake-only"}
+    ) == {"target": {}}
+    assert records(log) == [
+        {
+            "argv": [
+                "buildx",
+                "bake",
+                "--var",
+                "LD_PRELOAD=bake-only",
+                *options,
+                "app",
+            ],
+            "env": {name: "registry"},
+        }
+        for options in ([], ["--print"])
+    ]
+
+
+@pytest.mark.parametrize("name", ["PATH", "lc_messages", "python_version"])
+def test_bake_strict_interpolation_rejects_reserved_names_before_lookup(
+    name: str,
+) -> None:
+    client = DockerClient(strict_interpolation_environment=True)
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch(
+            "pywhales.components.buildx.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError),
+    ):
+        client.buildx.bake(print=True, variables={name: "secret"})
 
 
 def test_bake_list_is_one_launch_returning_the_table(tmp_path: Path) -> None:

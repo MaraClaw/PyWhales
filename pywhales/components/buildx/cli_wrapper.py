@@ -25,7 +25,10 @@ from pydantic import JsonValue, TypeAdapter
 import pywhales.components.buildx.dap
 import pywhales.components.buildx.replay
 import pywhales.components.image.cli_wrapper
-from pywhales._environment import container_environment
+from pywhales._environment import (
+    container_environment,
+    validate_interpolation_environment,
+)
 from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
@@ -552,6 +555,9 @@ class BuildxCLI(DockerCLICaller):
             set: Overrides mapping target patterns and keys to values, such as
                 `{"*.args.VERSION": "1"}`.
             variables: Environment overrides for Bake variables on each invocation.
+                Before executable lookup, dynamic-loader names are refused, or
+                all reserved CLI and runtime names with
+                `strict_interpolation_environment=True`.
             metadata_file: Local path for build-result metadata; `None` omits it.
             stream_logs: Return decoded output chunks instead of waiting for
                 completion and returning configuration or report text.
@@ -623,6 +629,10 @@ class BuildxCLI(DockerCLICaller):
         if print and report:
             raise ValueError("print=True cannot be combined with a report call.")
 
+        env = dict(variables)
+        validate_interpolation_environment(
+            env, strict=self.client_config.strict_interpolation_environment
+        )
         full_cmd = Command([*self.docker_cmd, "buildx", "bake"])
 
         full_cmd.add_flag("--debug", debug)
@@ -651,8 +661,6 @@ class BuildxCLI(DockerCLICaller):
             full_cmd.append(remote_definition)
         if metadata_file is not None:
             full_cmd.add_simple_arg("--metadata-file", metadata_file)
-        targets = to_list(targets)
-        env = dict(variables)
         if print:
             output = run([*full_cmd, *targets], env=env, timeout=timeout)
             return JsonOutputParser(

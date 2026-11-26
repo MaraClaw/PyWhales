@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, Service
+from pywhales.client_config import ClientConfig
 from pywhales.components.stack.cli_wrapper import Stack
 from pywhales.exceptions import NotASwarmManager
 from pywhales.utils import PROJECT_ROOT
@@ -142,6 +143,43 @@ def test_stack_env_files(docker_client: DockerClient, tmp_path: Path) -> None:
     time.sleep(1)
     docker_client.stack.remove(third_stack)
     time.sleep(1)
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+@pytest.mark.parametrize("name", ["ld_preload", "DYLD_LIBRARY_PATH"])
+@pytest.mark.parametrize("from_file", [False, True], ids=["mapping", "file"])
+def test_stack_rejects_loader_overlay_before_lookup(
+    tmp_path: Path, raw_diagnostics: bool, name: str, from_file: bool
+) -> None:
+    value = "stack-interpolation-secret"
+    env_file = tmp_path / "stack.env"
+    if from_file:
+        env_file.write_text(f"# deployment variables\n{name}={value}\n")
+    client = DockerClient(raw_diagnostics=raw_diagnostics)
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.stack.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        client.stack.deploy(
+            "web",
+            env_files=[env_file] if from_file else [],
+            variables={} if from_file else {name: value},
+        )
+
+    for private in (name, name.upper(), value):
+        assert private not in str(rejected.value)
+        assert private not in repr(rejected.value.args)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__context__ is None
 
 
 def test_deploy_not_swarm_manager(docker_client: DockerClient) -> None:

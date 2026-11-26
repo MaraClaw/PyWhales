@@ -10,6 +10,7 @@ from typing import Literal, override
 
 import pywhales.components.service.cli_wrapper
 import pywhales.components.task.cli_wrapper
+from pywhales._environment import validate_interpolation_environment
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
 from pywhales.enums import ImageResolutionModeInput
 from pywhales.utils import (
@@ -139,6 +140,11 @@ class StackCLI(DockerCLICaller):
         This changes daemon-managed services and displays Docker's stdout.
         Failure or local interruption does not undo daemon-side mutations.
 
+        The merged interpolation environment is checked before executable
+        lookup. Dynamic-loader names are always refused;
+        `strict_interpolation_environment=True` also refuses all reserved CLI and
+        runtime names.
+
         Args:
             name: The name of the stack to deploy. Mandatory.
             compose_files: One or more docker-compose files. If there are more than
@@ -176,6 +182,12 @@ class StackCLI(DockerCLICaller):
                 without undoing the deploy or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        env = read_env_files([Path(x) for x in env_files])
+        env.update(variables)
+        validate_interpolation_environment(
+            env, strict=self.client_config.strict_interpolation_environment
+        )
+
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
         full_cmd.add_args_iterable_or_single("--compose-file", compose_files)
@@ -185,9 +197,6 @@ class StackCLI(DockerCLICaller):
         _add_tristate_flag(full_cmd, "--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(name)
-
-        env = read_env_files([Path(x) for x in env_files])
-        env.update(variables)
 
         run(full_cmd, capture_stdout=False, env=env, timeout=timeout)
         return Stack(self.client_config, name)

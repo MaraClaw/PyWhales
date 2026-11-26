@@ -8,13 +8,14 @@ import inspect
 from collections.abc import Callable
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 import pytest
 
-from pywhales import Stack
+from pywhales import DockerClient, Stack
 from pywhales.components.service.cli_wrapper import ServiceListFilter
 from pywhales.components.stack.cli_wrapper import StackCLI, StackPsFilter
-from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
+from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli, records
 
 MERGED_YAML = "services:\n  web:\n    image: busybox\n"
 
@@ -138,6 +139,67 @@ def test_deploy_forwards_every_option_together(tmp_path: Path) -> None:
             "web",
         ]
     ]
+
+
+def test_deploy_preserves_interpolation_environment(tmp_path: Path) -> None:
+    client, log = make_fake_cli(
+        tmp_path, [Rule(env=("DOCKER_REGISTRY", "FILE_ONLY", "MAPPING_ONLY"))]
+    )
+    env_file = tmp_path / "stack.env"
+    env_file.write_text(
+        'DOCKER_REGISTRY=file-registry\nFILE_ONLY="literal" # comment\n'
+    )
+    client.stack.deploy(
+        "web",
+        "a.yml",
+        env_files=[env_file],
+        variables={"DOCKER_REGISTRY": "map-registry", "MAPPING_ONLY": ""},
+    )
+    assert records(log) == [
+        {
+            "argv": [
+                "stack",
+                "deploy",
+                "--compose-file",
+                "a.yml",
+                "--resolve-image",
+                "always",
+                "web",
+            ],
+            "env": {
+                "DOCKER_REGISTRY": "map-registry",
+                "FILE_ONLY": '"literal"',
+                "MAPPING_ONLY": "",
+            },
+        }
+    ]
+
+
+def test_deploy_strict_interpolation_rejects_reserved_env_file_name(
+    tmp_path: Path,
+) -> None:
+    client = DockerClient(strict_interpolation_environment=True)
+    env_file = tmp_path / "stack.env"
+    env_file.write_text("docker_host=env-file-endpoint\n")
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch(
+            "pywhales.components.stack.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError),
+    ):
+        client.stack.deploy("web", env_files=[env_file])
+
+
+def test_deploy_timeout_then_env_file_errors_precede_lookup(tmp_path: Path) -> None:
+    client = DockerClient()
+    env_file = tmp_path / "missing.env"
+    with patch("shutil.which", side_effect=AssertionError("executable lookup")):
+        with pytest.raises(ValueError, match="timeout"):
+            client.stack.deploy("web", env_files=[env_file], timeout=0)
+        with pytest.raises(FileNotFoundError):
+            client.stack.deploy("web", env_files=[env_file], timeout=5)
 
 
 def test_deploy_keeps_its_positionals_and_adds_keyword_only_options() -> None:

@@ -2,7 +2,7 @@
 
 import os
 from collections import Counter
-from collections.abc import Collection, Generator, Mapping, Sequence
+from collections.abc import Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,6 +17,8 @@ _frozen_environment: ContextVar[tuple[object, Mapping[str, str]] | None] = Conte
     "pywhales_frozen_environment", default=None
 )
 
+_LOADER_PREFIXES = ("LD_", "DYLD_")
+
 # These names influence the CLI, its runtime, plugins, or credential helpers.
 _CLI_PREFIXES = (
     "DOCKER_",
@@ -27,10 +29,10 @@ _CLI_PREFIXES = (
     "SSH_",
     "GIT_",
     "OTEL_",
-    "LD_",
-    "DYLD_",
+    *_LOADER_PREFIXES,
     "PYTHON",
     "NODE_",
+    "LC_",
 )
 _CLI_NAMES = frozenset(
     {
@@ -103,6 +105,39 @@ class EnvironmentFailure:
     error: TypeError | ValueError
 
 
+def is_reserved_environment_name(name: str) -> bool:
+    """Return whether the name is reserved for CLI or runtime configuration."""
+    folded = name.upper()
+    return folded in _CLI_NAMES or folded.startswith(_CLI_PREFIXES)
+
+
+def is_dynamic_loader_name(name: str) -> bool:
+    """Return whether the name starts with a dynamic-loader prefix in any case."""
+    return name.upper().startswith(_LOADER_PREFIXES)
+
+
+def validate_interpolation_environment(
+    names: Iterable[object], *, strict: bool
+) -> None:
+    """Reject unsafe names in an explicit interpolation overlay before lookup.
+
+    The default blocks dynamic-loader names. Strict mode blocks the full
+    reserved set. Neither mode changes client or ambient environment layers.
+
+    Args:
+        names: Names from the operation's overlay. Invalid key types remain
+            subject to the regular child environment validation.
+        strict: Whether to check the full reserved set.
+
+    Raises:
+        ValueError: If a name is disallowed. No name or value is disclosed.
+    """
+    disallowed = is_reserved_environment_name if strict else is_dynamic_loader_name
+    for name in names:
+        if isinstance(name, str) and disallowed(name):
+            raise ValueError("interpolation environment contains a disallowed name")
+
+
 def container_environment[K](
     envs: Mapping[K, object], source: ExecutionPolicySource
 ) -> tuple[list[str], dict[str, str]]:
@@ -142,7 +177,6 @@ def container_environment[K](
     overrides = _ContainerEnvironment(effective)
     for key, name, value in entries:
         folded = name.upper() if _WINDOWS else name
-        reserved = name.upper()
         if (
             not isinstance(key, str)
             or not name
@@ -151,8 +185,7 @@ def container_environment[K](
             or "\0" in value
             or folded in names
             or counts[folded] > 1
-            or reserved in _CLI_NAMES
-            or reserved.startswith((*_CLI_PREFIXES, "LC_"))
+            or is_reserved_environment_name(name)
         ):
             if source.strict_env_transport:
                 raise ValueError(

@@ -178,6 +178,9 @@ class ClientConfig:
             resources no service uses; only true emits it.
         compose_ansi: Compose control-character mode (``"never"``, ``"always"``
             or ``"auto"``); ``None`` omits the option.
+        strict_interpolation_environment: Reject every reserved child-environment
+            name, not only dynamic-loader names, in stack deploy and Bake
+            interpolation overlays. Defaults to false.
         max_captured_output_bytes: Positive cap on combined captured stdout and
             stderr bytes per launch, or ``None`` for no client cap. A tighter
             observation response limit still applies.
@@ -218,6 +221,7 @@ class ClientConfig:
     inherited_environment_names: Collection[str] | None = None
     compose_all_resources: bool = False
     compose_ansi: Literal["never", "always", "auto"] | None = None
+    strict_interpolation_environment: bool = False
     max_captured_output_bytes: int | None = None
 
     def __post_init__(self) -> None:

@@ -41,6 +41,13 @@ def _check_strict_environment_setting(flag: bool) -> None:
     assert_type(client.client_config.strict_env_transport, bool)
 
 
+def _check_strict_interpolation_environment_setting(flag: bool) -> None:
+    config = ClientConfig(strict_interpolation_environment=flag)
+    assert_type(config.strict_interpolation_environment, bool)
+    client = DockerClient(strict_interpolation_environment=flag)
+    assert_type(client.client_config.strict_interpolation_environment, bool)
+
+
 def _check_resource_inspection_contracts(client: DockerClient) -> None:
     assert_type(client.container.inspect("container"), Container)
     assert_type(client.container.inspect(["container"]), list[Container])
