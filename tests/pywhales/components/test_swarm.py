@@ -1,13 +1,14 @@
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 from pywhales import DockerClient
+from pywhales.client_config import ClientConfig
 from pywhales.components.system.models import SwarmSpec
 from pywhales.exceptions import NotASwarmManager
 
@@ -327,3 +328,37 @@ def test_unlock_key_not_swarm_manager(docker_client: DockerClient) -> None:
 
     assert e.value.stderr is not None
     assert "not a swarm manager" in e.value.stderr.lower()
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.swarm.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "join": lambda client: client.swarm.join("--leak-marker"),
+    "join-token": lambda client: client.swarm.join_token("--leak-marker"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_swarm_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

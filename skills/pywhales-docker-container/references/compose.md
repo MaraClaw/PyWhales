@@ -115,6 +115,11 @@ an inherited terminal descriptor, and every launch on Windows, kill only the
 
 ## One-Off Commands and TTY Defaults
 
+Service-name operands that start with `-` raise `ValueError` before any
+launch, since Compose would read them as flags. The command list passed to `run`
+and `execute` stays literal and unchecked, so `["ls", "-la"]` is fine. See
+[Handle the right failure](client-and-errors.md#handle-the-right-failure).
+
 Both `compose.run` and `compose.execute` default to `tty=True`. Set `tty=False`
 for captured output and unattended jobs. `compose.run` also rejects TTY plus
 streaming, TTY plus detach, and detach plus streaming.

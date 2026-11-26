@@ -13,6 +13,7 @@ from pydantic import JsonValue
 
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -30,7 +31,7 @@ from pywhales.components.node.models import (
 )
 from pywhales.enums import NodeAvailabilityInput, NodeRoleInput
 from pywhales.exceptions import DockerException
-from pywhales.utils import format_filters_for_cli, run, to_list
+from pywhales.utils import format_filters_for_cli, run, to_list, validate_operands
 
 type NodeListFilter = (
     tuple[Literal["id"], str]
@@ -101,13 +102,15 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        description = self.description
-        spec = self.spec
-        hostname = description.hostname if description is not None else None
-        role = spec.role if spec is not None else None
-        return (
-            f"pywhales.Node(id='{self.id[:12]}', hostname='{hostname}', role='{role}')"
-        )
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        if snapshot is None:
+            hostname = role = _NOT_LOADED
+        else:
+            hostname = getattr(getattr(snapshot, "description", None), "hostname", None)
+            role = getattr(getattr(snapshot, "spec", None), "role", None)
+        return f"pywhales.Node(id='{short_id}', hostname='{hostname}', role='{role}')"
 
     def update(
         self,
@@ -126,14 +129,21 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
         )
 
     def ps(
-        self, *, filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None
+        self,
+        *,
+        filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Return task handles listed by Docker for this node.
 
         See [`docker.node.ps`](../sub-commands/node.md#ps) for the `filters`
         argument.
+
+        Args:
+            filters: Docker task filters forwarded to the listing.
+            hydrate: Pin task inspection snapshots and omit vanished tasks.
         """
-        return NodeCLI(self.client_config).ps(self, filters=filters)
+        return NodeCLI(self.client_config).ps(self, filters=filters, hydrate=hydrate)
 
 
 ValidNode = Node | str
@@ -186,6 +196,7 @@ class NodeCLI(DockerCLICaller):
             x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "demote"])
@@ -222,10 +233,12 @@ class NodeCLI(DockerCLICaller):
             text for all references, or an empty string for an empty list.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If response identities cannot be associated unambiguously
                 with the requests or snapshots are inconsistent.
         """
         references = to_list(x)
+        validate_operands(references)
         if not references:
             return "" if pretty else []
         if pretty:
@@ -303,6 +316,7 @@ class NodeCLI(DockerCLICaller):
             x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "promote"])
@@ -317,6 +331,7 @@ class NodeCLI(DockerCLICaller):
         x: ValidNode | Iterable[ValidNode] | None = None,
         *,
         filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more nodes.
 
@@ -329,14 +344,18 @@ class NodeCLI(DockerCLICaller):
                 and repeated keys, and an iterator is read once. The documented
                 keys are `desired-state`, `id`, `label`, and `name`. None adds
                 no filter.
+            hydrate: Pin task inspection snapshots in bounded batches, omitting
+                tasks that vanish before inspection.
 
         Returns:
-            Task handles in CLI output order, including any task history Docker lists.
+            Task handles in CLI output order, including any task history Docker
+            lists. Handles are lazy unless hydrated.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up, even for an empty selection.
+            ValueError: A node starts with `-`. Nothing is launched.
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
         if x is None:
@@ -345,18 +364,15 @@ class NodeCLI(DockerCLICaller):
             command_args = []
         else:
             command_args = to_list(x)
+            validate_operands(command_args)
             if not command_args:
                 return []
         full_cmd = Command([*self.docker_cmd, "node", "ps", "--quiet", "--no-trunc"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd += command_args
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.task.cli_wrapper.Task(
-                self.client_config, id_, is_immutable_id=True
-            )
-            for id_ in ids
-        ]
+        return pywhales.components.task.cli_wrapper._listed_tasks(
+            self.client_config, run(full_cmd).splitlines(), hydrate=hydrate
+        )
 
     def remove(self, x: ValidNode | Iterable[ValidNode], force: bool = False) -> None:
         """Remove one or more nodes from the Swarm.
@@ -368,6 +384,7 @@ class NodeCLI(DockerCLICaller):
             force: Force node removal when True.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "remove"])
@@ -396,6 +413,7 @@ class NodeCLI(DockerCLICaller):
             rm_labels: Labels to remove from the node.
             role: Set worker or manager; None leaves it unchanged.
         """
+        validate_operands(node)
         full_cmd = Command([*self.docker_cmd, "node", "update"])
 
         full_cmd.add_simple_arg("--availability", availability)

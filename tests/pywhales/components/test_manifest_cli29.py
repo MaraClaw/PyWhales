@@ -1,9 +1,11 @@
 """Docker CLI 29.9.3 manifest commands asserted as exact argv; never launches Docker."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from pywhales import DockerClient
 from pywhales.components.manifest.cli_wrapper import ManifestList
 from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
 
@@ -62,3 +64,30 @@ def test_push_defaults_keep_the_secure_argv(tmp_path: Path) -> None:
         ["manifest", "inspect", "registry.test/app:1"],
         ["manifest", "push", "registry.test/app:1"],
     ]
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("create", lambda c: c.manifest.create("list", ["app:1", "--bad"])),
+    ("push", lambda c: c.manifest.push("--bad")),
+    ("remove", lambda c: c.manifest.remove(["list", "--bad"])),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_manifest_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.manifest.remove("registry.test/app-1")
+
+    assert calls(log) == [["manifest", "rm", "registry.test/app-1"]]

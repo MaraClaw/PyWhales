@@ -39,6 +39,7 @@
   so `gpu_device_missing` assumes the host's CDI spec is current (`nvidia-ctk cdi generate` after changing GPUs). Default calls never probe. Never inspect the local machine; `create()` doesn't resolve GPU requests,
   start does. Daemon refusals with captured stderr classify as `GpuUnavailable`.
 - Their `envs` share the [runtime environment transport](../../AGENTS.md#container-environment-transport); keep that policy out of separate builders.
+- Operands: the image of `run()`/`create()` and container references are validated by `validate_operands()` before lookup and image preflight; `command` arguments after the image or container (`run`, `create`, `execute`) are workload argv and stay untouched, as do option values. See the [operand contract](../../AGENTS.md#operands-and-csv-fields).
 
 ## Output Modes
 
@@ -97,6 +98,8 @@
   inspect model `PortBinding` in `models.py`. Without a port each line is `<port>/<proto> -> <ip>:<port>`; with one, Docker
   prints only `<ip>:<port>`, so the request supplies the container side (TCP by default). IPv6 brackets are stripped, a port on
   both families gives two entries, and any other line raises `ParsingError`.
+- `stats()` parses each `{{json .}}` line through `JsonOutputParser("container stats", ...)`: malformed JSON, a model mismatch or deep nesting is `ParsingError`, never `json.JSONDecodeError` or pydantic `ValidationError`; safe mode leaves no cause or context.
+- `Container.__repr__` reads only `_held_inspect_result()` (even an expired snapshot) and shows `<not loaded>` otherwise; it never inspects, refreshes or unpins.
 - `top()` returns `ContainerTopResult` by default; `raw=True` returns CLI text.
   Docker `ps` tokens follow the container argument; don't apply the Compose grammar.
   Parsed mode supports explicit `-o`/`--format` fields, including heading aliases.

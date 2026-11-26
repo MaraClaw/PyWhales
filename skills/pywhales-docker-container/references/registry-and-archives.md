@@ -129,8 +129,12 @@ empty input, then inspects every requested image eagerly, raising
 `NoSuchImage` for a missing one before starting the save CLI. An
 explicit `output` path blocks and returns `None`. Omitted `output` returns a
 lazy generator of raw archive-byte chunks, not `(source, bytes)` progress
-records: its save subprocess starts on first iteration, not on the call
-itself. Exhaust or explicitly close that generator to leave its subprocess
+records. With no observation scope and no deadline (neither `timeout` nor a
+client `default_timeout`) the chunks are 64 KiB each, except the last, rather
+than newline-split pieces; their concatenation is byte-identical to the archive.
+The generator waits for the CLI to exit without a short timeout, so a slow exit
+can't surface as `subprocess.TimeoutExpired`. Its save subprocess starts on
+first iteration, not on the call itself. Exhaust or explicitly close that generator to leave its subprocess
 context; if it's discarded unconsumed, no save subprocess or archive-save
 telemetry starts. The eager inspection can still emit its own telemetry.
 Closing a started generator kills a still-running local save CLI, reaps it, and

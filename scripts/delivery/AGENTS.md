@@ -37,7 +37,8 @@ Pages deployment workflow. `pages` and `verify-pages` remain CLI helpers.
 - `release` and `pages` rebuild the producer chain through `receipt()`, then need a fresh `destination()` with nothing
   missing. `prepare` and `confirm` check `PRODUCER_ATTEMPT`; `release` checks `PUBLISHER_ATTEMPT`. Nothing borrows from
   an older attempt, so rerun the whole workflow, not failed jobs. `confirm` retries only missing files (12 times, 5 s
-  apart, within the command deadline); conflicts and malformed responses fail at once.
+  apart, within the command deadline). Once complete, it requires per-file Integrity API provenance matching the GitHub
+  repository, publisher workflow and sealed SHA-256. Missing provenance, conflicts and malformed responses fail at once.
 
 ## Transport Retries And Deadline
 
@@ -65,12 +66,15 @@ Pages deployment workflow. `pages` and `verify-pages` remain CLI helpers.
 
 - `python-publish.yml` and `release-on-merge.yml` start from `permissions: {}`; `python-package.yml`
   starts from `contents: read` and only the seal job adds `actions: read`. Third-party actions pin full commit SHAs.
+  Only the publish job grants `id-token: write` for PyPI Trusted Publishing.
 - Both consumers check out trusted `github.workflow_sha` with `persist-credentials: false`, handle only data, and never
   install or build downloaded distributions. The publisher serializes publication without cancelling in-progress runs.
 - `notes` reads the pyproject version and validates its `CHANGELOG.md` section without GitHub environment, through the same
   `project_version` and `release_notes` that `seal` uses. The `Validate release notes` job runs it on pull requests too.
-- `smoke`, `notes` and `verify-pages` are local checks. After `uv build --no-sources --sdist --wheel`, `smoke` runs two
-  `uv run --isolated` installs (wheel, sdist) outside the checkout, 300 s each.
+- `smoke`, `notes` and `verify-pages` are local checks. Build with
+  `uv build --no-sources --sdist --wheel --build-constraints scripts/delivery/build-constraints.txt --require-hashes`.
+  `smoke` checks archive members and declared dependencies before two `uv run --isolated` installs
+  (wheel, sdist) outside the checkout, 300 s each.
 - `pages` validates the receipt, destination and release, then extracts the verified tested site without rebuilding it.
   `verify-pages` compares a local tar against every site file under `limits.py` budgets. Neither helper deploys.
 - `seal`, `prepare`, `confirm`, `release`, and `pages` need `GH_TOKEN`, `GITHUB_REPOSITORY`, and `GITHUB_REPOSITORY_ID`,

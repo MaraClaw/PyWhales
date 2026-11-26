@@ -54,6 +54,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -324,13 +325,15 @@ class ComposeCLI(DockerCLICaller):
                 inherit the client default. Validated before the CLI is resolved.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or `service` starts with
+                `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; the container keeps running, and the Compose plugin
                 process the CLI started may outlive it.
             DockerException: The local Compose CLI exits unsuccessfully.
         """
         validate_timeout(timeout)
+        validate_operands(service)
         full_cmd = Command([*self.docker_compose_cmd, "attach"])
         full_cmd.add_simple_arg("--detach-keys", detach_keys)
         full_cmd.add_simple_arg("--index", index)
@@ -477,7 +480,8 @@ class ComposeCLI(DockerCLICaller):
 
         Raises:
             ValueError: `quiet=True` is combined with `stream_logs=True`, timeout is
-                invalid, or strict_env_transport rejects a literal assignment.
+                invalid, a service starts with `-`, or strict_env_transport rejects a
+                literal assignment.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped. Daemon-side build work is not guaranteed to stop.
         """
@@ -490,6 +494,9 @@ class ComposeCLI(DockerCLICaller):
 
         if services == []:
             return
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         build_arguments, child_env = container_environment(
             build_args, self.client_config
         )
@@ -869,6 +876,9 @@ class ComposeCLI(DockerCLICaller):
             An owned stream of `(source, bytes)` records when `stream_logs=True`
             and services are selected; otherwise `None`, including for `[]`.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "create"])
         full_cmd.add_flag("--build", build)
         full_cmd.add_flag("--force-recreate", force_recreate)
@@ -963,7 +973,8 @@ class ComposeCLI(DockerCLICaller):
             and services are selected; otherwise `None`, including for `[]`.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or a service
+                starts with `-`.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -971,6 +982,9 @@ class ComposeCLI(DockerCLICaller):
                 "Only one can be activated at a time."
             )
 
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "down"])
         full_cmd.add_flag("--remove-orphans", remove_orphans)
         full_cmd.add_simple_arg("--rmi", remove_images)
@@ -1023,12 +1037,14 @@ class ComposeCLI(DockerCLICaller):
             With the default `tty=True`, output goes to the caller's terminal.
 
         Raises:
-            ValueError: Timeout is boolean, nonfinite, zero or negative.
+            ValueError: Timeout is boolean, nonfinite, zero or negative, or `service`
+                starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped, without guaranteeing container-command termination.
             DockerException: The local Compose CLI exits unsuccessfully.
         """
         validate_timeout(timeout)
+        validate_operands(service)
         full_cmd = Command([*self.docker_compose_cmd, "exec"])
         full_cmd.add_flag("--detach", detach)
         env_arguments, child_env = container_environment(envs, self.client_config)
@@ -1072,6 +1088,9 @@ class ComposeCLI(DockerCLICaller):
             remove_orphans: Remove containers for services not defined in the
                 Compose file.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "kill"])
         full_cmd.add_simple_arg("--signal", format_signal_arg(signal))
         full_cmd.add_flag("--remove-orphans", remove_orphans)
@@ -1175,12 +1194,15 @@ class ComposeCLI(DockerCLICaller):
             `(source, bytes)` records when `stream=True`.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or a service starts with
+                `-`.
             DockerTimeout: The local logs CLI exceeds its deadline and is killed
                 and reaped.
             DockerException: The local logs CLI exits unsuccessfully.
         """
         validate_timeout(timeout)
+        services = to_list(services)
+        validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "logs", "--no-color"])
         full_cmd.add_simple_arg("--tail", tail)
         full_cmd.add_flag("--follow", follow)
@@ -1208,6 +1230,9 @@ class ComposeCLI(DockerCLICaller):
                 the containers of all the services specified. So if an empty list
                 is provided, then this function call is a no-op.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "pause"])
         if services == []:
             return
@@ -1234,8 +1259,9 @@ class ComposeCLI(DockerCLICaller):
             The `(host, port)` pair, or `(None, None)` when the CLI reports `:0`.
 
         Raises:
-            ValueError: `service` or `private_port` is an empty string.
+            ValueError: `service` or `private_port` is an empty string or starts with `-`.
         """
+        validate_operands([service, private_port])
         full_cmd = Command([*self.docker_compose_cmd, "port"])
         if service == "":
             raise ValueError("Service cannot be empty")
@@ -1325,7 +1351,8 @@ class ComposeCLI(DockerCLICaller):
 
         Raises:
             ValueError: Dry-run output cannot be interpreted as container IDs or
-                service names, or more than one filter is given. Raised before
+                service names, more than one filter is given, or a service starts with
+                `-`. Raised before
                 the CLI is resolved.
             TypeError: `filters` is a string, bytes, or an iterable containing
                 anything but `(key, value)` tuples of strings.
@@ -1337,6 +1364,7 @@ class ComposeCLI(DockerCLICaller):
         filter_args = format_filters_for_cli(filters)
         if len(filter_args) > 1:
             raise ValueError("compose ps accepts at most one filter")
+        validate_operands(services)
         full_cmd = Command(
             [
                 *self.docker_compose_cmd,
@@ -1419,6 +1447,7 @@ class ComposeCLI(DockerCLICaller):
             allow_publishing_sensitive_data: Assume "yes" as answer to all prompts
             app: Publish the application, including the images it references.
         """
+        validate_operands(repository)
         full_cmd = Command([*self.docker_compose_cmd, "publish"])
         full_cmd.add_flag("--app", app)
         if oci_version is not None:
@@ -1508,8 +1537,8 @@ class ComposeCLI(DockerCLICaller):
             and services are selected; otherwise `None`, including for `[]`.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`, or
-                `timeout` is not positive and finite.
+            ValueError: `quiet=True` is combined with `stream_logs=True`,
+                `timeout` is not positive and finite, or a service starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped, without undoing pulled layers or guaranteeing that
                 daemon-side transfers stop.
@@ -1520,6 +1549,9 @@ class ComposeCLI(DockerCLICaller):
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
                 "Only one can be activated at a time."
             )
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "pull"])
         full_cmd.add_flag("--ignore-pull-failures", ignore_pull_failures)
         full_cmd.add_flag("--include-deps", include_deps)
@@ -1562,12 +1594,14 @@ class ComposeCLI(DockerCLICaller):
                 services, even for an empty request.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or a service starts with
+                `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped, without undoing pushed layers or guaranteeing that
                 registry or daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "push"])
         full_cmd.add_flag("--ignore-missing", ignore_missing)
         full_cmd.add_flag("--include-deps", include_deps)
@@ -1596,6 +1630,9 @@ class ComposeCLI(DockerCLICaller):
                 this is not a local subprocess deadline.
             no_deps: Don't restart the services the selection depends on.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "restart"])
         full_cmd.add_flag("--no-deps", no_deps)
 
@@ -1629,6 +1666,9 @@ class ComposeCLI(DockerCLICaller):
             stop: Stop the containers, if required, before removing
             volumes: Remove any anonymous volumes attached to containers
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "rm", "--force"])
         full_cmd.add_flag("--stop", stop)
         full_cmd.add_flag("--volumes", volumes)
@@ -1825,8 +1865,8 @@ class ComposeCLI(DockerCLICaller):
         Raises:
             ValueError: Streaming conflicts with TTY or detach, detach conflicts
                 with TTY or dry-run mode, `timeout` is not positive and finite,
-                an argument can't be encoded, or `require_gpu` found no GPU
-                request in the checked services.
+                an argument can't be encoded, `service` starts with `-`, or `require_gpu`
+                found no GPU request in the checked services.
             GpuSupportError: `require_gpu` found the daemon unable to serve a
                 request. Raised before the run launch.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
@@ -1856,6 +1896,7 @@ class ComposeCLI(DockerCLICaller):
                 "You can't detach and set tty=True at the same time. It's not compatible. "
                 "Try setting tty=False in docker.compose.run(...)."
             )
+        validate_operands(service)
         full_cmd = Command([*self.docker_compose_cmd, "run"])
         full_cmd.add_flag("--build", build)
         full_cmd.add_flag("--detach", detach)
@@ -1965,6 +2006,9 @@ class ComposeCLI(DockerCLICaller):
             An owned stream of `(source, bytes)` records when `stream_logs=True`
             and services are selected; otherwise `None`, including for `[]`.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "start"])
         full_cmd.add_flag("--wait", wait)
         full_cmd.add_simple_arg("--wait-timeout", wait_timeout)
@@ -2027,6 +2071,9 @@ class ComposeCLI(DockerCLICaller):
         if isinstance(timeout, timedelta):
             timeout = int(timeout.total_seconds())
 
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "stop"])
         full_cmd.add_simple_arg("--timeout", timeout)
         if services == []:
@@ -2071,12 +2118,14 @@ class ComposeCLI(DockerCLICaller):
             an empty string in raw mode or an empty parsed result otherwise.
 
         Raises:
+            ValueError: A service starts with `-`.
             TopParseError: A malformed or ambiguous table; use raw=True.
             DockerException: CLI failures, including unknown services.
         """
         if services == []:
             return "" if raw else ComposeTopResult("", ())
         selected = [] if services is None else to_list(services)
+        validate_operands(selected)
         output = run([*self.docker_compose_cmd, "top", *selected])
         return output if raw else parse_compose_top(output)
 
@@ -2110,7 +2159,8 @@ class ComposeCLI(DockerCLICaller):
             Stderr records are consumed but do not produce events.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or a service starts with
+                `-`.
             DockerTimeout: The local events CLI exceeds its deadline and is
                 killed and reaped.
             DockerException: The local events CLI exits unsuccessfully.
@@ -2121,6 +2171,7 @@ class ComposeCLI(DockerCLICaller):
                 original error.
         """
         validate_timeout(timeout)
+        validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "events", "--json"])
         full_cmd.add_simple_arg("--since", since)
         full_cmd.add_simple_arg("--until", until)
@@ -2146,6 +2197,9 @@ class ComposeCLI(DockerCLICaller):
                 If services is an empty list, the function call does nothing,
                 it's a no-op.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "unpause"])
         if services == []:
             return
@@ -2400,8 +2454,8 @@ class ComposeCLI(DockerCLICaller):
             and services are selected; otherwise `None`, including for `[]`.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`, or
-                `require_gpu` found no GPU request in the checked services.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, a service starts
+                with `-`, or `require_gpu` found no GPU request in the checked services.
             GpuSupportError: `require_gpu` found the daemon unable to serve a
                 request. Raised before the up launch.
             DockerException: The `compose config` launch of `require_gpu` exits
@@ -2415,6 +2469,9 @@ class ComposeCLI(DockerCLICaller):
             )
         if services == []:
             return
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "up"])
         full_cmd.add_flag("--build", build)
         full_cmd.add_flag("--detach", detach)
@@ -2498,7 +2555,8 @@ class ComposeCLI(DockerCLICaller):
             removing running services.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or a service starts with
+                `-`.
             DockerException: The local watch CLI exits unsuccessfully.
             DockerTimeout: The local watch CLI exceeds its deadline and is killed
                 and reaped without stopping services.
@@ -2506,6 +2564,9 @@ class ComposeCLI(DockerCLICaller):
         validate_timeout(timeout)
         if services == []:
             return None
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "watch"])
         full_cmd.add_flag("--no-up", no_up)
         full_cmd.add_flag("--quiet", quiet)
@@ -2562,7 +2623,8 @@ class ComposeCLI(DockerCLICaller):
 
         Raises:
             ValueError: `compose_dry_run` is set, because a preview creates no
-                image, or `timeout` is not positive and finite.
+                image, `timeout` is not positive and finite, or `service` or
+                `repository` starts with `-`.
             ParsingError: The output doesn't report a full image ID.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; a commit already in progress isn't guaranteed to stop.
@@ -2571,6 +2633,7 @@ class ComposeCLI(DockerCLICaller):
         validate_timeout(timeout)
         if self.client_config.compose_dry_run:
             raise ValueError("compose.commit() cannot return an image in dry-run mode.")
+        validate_operands([service, *([] if repository is None else [repository])])
         full_cmd = Command(
             [*self.client_config.get_compose_command(progress="plain"), "commit"]
         )
@@ -2621,12 +2684,20 @@ class ComposeCLI(DockerCLICaller):
                 inherit the client default. Validated before the CLI is resolved.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or the service side of
+                an endpoint starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; a partial copy isn't undone.
             DockerException: The CLI fails, for example when the container is gone.
         """
         validate_timeout(timeout)
+        validate_operands(
+            [
+                endpoint[0]
+                for endpoint in (source, destination)
+                if isinstance(endpoint, tuple)
+            ]
+        )
         full_cmd = Command([*self.docker_compose_cmd, "cp"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_flag("--archive", archive)
@@ -2659,13 +2730,15 @@ class ComposeCLI(DockerCLICaller):
                 inherit the client default. Validated before the CLI is resolved.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or `service` starts with
+                `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; a partial archive can remain.
             DockerException: The CLI fails, for example when the service has no
                 container.
         """
         validate_timeout(timeout)
+        validate_operands(service)
         full_cmd = Command([*self.docker_compose_cmd, "export"])
         full_cmd.add_simple_arg("--index", index)
         full_cmd.add_simple_arg("--output", output)
@@ -2684,10 +2757,14 @@ class ComposeCLI(DockerCLICaller):
             containers appears twice. Empty when no container exists.
 
         Raises:
+            ValueError: A service starts with `-`.
             ParsingError: The output is malformed or has an unexpected shape.
                 Safe mode withholds the payload and chains no cause; a client
                 with `raw_diagnostics=True` chains the original error.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "images", "--format", "json"])
         if services is not None:
             full_cmd += to_list(services)
@@ -2713,7 +2790,8 @@ class ComposeCLI(DockerCLICaller):
                 inherit the client default. Validated before the no-op return.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or a `service=count`
+                operand starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; containers already created or stopped stay that way.
             DockerException: The CLI fails, for example for an unknown service.
@@ -2721,9 +2799,11 @@ class ComposeCLI(DockerCLICaller):
         validate_timeout(timeout)
         if not scales:
             return
+        scale_arguments = format_mapping_for_cli(scales)
+        validate_operands(scale_arguments)
         full_cmd = Command([*self.docker_compose_cmd, "scale"])
         full_cmd.add_flag("--no-deps", no_deps)
-        full_cmd += format_mapping_for_cli(scales)
+        full_cmd += scale_arguments
         run(full_cmd, timeout=timeout)
 
     @overload
@@ -2798,7 +2878,8 @@ class ComposeCLI(DockerCLICaller):
             is nothing to report, or the owned record stream.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or `service` starts with
+                `-`.
             ParsingError: A snapshot line is malformed or has an unexpected
                 shape. Safe mode withholds the payload and chains no cause; a
                 client with `raw_diagnostics=True` chains the original error.
@@ -2807,6 +2888,8 @@ class ComposeCLI(DockerCLICaller):
             DockerException: The CLI fails, for example for an unknown service.
         """
         validate_timeout(timeout)
+        if service is not None:
+            validate_operands(service)
         full_cmd = Command([*self.docker_compose_cmd, "stats"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_flag("--aggregate", aggregate)
@@ -2836,10 +2919,14 @@ class ComposeCLI(DockerCLICaller):
             One entry per volume, in CLI order. Empty when none is in use.
 
         Raises:
+            ValueError: A service starts with `-`.
             ParsingError: A line is malformed or has an unexpected shape. Safe
                 mode withholds the payload and chains no cause; a client with
                 `raw_diagnostics=True` chains the original error.
         """
+        if services is not None:
+            services = to_list(services)
+            validate_operands(services)
         full_cmd = Command([*self.docker_compose_cmd, "volumes", "--format", "json"])
         if services is not None:
             full_cmd += to_list(services)
@@ -2876,8 +2963,8 @@ class ComposeCLI(DockerCLICaller):
             The exit status of the container that stopped; `0` for a clean stop.
 
         Raises:
-            ValueError: `services` is empty, or `timeout` is not positive and
-                finite. Raised before the CLI is resolved.
+            ValueError: `services` is empty, `timeout` is not positive and finite, or a
+                service starts with `-`. Raised before the CLI is resolved.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped; the containers keep running.
             DockerException: The CLI failed with output on stderr.
@@ -2886,6 +2973,7 @@ class ComposeCLI(DockerCLICaller):
         selected = to_list(services)
         if not selected:
             raise ValueError("services must name at least one service")
+        validate_operands(selected)
         full_cmd = Command([*self.docker_compose_cmd, "wait"])
         full_cmd.add_flag("--down-project", down_project)
         full_cmd += selected

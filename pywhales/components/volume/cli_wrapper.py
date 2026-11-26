@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-import os
+import posixpath
 import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
+    Final,
     Literal,
     Self,
     overload,
@@ -24,6 +25,7 @@ import pywhales.components.container.cli_wrapper
 import pywhales.components.image.cli_wrapper
 from pywhales._execution_policy import execution_timeout
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -38,8 +40,10 @@ from pywhales.exceptions import NoSuchContainer, NoSuchImage, NoSuchVolume
 from pywhales.test_utils import random_name
 from pywhales.utils import (
     ValidPath,
+    format_csv_fields_for_cli,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -55,6 +59,39 @@ type VolumeListFilter = (
     | tuple[Literal["dangling"], str]
 )
 type VolumeAvailability = Literal["active", "pause", "drain"]
+
+_COPY_TARGET: Final = "/volume"
+
+
+def _copy_mount(volume: Volume | str) -> str:
+    """Return the helper's quoted `type=volume` mount for a volume name.
+
+    Raises:
+        ValueError: If the name is empty, starts with `/`, the form of a host
+            path rather than a volume name, or starts with `-`.
+    """
+    name = str(volume)
+    validate_operands(name)
+    if not name or name.startswith("/"):
+        raise ValueError("A volume copy endpoint must name a volume, not a path")
+    return format_csv_fields_for_cli(
+        {"type": "volume", "source": name, "target": _COPY_TARGET}
+    )
+
+
+def _path_in_volume(path: ValidPath) -> str:
+    """Join a path below the helper's mount, keeping `''`, `.` and `/.` forms.
+
+    Raises:
+        ValueError: If the path normalizes outside the mounted volume.
+    """
+    joined = posixpath.join(
+        _COPY_TARGET, path.as_posix() if isinstance(path, Path) else path
+    )
+    normalized = posixpath.normpath(joined)
+    if normalized != _COPY_TARGET and not normalized.startswith(f"{_COPY_TARGET}/"):
+        raise ValueError("A path inside a volume must stay within the volume")
+    return joined
 
 
 class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
@@ -129,7 +166,10 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Volume(name='{self.name}', driver={self.driver})"
+        name = getattr(self, "_immutable_id", None)
+        snapshot = self._held_inspect_result()
+        driver = snapshot.driver if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Volume(name='{name}', driver={driver})"
 
     def remove(self, *, force: bool = False) -> None:
         """Remove this volume through the configured Docker CLI.
@@ -233,7 +273,12 @@ class VolumeCLI(DockerCLICaller):
 
         Returns:
             An inspected handle to the volume Docker created or returned.
+
+        Raises:
+            ValueError: `volume_name` starts with `-`. Nothing is launched.
         """
+        if volume_name is not None:
+            validate_operands(volume_name)
         full_cmd = Command([*self.docker_cmd, "volume", "create"])
 
         full_cmd.add_simple_arg("--driver", driver)
@@ -275,12 +320,15 @@ class VolumeCLI(DockerCLICaller):
             duplicates retained as distinct handles.
 
         Raises:
+            ValueError: A name starts with `-`. Nothing is launched.
             ParsingError: If a batch response has invalid shape, inconsistent
                 duplicate snapshots, or names that do not match the requests.
         """
         if isinstance(x, str):
+            validate_operands(x)
             return Volume(self.client_config, x)
         references = list(x)
+        validate_operands(references)
         if not references:
             return []
         json_str = run([*self.docker_cmd, "volume", "inspect", *references])
@@ -404,6 +452,7 @@ class VolumeCLI(DockerCLICaller):
             force: Pass `--force` to Docker's removal command.
         """
         volumes = to_list(x)
+        validate_operands(volumes)
         if not volumes:
             return
         full_cmd = Command([*self.docker_cmd, "volume", "remove"])
@@ -436,10 +485,12 @@ class VolumeCLI(DockerCLICaller):
                 the client default. Expiry cannot undo a daemon-side update.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or the volume
+                starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline.
         """
         validate_timeout(timeout)
+        validate_operands(volume)
         full_cmd = Command([*self.docker_cmd, "volume", "update"])
         full_cmd.add_simple_arg("--availability", availability)
         full_cmd.append(str(volume))
@@ -478,10 +529,12 @@ class VolumeCLI(DockerCLICaller):
             The destination volume handle after both copies complete.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or the source is
+                empty or starts with `/` or `-`. Nothing is created.
             DockerTimeout: A local CLI launch exceeds its deadline.
         """
         validate_timeout(timeout)
+        _copy_mount(source)
         with execution_timeout(self.client_config, timeout):
             new_volume = self.create(new_volume_name, driver, labels, options)
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -499,10 +552,11 @@ class VolumeCLI(DockerCLICaller):
         """Copy files/folders between a volume and the local filesystem.
 
         This builds a temporary image with Buildx and creates a container mounting
-        the volume. The helper container and image are removed on success and on
-        failure; if removal also fails, both errors are kept in a
-        `BaseExceptionGroup`. Use one volume endpoint and one local endpoint,
-        with the local path resolved on the Python host.
+        the volume with `--mount type=volume`, so the name is never a bind. The
+        helper container and image are removed on success and on failure; if
+        removal also fails, both errors are kept in a `BaseExceptionGroup`. Use
+        one volume endpoint and one local endpoint, with the local path resolved
+        on the Python host.
 
         Args:
             source: If `source` is a directory/file inside a Docker volume,
@@ -518,15 +572,19 @@ class VolumeCLI(DockerCLICaller):
                 launch.
 
         Raises:
-            ValueError: If neither endpoint is a volume/path tuple, or `timeout`
-                is not positive and finite.
+            ValueError: If neither endpoint is a volume/path tuple, `timeout` is
+                not positive and finite, the volume name is empty or starts with
+                `/` or `-`, or the path in the volume normalizes outside it. These are
+                checked before the helper image is built.
             DockerTimeout: A local CLI launch exceeds its deadline.
         """
         validate_timeout(timeout)
         if isinstance(source, tuple):
-            volume_name = str(source[0])
+            mount = _copy_mount(source[0])
+            path_in_volume = _path_in_volume(source[1])
         elif isinstance(destination, tuple):
-            volume_name = str(destination[0])
+            mount = _copy_mount(destination[0])
+            path_in_volume = _path_in_volume(destination[1])
         else:
             raise ValueError("source or destination should be a tuple.")
 
@@ -537,7 +595,6 @@ class VolumeCLI(DockerCLICaller):
         buildx = pywhales.components.buildx.cli_wrapper.BuildxCLI(self.client_config)
         image_name = random_name()
         container_name = random_name()
-        volume_in_container = Path("/volume")
         failure: BaseException | None = None
         with execution_timeout(self.client_config, timeout):
             try:
@@ -559,7 +616,7 @@ class VolumeCLI(DockerCLICaller):
                     dummy_container = containers.create(
                         dummy_image,
                         name=container_name,
-                        volumes=[(volume_name, volume_in_container)],
+                        mounts=[[mount]],
                     )
                     if isinstance(source, tuple):
                         target = (
@@ -568,20 +625,14 @@ class VolumeCLI(DockerCLICaller):
                             else destination
                         )
                         containers.copy(
-                            (
-                                dummy_container,
-                                os.path.join(volume_in_container, source[1]),
-                            ),
+                            (dummy_container, path_in_volume),
                             target,
                             timeout=timeout,
                         )
-                    elif isinstance(destination, tuple):
+                    else:
                         containers.copy(
                             source,
-                            (
-                                dummy_container,
-                                os.path.join(volume_in_container, destination[1]),
-                            ),
+                            (dummy_container, path_in_volume),
                             timeout=timeout,
                         )
                 except BaseException as error:

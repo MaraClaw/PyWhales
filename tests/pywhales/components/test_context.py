@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -7,11 +9,34 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, DockerContextConfigDict
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.context.cli_wrapper import Context, DockerContextConfig
 from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
 from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_context_repr_uses_only_held_snapshot() -> None:
+    identity = None
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Context(config, identity, is_immutable_id=True)
+    snapshot = ContextInspectResult(
+        name="selected",
+        endpoints={
+            "docker": ContextEndpoint(host="ssh://remote", skip_tls_verify=True)
+        },
+    )
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Context(name='None', endpoints=<not loaded>)",
+        loaded=(
+            "pywhales.Context(name='None', endpoints={'docker': "
+            "ContextEndpoint(host='ssh://remote', skip_tls_verify=True)})"
+        ),
+        partial="pywhales.Context(name='None', endpoints=<not loaded>)",
+    )
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("contexts"))
@@ -514,3 +539,97 @@ def test_context_removed_inside_its_context_exits_cleanly(
         assert not new_context.exists()
     assert not new_context.exists()
     assert not docker_client.context.exists("pywhales-removed-in-context")
+
+
+def _pflag_string_to_string(value: str) -> dict[str, str]:
+    """Port of pflag's stringToString Set, which parses `--docker` values."""
+    if value.count("=") == 1:
+        pairs = [value.strip('"')]
+    else:
+        pairs = next(csv.reader(io.StringIO(value, newline=""), strict=True))
+    parsed = {}
+    for pair in pairs:
+        key, separator, item = pair.partition("=")
+        assert separator
+        parsed[key] = item
+    return parsed
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            DockerContextConfig(host="tcp://h:1,x"),
+            {"host": "tcp://h:1,x", "skip-tls-verify": "False"},
+        ),
+        (
+            DockerContextConfig(
+                host="ssh://example",
+                certificate_authority=Path('/certs/a"b.pem'),
+                certificate="/certs/c,d.pem",
+                key=Path("/certs/key=1.pem"),
+                skip_tls_verify=True,
+            ),
+            {
+                "host": "ssh://example",
+                "ca": '/certs/a"b.pem',
+                "cert": "/certs/c,d.pem",
+                "key": "/certs/key=1.pem",
+                "skip-tls-verify": "True",
+            },
+        ),
+        (DockerContextConfig(), {"skip-tls-verify": "False"}),
+    ],
+)
+def test_docker_endpoint_fields_round_trip_through_pflag(
+    config: DockerContextConfig, expected: dict[str, str]
+) -> None:
+    assert _pflag_string_to_string(config.format_for_docker_cli()) == expected
+
+
+def test_docker_endpoint_without_csv_syntax_keeps_its_text() -> None:
+    config = DockerContextConfig(
+        host="unix:///var/run/docker.sock", key=Path("/certs/key.pem")
+    )
+    assert config.format_for_docker_cli() == (
+        "host=unix:///var/run/docker.sock,key=/certs/key.pem,skip-tls-verify=False"
+    )
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("create", lambda c: c.context.create("--bad")),
+    ("export", lambda c: c.context.export("--bad")),
+    ("import", lambda c: c.context.import_("--bad", Path("archive.tar"))),
+    ("inspect", lambda c: c.context.inspect("--bad")),
+    ("inspect-list", lambda c: c.context.inspect(["web", "--bad"])),
+    ("remove", lambda c: c.context.remove("--bad")),
+    ("remove-list", lambda c: c.context.remove(["web", "--bad"])),
+    ("update", lambda c: c.context.update("--bad", "description")),
+    ("use", lambda c: c.context.use("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.context.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

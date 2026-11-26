@@ -1,6 +1,6 @@
 # PyWhales Agent Guide
 
-**Verified:** 2026-11-20 against source version 1.3.2 for GPU classification, count and selection checks, and the Swarm service and Compose GPU preflights; 2026-11-18 against 1.3.1 for daemon GPU support; 2026-11-14 against 1.3.0 for Docker CLI 29.9.3, Buildx v0.39.0 and Compose v5.7.1 command coverage; 2026-11-10 against 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
+**Verified:** 2026-11-25 against source version 1.4.0 for the client output cap, interpolation environment checks, operand and CSV quoting helpers, JSON decode classification, side-effect-free reprs, Swarm task hydration, volume copy mounts and image save chunks; 2026-11-20 against 1.3.2 for GPU classification, count and selection checks, and the Swarm service and Compose GPU preflights; 2026-11-18 against 1.3.1 for daemon GPU support; 2026-11-14 against 1.3.0 for Docker CLI 29.9.3, Buildx v0.39.0 and Compose v5.7.1 command coverage; 2026-11-10 against 1.2.1 for inherited environment selection and archive stderr allowances; the four completed 1.2.0 proposals were checked 2026-11-08, and other guidance 2026-11-01.
 
 ## Overview
 
@@ -9,9 +9,12 @@ Python >=3.14.10 and Pydantic 2 are required; `.python-version` pins 3.14.10.
 The public API exports `DockerClient`, resource classes, a shared `docker` client, and the inventory and observation entry points from `pywhales/__init__.py`.
 `DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, `build`, `events`, `port`, `history`, and `search`. Command coverage targets Docker CLI 29.9.3; the removed `trust` group isn't wrapped.
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.
+`DockerClient(max_captured_output_bytes=...)` caps combined captured stdout and stderr per launch outside `observation()`; the default `None` keeps it unbounded, and overflow raises `ObservationLimitError` (reason `response`); see the runtime guide.
+`DockerClient(strict_interpolation_environment=True)` makes `stack.deploy()` and `buildx.bake()` reject the full reserved name set, not only `LD_*`/`DYLD_*`, in interpolation overlays.
+Identifier operands starting with `-` raise `ValueError` before lookup through the shared `validate_operands` helper; CSV-style option values are quoted by `format_csv_fields_for_cli`. Resource `repr()` never launches a command. See the [runtime guide](pywhales/AGENTS.md) and [components guide](pywhales/components/AGENTS.md).
 `DockerClient(inherited_environment_names=...)` selects exact ambient names before explicit overlays. `None` preserves `inherit_environment` behavior; an empty collection inherits nothing. This doesn't confine executable lookup, configuration files, or credential helpers; see the runtime guide.
 The installed `pywhales` console entry point only prints a notice; it isn't a Docker command runner.
-Container, image, network, volume, node, service, config, and secret `list(hydrate=True)` batch-inspect and pin returned snapshots; default listings remain lazy. Ordinary cache expiry uses monotonic time, and copying or unpickling clears freshness and pins.
+Container, image, network, volume, node, service, config, and secret `list(hydrate=True)` batch-inspect and pin returned snapshots; default listings remain lazy. Swarm task producers (service/node/stack `ps()`, `task.list()`, and the handle `ps()` methods) take `hydrate=True` too, and `stack.services()` resolves truncated IDs in batches (`hydrate=True` also pins). Ordinary cache expiry uses monotonic time, and copying or unpickling clears freshness and pins.
 
 Bounded observation sits on top of the command groups:
 
@@ -103,7 +106,7 @@ The strict coverage command is an integration run, not a safe default for a work
 | Enforce coverage floor | `uv run --locked coverage report` |
 | Generate documentation sources | `uv run --locked python -m docs.autogen` |
 | Build documentation site | `uv run --locked mkdocs build --config-file docs/mkdocs.yml` |
-| Build source and wheel distributions | `uv build --no-sources --sdist --wheel` |
+| Build source and wheel distributions | `uv build --no-sources --sdist --wheel --build-constraints scripts/delivery/build-constraints.txt --require-hashes` |
 
 After the build, CI runs `python -m scripts.delivery smoke`. The seal, prepare, confirm, release, and pages subcommands are privileged GitHub and PyPI steps; don't run them locally.
 

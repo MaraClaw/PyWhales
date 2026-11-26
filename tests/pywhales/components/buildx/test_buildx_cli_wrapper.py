@@ -9,18 +9,39 @@ import json
 import os
 import sys
 import tarfile
+import traceback
 from collections.abc import Generator, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, assert_never
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import pywhales.components.buildx.cli_wrapper
 from pywhales import DockerClient, docker
+from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_builder_repr_uses_only_held_snapshot() -> None:
+    identity = "repr-builder"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Builder(config, identity, is_immutable_id=True)
+    snapshot = BuilderInspectResult(name=identity, driver="docker-container")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Builder(name='repr-builder', driver='<not loaded>')",
+        loaded="pywhales.Builder(name='repr-builder', driver='docker-container')",
+        partial="pywhales.Builder(name='None', driver='<not loaded>')",
+    )
+
 
 dockerfile_content1 = """
 FROM busybox
@@ -41,6 +62,57 @@ dockerfile_content4 = """
 FROM busybox
 COPY --from=test_context /dada /dada
 """
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+@pytest.mark.parametrize(
+    "mode", ["print", "build", "no-config", "stream", "report", "list"]
+)
+def test_bake_rejects_loader_overlay_before_lookup(
+    mode: Literal["print", "build", "no-config", "stream", "report", "list"],
+    raw_diagnostics: bool,
+) -> None:
+    client = DockerClient(raw_diagnostics=raw_diagnostics)
+    name, value = "dyld_insert_libraries", "bake-interpolation-secret"
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.buildx.cli_wrapper.run",
+            side_effect=AssertionError("captured launch"),
+        ),
+        patch(
+            "pywhales.components.buildx.cli_wrapper.stream_buildx_logs",
+            side_effect=AssertionError("streamed launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        variables = {name: value}
+        match mode:
+            case "print":
+                client.buildx.bake(print=True, variables=variables)
+            case "build":
+                client.buildx.bake(variables=variables)
+            case "no-config":
+                client.buildx.bake(return_config=False, variables=variables)
+            case "stream":
+                client.buildx.bake(stream_logs=True, variables=variables)
+            case "report":
+                client.buildx.bake(call="outline", variables=variables)
+            case "list":
+                client.buildx.bake(list="targets", variables=variables)
+            case unreachable:
+                assert_never(unreachable)
+
+    for private in (name, name.upper(), value):
+        assert private not in str(rejected.value)
+        assert private not in repr(rejected.value.args)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__context__ is None
 
 
 @pytest.fixture
@@ -577,6 +649,46 @@ def change_cwd() -> Generator[None]:
     os.chdir(bake_test_dir)
     yield
     os.chdir(old_cwd)
+
+
+@pytest.mark.parametrize("only_print", [True, False], ids=["print", "follow-up"])
+@pytest.mark.parametrize("raw", [False, True], ids=["safe", "raw"])
+@pytest.mark.parametrize(
+    ("payload", "error_type"),
+    [
+        ('{"args":{"TOKEN":"bake-arg-secret"}', "json_invalid"),
+        ('{"target":{"app":[{"args":{"TOKEN":"bake-arg-secret"}}]}}', "dict_type"),
+        ("[" * 100_000 + '"bake-arg-secret"', "json_invalid"),
+    ],
+    ids=["invalid-json", "invalid-model", "deep-json"],
+)
+def test_bake_config_parse_error_respects_diagnostics_policy(
+    only_print: bool, raw: bool, payload: str, error_type: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "engine"], raw_diagnostics=raw)
+    responses = [payload] if only_print else ["build output", payload]
+    with (
+        patch(
+            "pywhales.components.buildx.cli_wrapper.run", side_effect=responses
+        ) as run,
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.buildx.bake(print=only_print)
+
+    assert run.call_count == len(responses)
+    error = raised.value
+    assert str(error) == "Invalid buildx bake JSON response"
+    if raw:
+        cause = error.__cause__
+        assert isinstance(cause, ValidationError)
+        detail = cause.errors()[0]
+        assert detail["type"] == error_type
+        assert "bake-arg-secret" in repr(detail["input"])
+    else:
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        rendered = str(error) + repr(error) + "".join(traceback.format_exception(error))
+        assert "bake-arg-secret" not in rendered
 
 
 @pytest.mark.usefixtures("with_docker_driver")
@@ -1196,3 +1308,13 @@ def test_owned_buildx_api_propagates_stream_ownership(
 
         assert raw._process.poll() is not None
         assert all(not thread.is_alive() for thread in raw._threads)
+
+
+def test_format_dict_for_buildx_quotes_only_fields_that_need_it() -> None:
+    format_dict = pywhales.components.buildx.cli_wrapper.format_dict_for_buildx
+    assert format_dict({"type": "registry", "ref": "user/app:cache"}) == (
+        "type=registry,ref=user/app:cache"
+    )
+    assert format_dict({"type": "local", "dest": 'a,b"c'}) == 'type=local,"dest=a,b""c"'
+    with pytest.raises(ValueError):
+        format_dict({"dest=x": "y"})

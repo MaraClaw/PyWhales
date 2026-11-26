@@ -11,7 +11,7 @@ import builtins
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._hydration import release_pins
 from pywhales.components.container.cli_wrapper import ValidContainer
-from pywhales.utils import ValidPath, run, validate_timeout
+from pywhales.utils import ValidPath, run, validate_operands, validate_timeout
 
 
 class CheckpointCLI(DockerCLICaller):
@@ -43,13 +43,15 @@ class CheckpointCLI(DockerCLICaller):
                 local CLI.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or an operand starts
+                with `-`.
             DockerTimeout: The local checkpoint CLI exceeds its deadline.
             NoSuchContainer: The container does not exist.
             DockerException: The daemon rejects the checkpoint, for example
                 because experimental features are disabled.
         """
         validate_timeout(timeout)
+        validate_operands([container, checkpoint])
         full_cmd = Command([*self.docker_cmd, "checkpoint", "create"])
         full_cmd.add_simple_arg("--checkpoint-dir", checkpoint_dir)
         full_cmd.add_flag("--leave-running", leave_running)
@@ -76,10 +78,12 @@ class CheckpointCLI(DockerCLICaller):
             Checkpoint names in CLI order, without the table heading.
 
         Raises:
+            ValueError: The container reference starts with `-`.
             NoSuchContainer: The container does not exist.
             DockerException: The daemon rejects the request, for example because
                 experimental features are disabled.
         """
+        validate_operands(container)
         full_cmd = Command([*self.docker_cmd, "checkpoint", "ls"])
         full_cmd.add_simple_arg("--checkpoint-dir", checkpoint_dir)
         full_cmd.append(container)
@@ -102,10 +106,12 @@ class CheckpointCLI(DockerCLICaller):
                 host; `None` uses the daemon's default.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: The container does not exist.
             DockerException: The daemon rejects the request, for example because
                 the checkpoint is missing or experimental features are disabled.
         """
+        validate_operands([container, checkpoint])
         full_cmd = Command([*self.docker_cmd, "checkpoint", "rm"])
         full_cmd.add_simple_arg("--checkpoint-dir", checkpoint_dir)
         full_cmd.extend([container, checkpoint])

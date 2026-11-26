@@ -1,8 +1,10 @@
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -14,6 +16,7 @@ from pywhales import DockerClient, Image
 from pywhales.client_config import ClientConfig
 from pywhales.components.container.models import PortBinding
 from pywhales.components.top import ContainerTopResult
+from pywhales.docker_client import Version
 from pywhales.exceptions import DockerException
 
 
@@ -172,6 +175,30 @@ def test_version(ctr_client: DockerClient) -> None:
     assert version_info.server is not None
     assert version_info.server.version is not None
     assert re.match(r"\d+\.\d+", version_info.server.version)
+
+
+def test_version_parses_client_and_server_with_compatible_aliases() -> None:
+    client = DockerClient(client_call=[sys.executable, "engine"])
+    output = (
+        '{"Client":{"Version":"29.9.3","ApiVersion":"1.54","BuiltTime":"client-time"},'
+        '"Server":{"Version":"29.9.2","APIVersion":"1.53","BuildTime":"server-time"}}'
+    )
+    with patch("pywhales.docker_client.run", return_value=output):
+        result = client.version()
+
+    assert isinstance(result, Version)
+    assert result.client is not None
+    assert result.server is not None
+    assert (
+        result.client.version,
+        result.client.api_version,
+        result.client.build_time,
+    ) == ("29.9.3", "1.54", "client-time")
+    assert (
+        result.server.version,
+        result.server.api_version,
+        result.server.build_time,
+    ) == ("29.9.2", "1.53", "server-time")
 
 
 def _isolated_auth_client(
@@ -339,3 +366,34 @@ def test_docker_client_options(docker_client: DockerClient) -> None:
         assert "Hello from Docker!" in caller_client.run("hello-world", remove=True)
     finally:
         engine.remove(force=True, volumes=True)
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+LOGIN_DASH_OPERAND_CALLS = [
+    pytest.param(lambda client: client.login(DASH_OPERAND), id="login"),
+    pytest.param(lambda client: client.logout(DASH_OPERAND), id="logout"),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", LOGIN_DASH_OPERAND_CALLS)
+def test_login_and_logout_reject_dash_server_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)

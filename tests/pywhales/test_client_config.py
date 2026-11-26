@@ -24,9 +24,11 @@ from pywhales.client_config import (
     ReloadableObject,
     bulk_reload,
 )
+from pywhales.exceptions import ObservationLimitError
 from pywhales.test_utils import set_cache_validity_period
-from pywhales.utils import PROJECT_ROOT
+from pywhales.utils import PROJECT_ROOT, run
 from tests.pywhales.components.hydration_fakes import FakeCli, fake_daemon
+from tests.pywhales.components.repr_fakes import without_process_launches
 
 
 @pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("nan")])
@@ -34,6 +36,43 @@ def test_default_timeout_rejects_invalid_values_before_lookup(timeout: float) ->
     with patch("shutil.which") as lookup, pytest.raises(ValueError):
         ClientConfig(default_timeout=timeout)
     lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("cap", [False, True, 0, -2, 1.5, "secret", b"secret"])
+def test_capture_cap_rejects_invalid_values(cap: int) -> None:
+    for constructor in (ClientConfig, DockerClient):
+        with pytest.raises(ValueError) as error:
+            constructor(max_captured_output_bytes=cap)
+        assert (
+            str(error.value)
+            == "max_captured_output_bytes must be a positive integer or None"
+        )
+
+
+def test_capture_cap_config_equality_and_precedence() -> None:
+    config = ClientConfig(max_captured_output_bytes=1)
+    assert config != ClientConfig()
+    assert config == DockerClient(max_captured_output_bytes=1).client_config
+    client = DockerClient(client_config=config, max_captured_output_bytes=False)
+    assert client.client_config is config
+
+
+def test_capture_cap_is_snapshotted_before_child_input() -> None:
+    client = DockerClient(client_call=[sys.executable], max_captured_output_bytes=3)
+    command = [
+        *client.docker_cmd,
+        "-c",
+        "import sys; sys.stdin.buffer.read(); print('ok')",
+    ]
+
+    def after_launch() -> Generator[bytes]:
+        client.client_config.max_captured_output_bytes = 2
+        yield b"go"
+
+    assert run(command, input=after_launch()) == "ok"
+    with pytest.raises(ObservationLimitError) as error:
+        run(command, input=b"")
+    assert (error.value.reason, error.value.limit) == ("response", 2)
 
 
 def test_default_timeout_respects_supplied_config() -> None:
@@ -537,6 +576,36 @@ def _published_at(clock: float, *, pinned: bool = False) -> _Handle:
         else:
             handle._set_inspect_result(_Snapshot("ref", 0))
     return handle
+
+
+@pytest.mark.parametrize("state", ["lazy", "fresh", "expired", "pinned"])
+def test_held_inspect_result_leaves_cache_unchanged(state: str) -> None:
+    handle = _Handle()
+    snapshot = _Snapshot("ref", 0)
+    with patch("pywhales.client_config.monotonic", return_value=100.0):
+        if state == "pinned":
+            handle._set_pinned_inspect_result(snapshot)
+        elif state != "lazy":
+            handle._set_inspect_result(snapshot)
+
+    before = (handle._refreshed_at, handle._last_refreshed_time, handle._pinned)
+    now = 100.0 if state == "fresh" else 120.0
+    with (
+        without_process_launches(),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 10),
+        patch("pywhales.client_config.monotonic", return_value=now),
+    ):
+        assert handle._held_inspect_result() is (None if state == "lazy" else snapshot)
+
+    assert (handle._refreshed_at, handle._last_refreshed_time, handle._pinned) == before
+    assert handle.generation == 0
+
+
+def test_held_inspect_result_on_uninitialized_handle() -> None:
+    handle = object.__new__(_Handle)
+    with without_process_launches():
+        assert handle._held_inspect_result() is None
+    assert vars(handle) == {}
 
 
 @pytest.mark.parametrize(

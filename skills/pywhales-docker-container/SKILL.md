@@ -3,7 +3,8 @@ name: pywhales-docker-container
 description: >-
   Use the installed pywhales package to automate Docker from Python applications
   and scripts. Use when translating docker run/build/compose commands into Python,
-  managing containers or images with pywhales, reading hydrated resource listings,
+  managing containers or images with pywhales, reading hydrated resource listings
+  (including Swarm tasks),
   pulling/pushing/saving/loading images, using Buildx history and policy or
   Compose stats, cp, and wait from Python, checkpointing containers, requesting raw-text
   inspect output, selecting inherited CLI environment names,
@@ -17,8 +18,10 @@ description: >-
    daemon's GPU support before running,
    waiting for Swarm node readiness with optional designated-manager leadership,
    or service/job/stack, Compose project, or standalone container convergence with
-   completion, restart budgets, and opt-in exit or unhealthy failures, or
-  troubleshooting pywhales usage, output types,
+   completion, restart budgets, and opt-in exit or unhealthy failures,
+  capping captured CLI output per launch, strict stack and bake interpolation
+  environments, dash-leading operand errors, the `pywhales[ecr]` extra for
+  `login_ecr`, or troubleshooting pywhales usage, output types,
   streaming, and cleanup. This skill is for consuming pywhales, not developing
   or contributing to the library.
 compatibility: >-
@@ -31,7 +34,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance describes source APIs for project version 1.3.2, which covers
+This guidance describes source APIs for project version 1.4.0, which covers
 Docker CLI 29.9.3, Buildx v0.39.0, and Compose v5.7.1. PyWhales forwards flags
 without probing, so an older CLI or plugin can reject newer options.
 An installed version string alone isn't proof of support; check actual
@@ -50,13 +53,16 @@ are not part of this workflow.
    adding unfamiliar arguments or assuming a closeable stream. For inventory,
    check supported kinds too; for Swarm waits, check the supported service modes.
    For hydrated listings, check `list(hydrate=True)` on each needed resource group,
-   including node, service, config and secret. For reconciliation that observes
+   including node, service, config and secret, and `hydrate` on the Swarm task
+   producers (`service.ps`, `node.ps`, `stack.ps`, `task.list`) and `stack.services`. For reconciliation that observes
    long rollouts, check `ActionContext.renew_lease` and `JournalStore.renew`.
    For shared IO, archive stderr, launch-attempt and child-slot budgets, bounded uploads, owner active
    and class/owner queued demand, `inherited_environment_names`, strict workload errors,
    schema-11 stop attribution, exporter counts and admission correlation,
    prune deadlines, startup health intervals and profile approvals,
-   `system.gpu_support()` and `require_gpu`,
+   `system.gpu_support()` and `require_gpu`, the client's
+   `max_captured_output_bytes` and `strict_interpolation_environment`, the
+   `pywhales[ecr]` extra (`botocore`) for `login_ecr`,
    and node/container convergence (including `require_leader` and
    `fail_on_unhealthy`), check the policy fields, client flags,
    record schemas, target types, and capture options rather than
@@ -76,10 +82,10 @@ are not part of this workflow.
 
 | Read when | Reference |
 | --- | --- |
-| Setting up imports, local/remote clients, CLI prerequisites, inherited environment allowlists, default deadlines, strict environment transport, workload-error classification, GPU errors (`GpuUnavailable`, `GpuSupportError`), hydrated listings and snapshot lifetimes, inspect/reload errors, root aliases such as `docker.events` and `docker.port`, the removed `trust` group, context changes, or raw-text option results | [Client, setup, and errors](references/client-and-errors.md) |
+| Setting up imports, local/remote clients, CLI prerequisites, inherited environment allowlists, default deadlines, the captured-output cap, strict environment transport and interpolation environments, operand `ValueError`, `pywhales[ecr]`, workload-error classification, GPU errors (`GpuUnavailable`, `GpuSupportError`), hydrated listings (including Swarm tasks) and snapshot lifetimes, inspect/reload and parsing errors, root aliases such as `docker.events` and `docker.port`, the removed `trust` group, context changes, or raw-text option results | [Client, setup, and errors](references/client-and-errors.md) |
 | Translating run/exec/ps, passing container environment values, requesting GPUs, a number of vGPUs, MIG or CDI devices and checking the target daemon's GPU support (also for Swarm services and Compose), setting startup health intervals directly or through approved profiles, waiting on containers, choosing output modes, mounting files, looking up published ports, checkpointing, bounding prune launches, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
 | Pulling, pushing, saving, or loading images and registry archives, including platform selection, all-tags transfers, image history and search, child-aware transfer fanout, shared IO, upload and archive stderr budgets | [Registry transfers and archives](references/registry-and-archives.md) |
-| Building images, passing build args, selecting exporters, streaming builds, checking Dockerfiles, or using Buildx history, policy, replay, and debug output | [Buildx](references/buildx.md) |
+| Building images, passing build args, selecting exporters and CSV-style options, streaming builds, baking with `variables`, checking Dockerfiles, or using Buildx history, policy, replay, and debug output | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, managing a stack, or using stats, cp, wait, bridge, and config queries | [Compose](references/compose.md) |
 | Observing executions and preflight refusals with schema-11 stop reasons and exporter offer counts, measuring admission waits and correlating launches/refusals, or bounding concurrent work, owner active demand and class/owner queued demand with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
 | Bounding shared IO bytes, launch attempts, owned local CLI children, inspection, inventory, streams, or stdin uploads; waiting for Swarm node readiness with optional leadership, services/jobs/stacks, Compose services, or standalone containers with completion, restart budgets, `fail_on_exit`, and `fail_on_unhealthy`; or evaluating opt-in reconciliation and lease renewal during observation | [Observation budgets and convergence](references/observation-and-convergence.md) |
@@ -100,7 +106,10 @@ are not part of this workflow.
 | `docker build ...` | `docker.build(...)`, an alias of `docker.buildx.build(...)` |
 | `docker compose ...` | A scoped `DockerClient(...).compose` namespace |
 
-Pass commands as lists, not shell command strings. Use a shell inside the
+Pass commands as lists, not shell command strings. The list after the image,
+container or service stays literal (`docker.run("alpine", ["ls", "-la"])`),
+but an identifier operand such as a container, image or volume name that
+starts with `-` raises `ValueError` before anything launches. Use a shell inside the
 container only when the task actually requires shell syntax. A detached run
 returns a `Container`, not logs; a build doesn't always return a local `Image`.
 Read the relevant output contract before consuming either result.

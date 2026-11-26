@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import assert_type
@@ -7,10 +8,32 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, docker
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.task.cli_wrapper import Task, TaskCLI
 from pywhales.components.task.models import TaskInspectResult
+from pywhales.exceptions import DockerException
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_task_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdefghijklmno"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Task(config, identity, is_immutable_id=True)
+    snapshot = TaskInspectResult(id=identity, name="service.1")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Task(id='0123456789ab', name=<not loaded>)",
+        loaded="pywhales.Task(id='0123456789ab', name=service.1)",
+        partial="pywhales.Task(id='None', name=<not loaded>)",
+    )
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("tasks"))
@@ -138,11 +161,119 @@ def test_list_passes_listed_services_to_one_service_ps() -> None:
     ) as command:
         tasks = client.task.list()
     assert [task.id for task in tasks] == ["task-id"]
-    assert command.call_args.args[0] == [
-        "docker-test",
-        "service",
-        "ps",
-        "--quiet",
-        "--no-trunc",
-        "full-id",
+    assert [call.args[0] for call in command.call_args_list] == [
+        ["docker-test", "service", "list", "--quiet"],
+        ["docker-test", "service", "inspect", "short", "--format", "{{.ID}}"],
+        ["docker-test", "service", "ps", "--quiet", "--no-trunc", "full-id"],
     ]
+
+
+def test_hydrated_task_list_batches_across_services() -> None:
+    services = [identity_of("service", index) for index in range(2)]
+    ids = [identity_of("task", index) for index in range(5)]
+    service_cli = FakeCli("service", services)
+    task_cli = FakeCli("task", ids)
+    task_cli.reorder = True
+    owners = [services[0], *([services[1]] * 4)]
+    for identity, owner in zip(ids, owners, strict=True):
+        task_cli.present[identity]["ServiceID"] = owner
+
+    def run_fake(argv: Sequence[str], **kwargs: object) -> CompletedProcess[bytes]:
+        fake = (
+            service_cli
+            if argv[1:3] in (["service", "list"], ["service", "inspect"])
+            else task_cli
+        )
+        return fake(argv, **kwargs)
+
+    with (
+        fake_daemon(task_cli, chunk_size=2) as client,
+        patch("subprocess.run", side_effect=run_fake) as command,
+    ):
+        tasks = client.task.list(hydrate=True)
+        assert [task.id for task in tasks] == ids
+        assert [task.service_id for task in tasks] == owners
+        assert command.call_count == 6
+
+    assert service_cli.resolves() == [[identity[:12] for identity in services]]
+    assert task_cli.lists() == [
+        ["docker-test", "service", "ps", "--quiet", "--no-trunc", *services]
+    ]
+    assert task_cli.inspects() == [ids[:2], ids[2:4], ids[4:]]
+
+
+def test_vanished_tasks_only_reprobe_the_affected_chunk() -> None:
+    ids = [identity_of("task", index) for index in range(6)]
+    cli = FakeCli("task", ids)
+    cli.vanish_on_list = {ids[1], ids[2]}
+    with fake_daemon(cli, chunk_size=3) as client:
+        tasks = client.service.ps("api", hydrate=True)
+        assert [task.id for task in tasks] == [ids[0], *ids[3:]]
+        assert [task.name for task in tasks] == [
+            "task-0000",
+            "task-0003",
+            "task-0004",
+            "task-0005",
+        ]
+
+    assert cli.inspects() == [ids[:3], ids[:1], ids[1:3], ids[1:2], ids[2:3], ids[3:]]
+
+
+@pytest.mark.parametrize(
+    "failure", [*INSPECT_FAILURES, "unrequested", "mixed", "blank-line", "empty"]
+)
+def test_task_hydration_propagates_failures_without_bisection(failure: str) -> None:
+    ids = [identity_of("task", index) for index in range(2)]
+    cli = FakeCli("task", ids)
+    missing = f"Error response from daemon: task {ids[0]} not found\n".encode()
+    stderr = {
+        "unrequested": b"Error response from daemon: task unrequested not found\n",
+        "mixed": missing + b"permission denied\n",
+        "blank-line": missing + b"\n",
+        "empty": b"",
+    }
+    expected = INSPECT_FAILURES.get(failure, DockerException)
+    with (
+        fake_daemon(cli) as client,
+        patch(
+            "subprocess.run",
+            side_effect=cli.failing({"inspect"}, stderr.get(failure, failure)),
+        ),
+        pytest.raises(expected) as caught,
+    ):
+        client.service.ps("api", hydrate=True)
+    assert type(caught.value) is expected
+    assert cli.inspects() == [ids]
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("inspect", lambda c: c.task.inspect("--bad")),
+    ("inspect-list", lambda c: c.task.inspect(["abcde" * 5, "--bad"])),
+    ("logs", lambda c: c.task.logs("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.task.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

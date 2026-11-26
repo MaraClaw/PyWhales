@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, Image
+from pywhales.client_config import ClientConfig
 from pywhales.components.manifest.cli_wrapper import (
     ManifestList,
     ManifestListInspectResult,
@@ -197,3 +198,42 @@ def test_manifest_remove_single_selection_builds_argv_once(
         client.manifest.remove(make_selection())
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "manifest", "rm", "alpha"]
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("annotate-name", lambda c: c.manifest.annotate("--bad", "app:1")),
+    ("annotate-manifest", lambda c: c.manifest.annotate("list", "--bad")),
+    ("create-name", lambda c: c.manifest.create("--bad", ["app:1"])),
+    ("create-later", lambda c: c.manifest.create("list", ["app:1", "--bad"])),
+    ("inspect", lambda c: c.manifest.inspect("--bad")),
+    ("inspect-verbose", lambda c: c.manifest.inspect("--bad", verbose=True)),
+    ("push", lambda c: c.manifest.push("--bad")),
+    ("remove", lambda c: c.manifest.remove("--bad")),
+    ("remove-list", lambda c: c.manifest.remove(["list", "--bad"])),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.manifest.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

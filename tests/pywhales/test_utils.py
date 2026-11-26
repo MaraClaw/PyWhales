@@ -5,7 +5,9 @@ and deadlines. Docker wrapper paths are patched where used; daemon availability
 does not replace the local process requirements.
 """
 
+import csv
 import errno
+import io
 import json
 import os
 import select
@@ -16,6 +18,7 @@ import threading
 import traceback
 from collections import Counter
 from collections.abc import Buffer, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +59,7 @@ from pywhales.utils import (
     ProcessStream,
     custom_parse_object_as,
     format_cpuset,
+    format_csv_fields_for_cli,
     stream_stdout_and_stderr,
     type_adapter,
 )
@@ -1687,6 +1691,98 @@ def test_run_stop_kills_the_isolated_cli_process_group(
         signal.signal(signal.SIGALRM, previous)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+@pytest.mark.parametrize("branch", ["isolated", "terminal", "communicate"])
+def test_client_capture_overflow_stops_only_owned_processes(
+    branch: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated = branch == "isolated"
+    monkeypatch.setattr(pywhales.utils, "isolates", lambda *fds, tty=False: isolated)
+    config = ClientConfig(client_call=[sys.executable], max_captured_output_bytes=4)
+    data = b"go" if branch == "communicate" else None
+    exact = [
+        *config.docker_cmd,
+        "-c",
+        "import os; os.write(1,b'ab'); os.write(2,b'cd')",
+    ]
+    assert pywhales.utils.run(exact, input=data, return_stderr=True) == ("ab", "cd")
+    children: list[subprocess.Popen[bytes]] = []
+
+    def track(process: subprocess.Popen[bytes], isolated: bool) -> None:
+        children.append(process)
+        pywhales._readiness.track(process, isolated)
+
+    monkeypatch.setattr(pywhales.utils, "track", track)
+    read_fd, write_fd = os.pipe()
+    before = set(threading.enumerate())
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        Grandchild() as grandchild,
+        os.fdopen(read_fd, "rb") as gate,
+        os.fdopen(write_fd, "wb") as release,
+    ):
+        # The CLI cannot exit naturally until the test releases its gate.
+        tail = "os.write(1,b'abc'); os.write(2,b'de'); os.read(int(sys.argv[3]), 1)"
+        command = [
+            *config.docker_cmd,
+            "-c",
+            holder(tail),
+            *grandchild.argv,
+            gate.fileno(),
+        ]
+        result = pool.submit(
+            pywhales.utils.run,
+            command,
+            input=data,
+            pass_fds=(*grandchild.fds, gate.fileno()),
+        )
+        grandchild.started()
+        try:
+            with pytest.raises(ObservationLimitError) as error:
+                result.result(timeout=5)
+            assert (error.value.reason, error.value.limit, error.value.measured) == (
+                "response",
+                4,
+                5,
+            )
+            (child,) = children
+            assert child.returncode is not None
+            assert all(
+                pipe.closed
+                for pipe in (child.stdin, child.stdout, child.stderr)
+                if pipe is not None
+            )
+            if isolated:
+                grandchild.assert_gone()
+            else:
+                grandchild.assert_alive()
+        finally:
+            release.close()
+    assert set(threading.enumerate()) == before
+
+
+@pytest.mark.parametrize("captured", [1, 2])
+def test_client_capture_cap_ignores_inherited_output(
+    captured: int, capfd: pytest.CaptureFixture[str]
+) -> None:
+    config = ClientConfig(client_call=[sys.executable], max_captured_output_bytes=2)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        f"import os; os.write({captured}, b'ok'); os.write({3 - captured}, b'inherited')",
+    ]
+    result = pywhales.utils.run(
+        command,
+        capture_stdout=captured == 1,
+        capture_stderr=captured == 2,
+        return_stderr=True,
+    )
+    assert result == (("ok", "") if captured == 1 else ("", "ok"))
+    assert capfd.readouterr() == (
+        ("", "inherited") if captured == 1 else ("inherited", "")
+    )
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminals")
 def test_run_with_terminal_stdin_keeps_the_leader_only_kill() -> None:
     controller, terminal = os.openpty()
@@ -2665,3 +2761,45 @@ def test_importing_pywhales_builds_no_decode_adapters() -> None:
     cached, generic = json.loads(probe.stdout)
     assert cached == 0
     assert generic == []
+
+
+def _csv_fields(value: str) -> list[str]:
+    return next(csv.reader(io.StringIO(value, newline=""), strict=True))
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        ({}, ""),
+        ({"type": "local", "dest": Path("out/dir")}, "type=local,dest=out/dir"),
+        ({"mode": "max", "flag": True, "count": 2}, "mode=max,flag=True,count=2"),
+        ({"source": "a=b"}, "source=a=b"),
+    ],
+)
+def test_csv_fields_without_special_characters_stay_verbatim(
+    mapping: Mapping[str, object], expected: str
+) -> None:
+    assert format_csv_fields_for_cli(mapping) == expected
+
+
+@pytest.mark.parametrize(
+    "value", ["out,push=true", 'a"b', 'x,"y"', "line\r\nnext", '"', ","]
+)
+def test_csv_fields_with_special_characters_round_trip_as_one_field(
+    value: str,
+) -> None:
+    formatted = format_csv_fields_for_cli({"type": "local", "dest": value})
+
+    assert formatted.startswith('type=local,"dest=')
+    assert _csv_fields(formatted) == ["type=local", f"dest={value}"]
+
+
+@pytest.mark.parametrize("key", ["a=b", "a,b", 'a"b', "a\rb", "a\nb", "="])
+def test_csv_field_keys_that_cannot_be_represented_are_rejected(key: str) -> None:
+    with pytest.raises(ValueError) as raised:
+        format_csv_fields_for_cli({"type": "local", key: "secret-value"})
+
+    message = str(raised.value)
+    assert key not in message
+    assert "secret-value" not in message
+    assert raised.value.args == (message,)

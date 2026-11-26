@@ -1,11 +1,13 @@
 """Docker CLI 29.9.3 volume options asserted as exact argv; never launches Docker."""
 
+import csv
 import math
 from pathlib import Path
 
 import pytest
 
-from pywhales import Volume
+from pywhales import Image, Volume
+from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.exceptions import DockerException, DockerTimeout
 from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
 
@@ -206,3 +208,52 @@ def test_update_releases_the_pin_of_a_hydrated_handle(
         ["volume", "update", "--availability", "drain", "vol"],
         ["volume", "inspect", "vol"],
     ]
+
+
+def test_copy_mounts_a_quoted_volume_instead_of_a_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, log = make_fake_cli(tmp_path, [Rule(match=("create",), stdout="cid0\n")])
+    image = Image(client.client_config, "sha256:" + "a" * 64, is_immutable_id=True)
+
+    def build(*args: object, **kwargs: object) -> Image:
+        return image
+
+    monkeypatch.setattr(BuildxCLI, "build", build)
+    client.volume.copy(("data,ro", "sub/."), tmp_path / "out")
+
+    create = next(argv for argv in calls(log) if argv[0] == "create")
+    mount = create[create.index("--mount") + 1]
+    assert mount == 'type=volume,"source=data,ro",target=/volume'
+    assert next(csv.reader([mount])) == [
+        "type=volume",
+        "source=data,ro",
+        "target=/volume",
+    ]
+    assert "--volume" not in create
+    assert ["container", "cp", "cid0:/volume/sub/.", str(tmp_path / "out")] in calls(
+        log
+    )
+
+
+@pytest.mark.parametrize(
+    "endpoint", [("/etc", "."), ("/", "x"), ("data", "../../etc"), ("data", "/etc")]
+)
+@pytest.mark.parametrize("to_volume", [False, True], ids=["from-volume", "to-volume"])
+def test_copy_rejects_binds_and_escapes_before_any_launch(
+    tmp_path: Path, endpoint: tuple[str, str], to_volume: bool
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        if to_volume:
+            client.volume.copy(tmp_path / "in", endpoint)
+        else:
+            client.volume.copy(endpoint, tmp_path / "out")
+    assert calls(log) == []
+
+
+def test_clone_of_a_path_name_creates_no_destination(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        client.volume.clone("/etc", "copy")
+    assert calls(log) == []

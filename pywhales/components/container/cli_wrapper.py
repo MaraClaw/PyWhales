@@ -31,6 +31,7 @@ import pywhales.components.volume.cli_wrapper
 from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -39,6 +40,7 @@ from pywhales.client_config import (
 )
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._hydration import hydrate_handles, release_pins
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.container.models import (
     ContainerConfig,
     ContainerGraphDriver,
@@ -67,6 +69,7 @@ from pywhales.utils import (
     stream_stdout_and_stderr,
     to_list,
     to_seconds,
+    validate_operands,
     validate_timeout,
 )
 
@@ -269,7 +272,13 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Container(id='{self.id[:12]}', name='{self.name}')"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        if name is not None:
+            name = name.removeprefix("/")
+        return f"pywhales.Container(id='{short_id}', name='{name}')"
 
     # --------------------------------------------------------------------
     # public methods
@@ -947,9 +956,11 @@ class ContainerCLI(DockerCLICaller):
             sig_proxy: Proxy all received signals to the process (default true)
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: The container does not exist during inspection or
                 attachment.
         """
+        validate_operands(container)
         self.inspect(container)
 
         full_cmd = Command([*self.docker_cmd, "attach"])
@@ -985,6 +996,9 @@ class ContainerCLI(DockerCLICaller):
         Returns:
             The committed image using the originating client configuration.
         """
+        validate_operands(container)
+        if tag is not None:
+            validate_operands(tag)
         full_cmd = Command([*self.docker_cmd, "container", "commit"])
 
         full_cmd.add_simple_arg("--author", author)
@@ -1031,10 +1045,14 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             ValueError: `timeout` is not positive and finite.
+                An operand starts with `-`.
             DockerTimeout: The local copy CLI exceeds its deadline and is killed
                 and reaped.
         """
         validate_timeout(timeout)
+        for endpoint in (source, destination):
+            if isinstance(endpoint, tuple):
+                validate_operands(endpoint[0])
         full_cmd = Command([*self.docker_cmd, "container", "cp"])
         full_cmd.add_flag("--archive", archive)
         full_cmd.add_flag("--follow-link", follow_link)
@@ -1186,6 +1204,7 @@ class ContainerCLI(DockerCLICaller):
             TypeError: `command` is a shell string rather than an argv sequence.
             ValueError: `health_start_interval` is not positive whole seconds,
                 or `require_gpu` is set without a GPU request.
+                An operand starts with `-`.
             GpuSupportError: `require_gpu` found the daemon unable to serve it,
                 including a `gpus` count or selection naming unreported GPUs.
             DockerException: Image acquisition or container creation fails.
@@ -1202,6 +1221,7 @@ class ContainerCLI(DockerCLICaller):
                 """
             )
             raise TypeError(error_message)
+        validate_operands(image)
         if require_gpu:
             requested_devices = tuple(devices)
             devices = requested_devices
@@ -1383,6 +1403,7 @@ class ContainerCLI(DockerCLICaller):
             Filesystem paths mapped to the change codes emitted by Docker, such
             as `A` for added, `C` for changed, or `D` for deleted.
         """
+        validate_operands(container)
         full_cmd = Command([*self.docker_cmd, "diff", container])
 
         result_dict = {}
@@ -1501,6 +1522,7 @@ class ContainerCLI(DockerCLICaller):
             TypeError: `command` is a string rather than an argv sequence.
             ValueError: Streaming conflicts with TTY or detach, or `timeout` is
                 not positive and finite.
+                An operand starts with `-`.
             NoSuchContainer: The selected container does not exist.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped, without guaranteeing container-command cancellation.
@@ -1519,6 +1541,7 @@ class ContainerCLI(DockerCLICaller):
                 """
             )
             raise TypeError(error_message)
+        validate_operands(container)
 
         full_cmd = Command([*self.docker_cmd, "exec"])
 
@@ -1615,11 +1638,13 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             ValueError: `timeout` is not positive and finite.
+                An operand starts with `-`.
             NoSuchContainer: The selected container does not exist.
             DockerTimeout: The local export CLI exceeds its deadline and is killed
                 and reaped.
         """
         validate_timeout(timeout)
+        validate_operands(container)
         full_cmd = Command([*self.docker_cmd, "container", "export"])
         full_cmd.add_simple_arg("--output", output)
 
@@ -1662,17 +1687,20 @@ class ContainerCLI(DockerCLICaller):
             returns `[]`. Handles retain the originating client configuration.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: A requested container does not exist.
             ParsingError: A batch snapshot is malformed or does not match its
                 requested container name or ID prefix.
         """
 
         if isinstance(x, str | Container):
+            validate_operands(x)
             if not size:
                 return Container(self.client_config, str(x))
             references = [str(x)]
         else:
             references = [str(reference) for reference in x]
+            validate_operands(references)
         if not references:
             return []
         full_cmd = Command([*self.docker_cmd, "container", "inspect"])
@@ -1718,6 +1746,7 @@ class ContainerCLI(DockerCLICaller):
             signal: The signal to send the container
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: A selected container does not exist.
         """
         container_list = (
@@ -1725,6 +1754,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if container_list == []:
             # nothing to do
             return
@@ -1835,6 +1865,7 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             ValueError: `timeout` is not positive and finite.
+                An operand starts with `-`.
             NoSuchContainer: The selected container does not exist.
             DockerTimeout: The local logs CLI exceeds its deadline and is killed
                 and reaped without stopping the container.
@@ -1842,6 +1873,7 @@ class ContainerCLI(DockerCLICaller):
         """
 
         validate_timeout(timeout)
+        validate_operands(container)
         # first we verify that the container exists and raise an exception if not.
         self.inspect(container)
 
@@ -1929,6 +1961,7 @@ class ContainerCLI(DockerCLICaller):
             containers: One or more containers to pause
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: A selected container does not exist.
         """
         container_list = (
@@ -1936,6 +1969,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if container_list == []:
             # nothing to do
             return
@@ -1974,6 +2008,7 @@ class ContainerCLI(DockerCLICaller):
         Raises:
             ValueError: `protocol` is given without `private_port` or alongside a
                 port that already names a protocol.
+                An operand starts with `-`.
             ParsingError: The CLI printed a line that is not a port mapping.
             NoSuchContainer: The container does not exist.
             DockerException: `private_port` is not published.
@@ -1988,6 +2023,9 @@ class ContainerCLI(DockerCLICaller):
                 if "/" in requested:
                     raise ValueError("private_port already includes a protocol")
                 requested = f"{requested}/{protocol}"
+        validate_operands(container)
+        if requested is not None:
+            validate_operands(requested)
         full_cmd = Command([*self.docker_cmd, "container", "port", container])
         if requested is not None:
             full_cmd.append(requested)
@@ -2064,8 +2102,10 @@ class ContainerCLI(DockerCLICaller):
             new_name: The new name of the container.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: The selected container does not exist.
         """
+        validate_operands([container, new_name])
         full_cmd = Command(
             [*self.docker_cmd, "container", "rename", str(container), new_name]
         )
@@ -2093,6 +2133,7 @@ class ContainerCLI(DockerCLICaller):
             signal: Signal to send to the container, as a number or name.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: A selected container does not exist.
         """
         container_list = (
@@ -2100,6 +2141,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if not container_list:
             # nothing to do
             return
@@ -2134,6 +2176,7 @@ class ContainerCLI(DockerCLICaller):
             volumes: Remove anonymous volumes associated with the container
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: A selected container does not exist.
         """
         container_list = (
@@ -2141,6 +2184,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if not container_list:
             # nothing to do
             return
@@ -2481,6 +2525,7 @@ class ContainerCLI(DockerCLICaller):
             ValueError: If timeout or health_start_interval is invalid, detach
                 and stream are both true, or require_gpu is set without a GPU
                 request.
+                An operand starts with `-`.
             GpuSupportError: If require_gpu found the daemon unable to serve it,
                 including a `gpus` count or selection naming unreported GPUs.
             GpuUnavailable: If the daemon rejected the GPU or CDI device request.
@@ -2500,6 +2545,7 @@ class ContainerCLI(DockerCLICaller):
                 """
             )
             raise TypeError(error_message)
+        validate_operands(image)
         if require_gpu:
             requested_devices = tuple(devices)
             devices = requested_devices
@@ -2797,6 +2843,7 @@ class ContainerCLI(DockerCLICaller):
         Raises:
             ValueError: If attaching multiple containers, streaming unattached,
                 or `timeout` is not positive and finite.
+                An operand starts with `-`.
             NoSuchContainer: If a selected container does not exist.
             DockerTimeout: The local start CLI exceeds its deadline and is
                 killed and reaped without stopping the container.
@@ -2807,6 +2854,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if container_list == []:
             # nothing to do
             return
@@ -2855,8 +2903,13 @@ class ContainerCLI(DockerCLICaller):
 
         Returns:
             Parsed usage records in CLI output order.
+
+        Raises:
+            ValueError: An operand starts with `-`.
+            ParsingError: If a CLI output line cannot be decoded as a usage record.
         """
         containers_list = to_list(containers) if containers else []
+        validate_operands(containers_list)
         if len(containers_list) == 0 and containers is not None and not all:
             return []
 
@@ -2876,7 +2929,11 @@ class ContainerCLI(DockerCLICaller):
             full_cmd.extend(containers_list)
 
         stats_output = run(full_cmd)
-        return [ContainerStats(loads_compat(x)) for x in stats_output.splitlines()]
+        parser = JsonOutputParser("container stats", self.client_config.raw_diagnostics)
+        return [
+            parser.parse(lambda text: ContainerStats(loads_compat(text)), line)
+            for line in stats_output.splitlines()
+        ]
 
     def stop(
         self,
@@ -2901,6 +2958,7 @@ class ContainerCLI(DockerCLICaller):
                 keeps the container's stop signal.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: If a selected container does not exist.
         """
         container_list = (
@@ -2908,6 +2966,7 @@ class ContainerCLI(DockerCLICaller):
             if isinstance(containers, str | Container)
             else list(containers)
         )
+        validate_operands(container_list)
         if container_list == []:
             # nothing to do
             return
@@ -2968,9 +3027,11 @@ class ContainerCLI(DockerCLICaller):
             fields and optionally one final command/free-text field.
 
         Raises:
+            ValueError: An operand starts with `-`.
             TopParseError: Unsupported or malformed parsed layout; use raw=True.
             NoSuchContainer: The container does not exist.
         """
+        validate_operands(container)
         output = run([*self.docker_cmd, "container", "top", container, *ps_args])
         if raw:
             return output
@@ -2986,9 +3047,11 @@ class ContainerCLI(DockerCLICaller):
             x: Containers to unpause; empty input skips execution.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: If a selected container does not exist.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
+        validate_operands(containers)
         if len(containers) == 0:
             # nothing to do
             return
@@ -3046,9 +3109,11 @@ class ContainerCLI(DockerCLICaller):
             restart: Restart policy to apply when a container exits (default "no")
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchContainer: If a selected container does not exist.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
+        validate_operands(containers)
         if containers == []:
             # nothing to do
             return
@@ -3103,12 +3168,14 @@ class ContainerCLI(DockerCLICaller):
 
         Raises:
             ValueError: Timeout is boolean, nonfinite, zero or negative.
+                An operand starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline and is killed and
                 reaped. Waiting containers are not stopped.
             NoSuchContainer: If a selected container does not exist.
         """
         validate_timeout(timeout)
         containers = to_list(x)
+        validate_operands(containers)
         if len(containers) == 0:
             # nothing to do
             return []

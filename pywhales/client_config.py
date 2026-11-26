@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .inventory import InspectionPolicy
 
 CACHE_VALIDITY_PERIOD: float = 0.01
+_NOT_LOADED = "<not loaded>"
 
 
 class ParsingError(Exception):
@@ -178,6 +179,12 @@ class ClientConfig:
             resources no service uses; only true emits it.
         compose_ansi: Compose control-character mode (``"never"``, ``"always"``
             or ``"auto"``); ``None`` omits the option.
+        strict_interpolation_environment: Reject every reserved child-environment
+            name, not only dynamic-loader names, in stack deploy and Bake
+            interpolation overlays. Defaults to false.
+        max_captured_output_bytes: Positive cap on combined captured stdout and
+            stderr bytes per launch, or ``None`` for no client cap. A tighter
+            observation response limit still applies.
     """
 
     config: ValidPath | None = None
@@ -215,6 +222,8 @@ class ClientConfig:
     inherited_environment_names: Collection[str] | None = None
     compose_all_resources: bool = False
     compose_ansi: Literal["never", "always", "auto"] | None = None
+    strict_interpolation_environment: bool = False
+    max_captured_output_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.
@@ -235,6 +244,7 @@ class ClientConfig:
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
             ("stream_buffer_bytes", self.stream_buffer_bytes),
+            ("max_captured_output_bytes", self.max_captured_output_bytes),
         ):
             if budget is not None and (type(budget) is not int or budget <= 0):
                 raise ValueError(f"{name} must be a positive integer or None")
@@ -509,6 +519,12 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
         """
         raise NotImplementedError
 
+    def _held_inspect_result(self) -> InspectResultT | None:
+        """Return the held snapshot without consulting or changing cache freshness."""
+        if getattr(self, "_inspect_result", None) is None:
+            return None
+        return self._inspect_result
+
     def _get_inspect_result(self) -> InspectResultT:
         """Return cached data, fetching when it is absent or expired.
 
@@ -578,22 +594,26 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
             json_str: Captured scalar inspect response.
 
         Raises:
-            ParsingError: If the response is malformed or not a singleton object array.
+            ParsingError: If the response is malformed, too deeply nested to
+                decode, or not a singleton object array.
             pydantic.ValidationError: If the object contains invalid JSON values.
         """
         try:
             result = loads_compat(json_str)
-        except JSONDecodeError as err:
+        except (JSONDecodeError, RecursionError) as err:
             if self.client_config.raw_diagnostics:
                 raise ParsingError("Invalid inspect JSON response") from err
-            raise ParsingError("Invalid inspect JSON response") from None
-        if (
-            not isinstance(result, list)
-            or len(result) != 1
-            or not isinstance(result[0], dict)
-        ):
-            raise ParsingError("Expected one inspect JSON object")
-        return utils.custom_parse_object_as(dict[str, pydantic.JsonValue], result[0])
+        else:
+            if (
+                not isinstance(result, list)
+                or len(result) != 1
+                or not isinstance(result[0], dict)
+            ):
+                raise ParsingError("Expected one inspect JSON object")
+            return utils.custom_parse_object_as(
+                dict[str, pydantic.JsonValue], result[0]
+            )
+        raise ParsingError("Invalid inspect JSON response") from None
 
     def _fetch_inspect_result_json(self, reference: ReferenceT) -> JsonObject:
         """Define the subclass hook for fetching one JSON inspection object.

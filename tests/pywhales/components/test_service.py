@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import DockerClient, Service
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.service.models import ServiceInspectResult
 from pywhales.exceptions import (
     DockerException,
@@ -696,6 +696,35 @@ def _service_ids(count: int) -> list[str]:
     return [identity_of("service", index) for index in range(count)]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_service_ps_hydrates_tasks_with_existing_filters(as_handle: bool) -> None:
+    ids = [identity_of("task", index) for index in range(3)]
+    cli = FakeCli("task", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        service = Service(client.client_config, "api", is_immutable_id=True)
+        if as_handle:
+            tasks = service.ps(filters=[("name", "api")], hydrate=True)
+        else:
+            tasks = client.service.ps(service, filters=[("name", "api")], hydrate=True)
+        assert [task.id for task in tasks] == ids
+        assert [task.name for task in tasks] == ["task-0000", "task-0001", "task-0002"]
+
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "service",
+            "ps",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "name=api",
+            "api",
+        ]
+    ]
+    assert cli.inspects() == [ids[:2], ids[2:]]
+    assert len(cli.launches) == 3
+
+
 def _truncated(ids: list[str]) -> list[str]:
     return [identity[:12] for identity in ids]
 
@@ -925,3 +954,46 @@ def test_copied_hydrated_service_and_batch_inspected_service_hold_no_pin() -> No
         assert pickle.loads(pickle.dumps(service))._pinned is False
         (inspected,) = client.service.inspect(ids)
         assert inspected._pinned is False
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("create-image", lambda c: c.service.create("--bad", None)),
+    ("inspect", lambda c: c.service.inspect("--bad")),
+    ("inspect-list", lambda c: c.service.inspect(["web", "--bad"])),
+    ("inspect-pretty", lambda c: c.service.inspect("--bad", pretty=True)),
+    ("logs", lambda c: c.service.logs("--bad")),
+    ("ps", lambda c: c.service.ps("--bad")),
+    ("ps-list", lambda c: c.service.ps(["web", "--bad"])),
+    ("remove", lambda c: c.service.remove("--bad")),
+    ("remove-list", lambda c: c.service.remove(["web", "--bad"])),
+    ("rollback", lambda c: c.service.rollback("--bad")),
+    ("scale", lambda c: c.service.scale({"--bad": 1})),
+    ("scale-later", lambda c: c.service.scale({"web": 1, "--bad": 2})),
+    ("update", lambda c: c.service.update("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.service.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

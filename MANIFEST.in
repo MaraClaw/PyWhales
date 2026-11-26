@@ -1,3 +1,2 @@
-global-include *.txt
-global-include *.md
-global-include *.typed
+include LICENSE MANIFEST.in README.md pyproject.toml pywhales/py.typed
+prune tests

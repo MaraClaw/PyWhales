@@ -6,14 +6,14 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Literal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from pytest_mock import MockerFixture
 
 from pywhales import Container, DockerClient, Image, Volume
 from pywhales._execution_policy import get_execution_policy
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.container.cli_wrapper import ContainerCLI
 from pywhales.components.image.cli_wrapper import ImageCLI
@@ -32,6 +32,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_volume_repr_uses_only_held_snapshot() -> None:
+    identity = "repr-volume"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Volume(config, identity, is_immutable_id=True)
+    snapshot = VolumeInspectResult(name=identity, driver="local")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Volume(name='repr-volume', driver=<not loaded>)",
+        loaded="pywhales.Volume(name='repr-volume', driver=local)",
+        partial="pywhales.Volume(name='None', driver=<not loaded>)",
+    )
 
 
 def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
@@ -213,7 +228,10 @@ def test_volume_copy_forwards_timeout_to_every_launch(
     assert by_step["copy"]["timeout"] == timeout
     assert by_step["remove_container"]["target"] == container_name
     assert by_step["remove_image"]["target"] == image_name
-    assert by_step["create"]["volumes"] == [("data", Path("/volume"))]
+    assert by_step["create"]["mounts"] == [["type=volume,source=data,target=/volume"]]
+    assert "volumes" not in by_step["create"]
+    copied = by_step["copy"]["destination" if to_volume else "source"]
+    assert isinstance(copied, tuple) and copied[1] == "/volume/sub"
     assert {scoped for _, scoped, _ in launches} == {timeout}
     assert get_execution_policy(client.client_config.docker_cmd).default_timeout is None
 
@@ -254,6 +272,72 @@ def test_volume_copy_without_a_volume_endpoint_launches_nothing(
         client.volume.copy("here", "there")
 
     assert launches == []
+
+
+@pytest.mark.parametrize(
+    ("volume", "path"),
+    [
+        ("/", "."),
+        ("/etc", "sub"),
+        ("", "."),
+        ("data", "../etc"),
+        ("data", "/etc"),
+        ("data", "sub/../../x"),
+        ("data", Path("../x")),
+    ],
+)
+@pytest.mark.parametrize("to_volume", [False, True], ids=["from-volume", "to-volume"])
+def test_volume_copy_rejects_host_paths_before_the_helper_build(
+    mocker: MockerFixture, volume: str, path: str | Path, to_volume: bool
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+
+    with pytest.raises(ValueError):
+        if to_volume:
+            client.volume.copy("local", (volume, path))
+        else:
+            client.volume.copy((volume, path), "local")
+
+    assert launches == []
+
+
+@pytest.mark.parametrize("source", ["/", "/etc", ""])
+def test_volume_clone_rejects_a_path_source_before_creating_anything(
+    mocker: MockerFixture, source: str
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+    run = mocker.patch.object(volume_cli, "run")
+
+    with pytest.raises(ValueError):
+        client.volume.clone(source)
+
+    assert launches == []
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("", "/volume/"),
+        (".", "/volume/."),
+        ("sub/.", "/volume/sub/."),
+        (Path("a/b"), "/volume/a/b"),
+        ("a/../b", "/volume/a/../b"),
+    ],
+)
+def test_volume_copy_keeps_the_path_forms_clone_relies_on(
+    mocker: MockerFixture, path: str | Path, expected: str
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+
+    client.volume.copy(("data", path), "local")
+
+    by_step = {step: kwargs for step, _, kwargs in launches}
+    copied = by_step["copy"]["source"]
+    assert isinstance(copied, tuple) and copied[1] == expected
 
 
 @pytest.mark.parametrize(
@@ -512,7 +596,7 @@ def test_simple_volume(ctr_client: DockerClient) -> None:
     assert some_volume.exists()
     assert some_volume.name in repr(ctr_client.volume.list())
     assert some_volume.driver is not None
-    assert some_volume.driver in repr(ctr_client.volume.list())
+    assert some_volume.driver in repr(ctr_client.volume.list(hydrate=True))
     ctr_client.volume.remove(some_volume)
 
 
@@ -835,3 +919,47 @@ def test_reload_and_mutating_calls_release_the_pin_of_a_hydrated_volume() -> Non
         used = len(cli.launches)
         assert removed.driver is not None
         assert len(cli.launches) == used + 1
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.volume.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create": lambda client: client.volume.create("--leak-marker"),
+    "inspect": lambda client: client.volume.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.volume.inspect(["ok", "--leak-marker"]),
+    "remove": lambda client: client.volume.remove("--leak-marker"),
+    "remove-list": lambda client: client.volume.remove(["ok", "--leak-marker"]),
+    "update": lambda client: client.volume.update(
+        "--leak-marker", availability="active"
+    ),
+    "copy": lambda client: client.volume.copy(
+        ("--leak-marker", "."), "/tmp/pywhales-dash"
+    ),
+    "clone": lambda client: client.volume.clone("--leak-marker", "dest"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_volume_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

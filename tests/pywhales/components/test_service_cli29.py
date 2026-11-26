@@ -1146,3 +1146,68 @@ def test_ps_rejects_mapping_filters_before_lookup(selection: str | list[str]) ->
     mapping = json.loads('{"desired-state": "running"}')
     with pytest.raises(TypeError):
         client.service.ps(selection, filters=mapping)
+
+
+def test_long_form_fields_with_csv_syntax_are_quoted(
+    fake: tuple[DockerClient, Path],
+) -> None:
+    client, log = fake
+    client.service.create(
+        "img",
+        None,
+        mounts=[{"type": "volume", "source": "a,b", "target": "/m"}],
+        publish=[{"published": 8080, "target": 80, "mode": 'host"x'}],
+    )
+    client.service.update("svc", mount_add=[{"type": "bind", "src": "/x,y"}])
+    create, update = calls(log)[:2]
+    assert create[create.index("--mount") + 1] == 'type=volume,"source=a,b",target=/m'
+    assert create[create.index("--publish") + 1] == (
+        'published=8080,target=80,"mode=host""x"'
+    )
+    assert update[update.index("--mount-add") + 1] == 'type=bind,"src=/x,y"'
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mounts": [{"type": "volume", "a=b": "secret-value"}]},
+        {"publish": [{"a,b": "secret-value"}]},
+        {"secrets": [{'a"b': "secret-value"}]},
+    ],
+)
+def test_unrepresentable_long_form_keys_precede_executable_lookup(
+    kwargs: dict[str, object],
+) -> None:
+    client = DockerClient(client_call=MISSING)
+    options = json.loads(json.dumps(kwargs))
+    with pytest.raises(ValueError) as raised:
+        client.service.create("img", None, **options)
+    assert "secret-value" not in str(raised.value)
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("inspect-list", lambda c: c.service.inspect(["web", "--bad"])),
+    ("logs", lambda c: c.service.logs("--bad")),
+    ("scale", lambda c: c.service.scale({"web": 1, "--bad": 2})),
+    ("update", lambda c: c.service.update("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_service_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.service.rollback("web-1")
+
+    assert calls(log) == [["service", "rollback", "web-1"]]

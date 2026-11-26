@@ -17,7 +17,7 @@ calls automatically.
 
 ## Bounding Batch Inspection
 
-For pinned container, image, network or volume tables, see
+For pinned container, image, network, volume, Swarm node, service and task tables, see
 [Hydrated listings and snapshot lifetimes](client-and-errors.md#hydrated-listings-and-snapshot-lifetimes).
 These listing snapshots differ from detached inventory records below.
 
@@ -180,7 +180,12 @@ existing lenient behavior; don't assume this bounded-capture validation there.
 The per-command reference limit bounds each inspect batch; aggregate reference
 accounting counts all requested occurrences, including duplicates, in one
 inventory/bulk-reload call. The response limit counts combined raw stdout/stderr bytes per
-invocation. Exceeding a limit raises `ObservationLimitError`; an expired
+invocation. A client built with `DockerClient(max_captured_output_bytes=...)`
+also caps captured output outside a scope; inside one, the smaller of that cap
+and `max_response_bytes` applies, and both overflows raise `ObservationLimitError`
+with reason `response` (the cap or the scope limit as its limit). The existing
+`total_response`, `total_stream` and `total_io` precedence is unchanged. See
+[Cap captured output](client-and-errors.md#cap-captured-output). Exceeding a limit raises `ObservationLimitError`; an expired
 deadline raises `ObservationTimeout`; a set `cancel` event raises
 `ObservationCancelled`. Failures stop/reap an active owned local CLI when one
 exists; some limits reject before launch. Nothing rolls back daemon-side work,

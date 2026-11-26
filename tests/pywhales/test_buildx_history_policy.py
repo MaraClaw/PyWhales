@@ -6,12 +6,16 @@ Buildx v0.39.0 CLI: the listing lines below and the numbered files under
 """
 
 import json
+import shutil
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from pywhales import DockerClient
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.buildx.history import BuildxHistoryCLI
 from pywhales.components.buildx.history_models import BuildRecordDetail
 from pywhales.components.buildx.policy import BuildxPolicyCLI
@@ -760,3 +764,69 @@ def test_replay_deadline_covers_the_local_cli(tmp_path: Path) -> None:
     client, _ = make_fake_cli(tmp_path, [Rule(match=("replay", "build"), sleep=30)])
     with pytest.raises(DockerTimeout):
         replay(client).build("alpine", timeout=0.3)
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+DASH_OPERAND_CALLS = [
+    pytest.param(
+        lambda client: client.buildx.history.inspect(DASH_OPERAND), id="inspect"
+    ),
+    pytest.param(
+        lambda client: client.buildx.history.inspect_attachment(DASH_OPERAND),
+        id="inspect_attachment-ref",
+    ),
+    pytest.param(
+        lambda client: client.buildx.history.inspect_attachment("^0", DASH_OPERAND),
+        id="inspect_attachment-digest",
+    ),
+    pytest.param(lambda client: client.buildx.history.logs(DASH_OPERAND), id="logs"),
+    pytest.param(
+        lambda client: client.buildx.history.export(DASH_OPERAND, output="bundle"),
+        id="export-scalar",
+    ),
+    pytest.param(
+        lambda client: client.buildx.history.export(
+            ["^0", DASH_OPERAND], output="bundle"
+        ),
+        id="export-list",
+    ),
+    pytest.param(lambda client: client.buildx.history.open(DASH_OPERAND), id="open"),
+    pytest.param(
+        lambda client: client.buildx.history.remove(DASH_OPERAND), id="remove-scalar"
+    ),
+    pytest.param(
+        lambda client: client.buildx.history.remove(["^0", DASH_OPERAND]),
+        id="remove-list",
+    ),
+    pytest.param(lambda client: client.buildx.history.trace(DASH_OPERAND), id="trace"),
+    pytest.param(
+        lambda client: client.buildx.replay.build(DASH_OPERAND), id="replay-build"
+    ),
+    pytest.param(
+        lambda client: client.buildx.policy.eval(DASH_OPERAND), id="policy-eval"
+    ),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", DASH_OPERAND_CALLS)
+def test_history_replay_and_policy_reject_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)

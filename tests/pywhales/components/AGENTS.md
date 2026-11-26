@@ -11,7 +11,8 @@ For wrapper edits, read the production [component](../../../pywhales/components/
 | Surface | Start here | Boundary |
 | --- | --- | --- |
 | Group commands, resources and wire models | `test_<group>.py`, including `test_image.py` | Mixed live, model and mocked cases; classify each test and its fixtures. |
-| Hydrated container/image/network/volume listings | `test_container.py`, `test_image.py`, `test_network.py`, `test_volume.py`; helper `hydration_fakes.py` | Hydration cases use in-memory CLI responses; whole modules still mix live tests. Cache clocks/pins/copying are in `../test_client_config.py`. |
+| Hydrated container/image/network/volume listings and Swarm node/service/task/stack producers | `test_container.py`, `test_image.py`, `test_network.py`, `test_volume.py`, `test_node.py`, `test_service.py`, `test_task.py`, `test_stack.py`, `test_stack_cli29.py`; helper `hydration_fakes.py` (including its task kind) | Hydration cases use in-memory CLI responses; whole modules still mix live tests. Cache clocks/pins/copying are in `../test_client_config.py`. |
+| Resource `repr()` never launching | repr cases in the resource `test_<group>.py` modules and `../test_client_config.py`; helper `repr_fakes.py` | `without_process_launches()` fails on any `Popen`, `subprocess.run` or `_run_isolated` call, even if the code catches it; no daemon. |
 | Image transfer fanout under child limits | `test_image_child_limits.py`, `../test_observation.py` | Barrier/event fake children and shared account reservations; real-child stream cleanup remains in `test_image.py`. |
 | Compose top, logs, events and projects | `test_compose.py` | Mocked commands, local children and live projects share one module with a collection probe. |
 | Buildx and registry manifests | `buildx/test_buildx_cli_wrapper.py`, `buildx/imagetools/test_imagetools_cli_wrapper.py` | Global-client integration, including cases without a runtime fixture. |

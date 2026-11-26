@@ -5,13 +5,13 @@ import pickle
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pywhales import DockerClient, Node
-from pywhales.client_config import ParsingError
-from pywhales.components.node.models import NodeInspectResult
+from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.components.node.models import NodeDescription, NodeInspectResult, NodeSpec
 from pywhales.exceptions import DockerException
 from pywhales.test_utils import get_all_jsons
 from tests.pywhales.components.hydration_fakes import (
@@ -20,6 +20,47 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import (
+    assert_handle_reprs,
+    without_process_launches,
+)
+
+
+def test_node_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdefghijklmno"
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Node(config, identity, is_immutable_id=True)
+    snapshot = NodeInspectResult(
+        id=identity,
+        description=NodeDescription(hostname="swarm-host"),
+        spec=NodeSpec(role="manager"),
+    )
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Node(id='0123456789ab', hostname='<not loaded>', role='<not loaded>')",
+        loaded="pywhales.Node(id='0123456789ab', hostname='swarm-host', role='manager')",
+        partial="pywhales.Node(id='None', hostname='<not loaded>', role='<not loaded>')",
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        NodeInspectResult(),
+        NodeInspectResult(description=NodeDescription(), spec=NodeSpec()),
+    ],
+)
+def test_node_repr_with_missing_nested_fields(snapshot: NodeInspectResult) -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Node(config, "0123456789abcdefghijklmno", is_immutable_id=True)
+    handle._set_inspect_result(snapshot)
+
+    with without_process_launches():
+        assert (
+            repr(handle)
+            == "pywhales.Node(id='0123456789ab', hostname='None', role='None')"
+        )
 
 
 def test_batch_inspect_matches_node_hostnames_and_hydrates_cache() -> None:
@@ -311,6 +352,35 @@ def _node_ids(count: int) -> list[str]:
     return [identity_of("node", index) for index in range(count)]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["current-node", "handle"])
+def test_node_ps_hydrates_tasks_without_changing_selection(as_handle: bool) -> None:
+    ids = [identity_of("task", index) for index in range(3)]
+    cli = FakeCli("task", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        if as_handle:
+            node = Node(client.client_config, "worker", is_immutable_id=True)
+            tasks = node.ps(filters={"name": "api"}, hydrate=True)
+        else:
+            tasks = client.node.ps(filters={"name": "api"}, hydrate=True)
+        assert [task.id for task in tasks] == ids
+        assert [task.name for task in tasks] == ["task-0000", "task-0001", "task-0002"]
+
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "node",
+            "ps",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "name=api",
+            *(["worker"] if as_handle else []),
+        ]
+    ]
+    assert cli.inspects() == [ids[:2], ids[2:]]
+    assert len(cli.launches) == 3
+
+
 def test_hydrated_node_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
     ids = _node_ids(5)
     cli = FakeCli("node", ids)
@@ -506,3 +576,49 @@ def test_copied_hydrated_node_and_batch_inspected_node_hold_no_pin() -> None:
         assert pickle.loads(pickle.dumps(node))._pinned is False
         (inspected,) = client.node.inspect(ids)
         assert inspected._pinned is False
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.node.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "demote": lambda client: client.node.demote("--leak-marker"),
+    "demote-list": lambda client: client.node.demote(["ok", "--leak-marker"]),
+    "inspect": lambda client: client.node.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.node.inspect(["ok", "--leak-marker"]),
+    "inspect-pretty": lambda client: client.node.inspect(
+        ["ok", "--leak-marker"], pretty=True
+    ),
+    "promote": lambda client: client.node.promote("--leak-marker"),
+    "promote-list": lambda client: client.node.promote(["ok", "--leak-marker"]),
+    "ps": lambda client: client.node.ps("--leak-marker"),
+    "ps-list": lambda client: client.node.ps(["ok", "--leak-marker"]),
+    "remove": lambda client: client.node.remove("--leak-marker"),
+    "remove-list": lambda client: client.node.remove(["ok", "--leak-marker"]),
+    "update": lambda client: client.node.update("--leak-marker"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_node_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

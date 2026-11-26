@@ -8,13 +8,14 @@ import inspect
 from collections.abc import Callable
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 import pytest
 
-from pywhales import Stack
+from pywhales import DockerClient, Stack
 from pywhales.components.service.cli_wrapper import ServiceListFilter
 from pywhales.components.stack.cli_wrapper import StackCLI, StackPsFilter
-from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
+from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli, records
 
 MERGED_YAML = "services:\n  web:\n    image: busybox\n"
 
@@ -138,6 +139,67 @@ def test_deploy_forwards_every_option_together(tmp_path: Path) -> None:
             "web",
         ]
     ]
+
+
+def test_deploy_preserves_interpolation_environment(tmp_path: Path) -> None:
+    client, log = make_fake_cli(
+        tmp_path, [Rule(env=("DOCKER_REGISTRY", "FILE_ONLY", "MAPPING_ONLY"))]
+    )
+    env_file = tmp_path / "stack.env"
+    env_file.write_text(
+        'DOCKER_REGISTRY=file-registry\nFILE_ONLY="literal" # comment\n'
+    )
+    client.stack.deploy(
+        "web",
+        "a.yml",
+        env_files=[env_file],
+        variables={"DOCKER_REGISTRY": "map-registry", "MAPPING_ONLY": ""},
+    )
+    assert records(log) == [
+        {
+            "argv": [
+                "stack",
+                "deploy",
+                "--compose-file",
+                "a.yml",
+                "--resolve-image",
+                "always",
+                "web",
+            ],
+            "env": {
+                "DOCKER_REGISTRY": "map-registry",
+                "FILE_ONLY": '"literal"',
+                "MAPPING_ONLY": "",
+            },
+        }
+    ]
+
+
+def test_deploy_strict_interpolation_rejects_reserved_env_file_name(
+    tmp_path: Path,
+) -> None:
+    client = DockerClient(strict_interpolation_environment=True)
+    env_file = tmp_path / "stack.env"
+    env_file.write_text("docker_host=env-file-endpoint\n")
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch(
+            "pywhales.components.stack.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError),
+    ):
+        client.stack.deploy("web", env_files=[env_file])
+
+
+def test_deploy_timeout_then_env_file_errors_precede_lookup(tmp_path: Path) -> None:
+    client = DockerClient()
+    env_file = tmp_path / "missing.env"
+    with patch("shutil.which", side_effect=AssertionError("executable lookup")):
+        with pytest.raises(ValueError, match="timeout"):
+            client.stack.deploy("web", env_files=[env_file], timeout=0)
+        with pytest.raises(FileNotFoundError):
+            client.stack.deploy("web", env_files=[env_file], timeout=5)
 
 
 def test_deploy_keeps_its_positionals_and_adds_keyword_only_options() -> None:
@@ -287,6 +349,32 @@ def test_handle_ps_forwards_filters(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_stack_ps_hydrates_tasks_with_one_additional_launch(
+    tmp_path: Path, as_handle: bool
+) -> None:
+    client, log = make_fake_cli(
+        tmp_path,
+        [
+            Rule(match=("ps",), stdout="t2\nt1\n"),
+            Rule(
+                match=("inspect", "--type", "task"),
+                stdout='[{"ID":"t1","Slot":1},{"ID":"t2","Slot":2}]',
+            ),
+        ],
+    )
+    with patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 0):
+        if as_handle:
+            tasks = Stack(client.client_config, "alpha").ps(hydrate=True)
+        else:
+            tasks = client.stack.ps("alpha", hydrate=True)
+        assert [(task.id, task.slot) for task in tasks] == [("t2", 2), ("t1", 1)]
+    assert calls(log) == [
+        ["stack", "ps", "--quiet", "--no-trunc", "alpha"],
+        ["inspect", "--type", "task", "t2", "t1"],
+    ]
+
+
 def test_services_forward_filter_pairs_before_the_stack(tmp_path: Path) -> None:
     client, log = make_fake_cli(tmp_path)
     assert (
@@ -366,3 +454,41 @@ def test_listing_filters_are_keyword_only_with_a_none_default(
     parameter = inspect.signature(method).parameters["filters"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is None
+
+
+@pytest.mark.parametrize(
+    "method", [StackCLI.ps, StackCLI.services, Stack.ps, Stack.services]
+)
+def test_stack_listing_hydration_is_keyword_only_and_opt_in(
+    method: Callable[..., object],
+) -> None:
+    parameter = inspect.signature(method).parameters["hydrate"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("deploy", lambda c: c.stack.deploy("--bad", env_files=["missing.env"])),
+    ("remove-list", lambda c: c.stack.remove(["web", "--bad"])),
+    ("services", lambda c: c.stack.services("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_stack_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.stack.remove(["web-1"])
+
+    assert calls(log) == [["stack", "remove", "web-1"]]

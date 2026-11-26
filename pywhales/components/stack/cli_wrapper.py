@@ -10,14 +10,18 @@ from typing import Literal, override
 
 import pywhales.components.service.cli_wrapper
 import pywhales.components.task.cli_wrapper
+from pywhales._environment import validate_interpolation_environment
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.components._hydration import hydrate_handles, resolve_identities
 from pywhales.enums import ImageResolutionModeInput
+from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
     ValidPath,
     format_filters_for_cli,
     read_env_files,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -65,14 +69,21 @@ class Stack:
         StackCLI(self.client_config).remove(self, detach=detach)
 
     def ps(
-        self, *, filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None
+        self,
+        *,
+        filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Return task handles associated with this stack.
 
         See [`docker.stack.ps`](../sub-commands/stack.md#ps) for the `filters`
         argument.
+
+        Args:
+            filters: Docker task filters forwarded to the listing.
+            hydrate: Pin task inspection snapshots and omit vanished tasks.
         """
-        return StackCLI(self.client_config).ps(self, filters=filters)
+        return StackCLI(self.client_config).ps(self, filters=filters, hydrate=hydrate)
 
     def services(
         self,
@@ -80,13 +91,24 @@ class Stack:
         filters: Mapping[str, str]
         | Iterable[pywhales.components.service.cli_wrapper.ServiceListFilter]
         | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.service.cli_wrapper.Service]:
         """Return service handles associated with this stack.
 
         See [`docker.stack.services`](../sub-commands/stack.md#services) for the
         `filters` argument.
+
+        Args:
+            filters: Docker service filters forwarded to the listing.
+            hydrate: Pin service inspection snapshots after batched ID resolution.
+
+        Returns:
+            Lazy handles unless hydrated. Services that vanish during resolution
+            or hydration are omitted.
         """
-        return StackCLI(self.client_config).services(self, filters=filters)
+        return StackCLI(self.client_config).services(
+            self, filters=filters, hydrate=hydrate
+        )
 
 
 ValidStack = str | Stack
@@ -139,6 +161,11 @@ class StackCLI(DockerCLICaller):
         This changes daemon-managed services and displays Docker's stdout.
         Failure or local interruption does not undo daemon-side mutations.
 
+        The merged interpolation environment is checked before executable
+        lookup. Dynamic-loader names are always refused;
+        `strict_interpolation_environment=True` also refuses all reserved CLI and
+        runtime names.
+
         Args:
             name: The name of the stack to deploy. Mandatory.
             compose_files: One or more docker-compose files. If there are more than
@@ -171,11 +198,19 @@ class StackCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, an interpolation name is disallowed, or name
+                starts with "-".
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the deploy or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(name)
+        env = read_env_files([Path(x) for x in env_files])
+        env.update(variables)
+        validate_interpolation_environment(
+            env, strict=self.client_config.strict_interpolation_environment
+        )
+
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
         full_cmd.add_args_iterable_or_single("--compose-file", compose_files)
@@ -185,9 +220,6 @@ class StackCLI(DockerCLICaller):
         _add_tristate_flag(full_cmd, "--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(name)
-
-        env = read_env_files([Path(x) for x in env_files])
-        env.update(variables)
 
         run(full_cmd, capture_stdout=False, env=env, timeout=timeout)
         return Stack(self.client_config, name)
@@ -207,6 +239,7 @@ class StackCLI(DockerCLICaller):
         x: ValidStack,
         *,
         filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with a stack.
 
@@ -217,27 +250,28 @@ class StackCLI(DockerCLICaller):
                 and repeated keys, and an iterator is read once. The documented
                 keys are `desired-state`, `id`, `name`, and `node`. Docker
                 combines repeated filters as an OR. None adds no filter.
+            hydrate: Pin task inspection snapshots in bounded batches, omitting
+                tasks that vanish before inspection.
 
         Returns:
-            Task handles in CLI output order, including any task history Docker lists.
+            Task handles in CLI output order, including any task history Docker
+            lists. Handles are lazy unless hydrated.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: If x starts with "-".
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
+        validate_operands(x)
         full_cmd = Command([*self.docker_cmd, "stack", "ps", "--quiet", "--no-trunc"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(x)
 
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.task.cli_wrapper.Task(
-                self.client_config, id_, is_immutable_id=True
-            )
-            for id_ in ids
-        ]
+        return pywhales.components.task.cli_wrapper._listed_tasks(
+            self.client_config, run(full_cmd).splitlines(), hydrate=hydrate
+        )
 
     def remove(
         self, x: ValidStack | Iterable[ValidStack], *, detach: bool | None = None
@@ -251,6 +285,7 @@ class StackCLI(DockerCLICaller):
                 option and keeps Docker's own default.
         """
         stacks = to_list(x)
+        validate_operands(stacks)
         if not stacks:
             return
         full_cmd = Command([*self.docker_cmd, "stack", "remove"])
@@ -265,6 +300,7 @@ class StackCLI(DockerCLICaller):
         filters: Mapping[str, str]
         | Iterable[pywhales.components.service.cli_wrapper.ServiceListFilter]
         | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.service.cli_wrapper.Service]:
         """List the services present in the stack.
 
@@ -275,25 +311,54 @@ class StackCLI(DockerCLICaller):
                 order and repeated keys, and an iterator is read once. The
                 supported keys are `id`, `label`, `mode`, and `name`. Docker
                 combines repeated filters as an OR. None adds no filter.
+            hydrate: Pin service inspection snapshots in bounded batches after
+                resolving the listed IDs.
 
         Returns:
-            Service handles in CLI output order, inspected individually to resolve
-            their full IDs.
+            Service handles in CLI output order, with full IDs resolved in
+            bounded batches. Handles are lazy unless hydrated. Services that
+            vanish during resolution or hydration are omitted.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: If stack starts with "-".
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
+        validate_operands(stack)
         full_cmd = Command([*self.docker_cmd, "stack", "services", "--quiet"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(stack)
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.service.cli_wrapper.Service(self.client_config, id_)
-            for id_ in ids
+        full_ids = resolve_identities(
+            run(full_cmd).splitlines(),
+            lambda ids: run(
+                Command(
+                    [
+                        *self.docker_cmd,
+                        "service",
+                        "inspect",
+                        *ids,
+                        "--format",
+                        "{{.ID}}",
+                    ]
+                )
+            ),
+            NoSuchService,
+        )
+        services = [
+            pywhales.components.service.cli_wrapper.Service(
+                self.client_config, id_, is_immutable_id=True
+            )
+            for id_ in full_ids
         ]
+        if not hydrate:
+            return services
+        return hydrate_handles(
+            services,
+            lambda ids: run(Command([*self.docker_cmd, "service", "inspect", *ids])),
+            NoSuchService,
+        )
 
 
 def _add_tristate_flag(command: Command, flag: str, value: bool | None) -> None:

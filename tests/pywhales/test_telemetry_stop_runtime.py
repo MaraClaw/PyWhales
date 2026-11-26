@@ -76,6 +76,39 @@ def test_real_deadline_projects_the_same_reason_across_execution_families(
     )
 
 
+@pytest.mark.parametrize("piped_input", [False, True])
+def test_client_capture_cap_records_one_response_stop(piped_input: bool) -> None:
+    records: list[TelemetryRecord] = []
+    client = DockerClient(
+        client_call=[sys.executable],
+        max_captured_output_bytes=8,
+        telemetry_observer=records.append,
+    )
+    command = [
+        *client.docker_cmd,
+        "-c",
+        "import os; os.write(1,b'secret'); os.write(2,b'xyz')",
+    ]
+    data = b"" if piped_input else None
+    with pytest.raises(ObservationLimitError) as error:
+        run(command, input=data)
+    assert (error.value.reason, error.value.limit, error.value.measured) == (
+        "response",
+        8,
+        9,
+    )
+    assert "secret" not in str(error.value) and "secret" not in repr(error.value)
+    launch, completion = records
+    assert isinstance(launch, LaunchRecord) and isinstance(completion, CompletionRecord)
+    assert launch.attempt_id == completion.attempt_id
+    assert (completion.outcome, completion.stop_reason) == ("limit", "response")
+    assert (completion.stdout_bytes, completion.stderr_bytes) == (6, 3)
+    assert completion.return_code is not None
+
+    client.client_config.max_captured_output_bytes = 9
+    assert run(command, input=data, return_stderr=True) == ("secret", "xyz")
+
+
 @pytest.mark.parametrize("close_first", [False, True])
 def test_stream_keeps_stop_reason_after_terminal_state_is_cleared(
     close_first: bool,

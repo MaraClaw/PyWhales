@@ -4,13 +4,18 @@ Compose streaming launches a real Python child rather than Docker. Every test
 runs with debug both unset and enabled, independently of inherited debug flags.
 """
 
+import json
 import logging
 import sys
+import traceback
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from pywhales import DockerClient, Image
+from pywhales.client_config import ParsingError
 from pywhales.exceptions import NoSuchImage
 from pywhales.utils import ProcessStream
 
@@ -98,4 +103,42 @@ def test_missing_image_diagnostics_preserve_pull_when_raw_is_opted_in(
     assert (sentinel in captured.out) is raw_diagnostics
     if not raw_diagnostics:
         assert sentinel not in captured.err + caplog.text
+        assert all(sentinel not in repr(record.__dict__) for record in caplog.records)
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True], ids=["safe", "raw"])
+def test_invalid_version_model_diagnostics_respect_raw_opt_in(
+    raw_diagnostics: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel = "version-model-secret"
+    payload = tmp_path / "version.json"
+    payload.write_text(json.dumps({"Client": {"Version": [sentinel]}}))
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text())",
+            str(payload),
+        ],
+        raw_diagnostics=raw_diagnostics,
+    )
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(ParsingError) as raised:
+        client.version()
+
+    error = raised.value
+    assert str(error) == "Invalid version JSON response"
+    if raw_diagnostics:
+        assert isinstance(error.__cause__, ValidationError)
+        assert sentinel in str(error.__cause__)
+    else:
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        rendered = str(error) + repr(error) + "".join(traceback.format_exception(error))
+        captured = capsys.readouterr()
+        assert sentinel not in rendered + captured.out + captured.err + caplog.text
         assert all(sentinel not in repr(record.__dict__) for record in caplog.records)

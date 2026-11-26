@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Literal, overload, override
 
@@ -11,10 +12,13 @@ from pydantic import JsonValue
 import pywhales.components.service.cli_wrapper
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
+    Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pywhales.components._hydration import hydrate_handles
 from pywhales.components.service._logs import logs_command
 from pywhales.components.task.models import (
     AssignedGenericResources,
@@ -24,10 +28,12 @@ from pywhales.components.task.models import (
     TaskStatus,
 )
 from pywhales.enums import TaskState
+from pywhales.exceptions import DockerException
 from pywhales.utils import (
     ProcessStream,
     run,
     stream_stdout_and_stderr,
+    validate_operands,
     validate_timeout,
 )
 
@@ -105,25 +111,75 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Task(id='{self.id[:12]}', name={self.name})"
+        identity = getattr(self, "_immutable_id", None)
+        short_id = identity[:12] if isinstance(identity, str) else None
+        snapshot = self._held_inspect_result()
+        name = snapshot.name if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Task(id='{short_id}', name={name})"
 
 
 ValidTask = str | Task
 
 
+class _TaskGone(DockerException):
+    """Signal a vanished task within listing hydration only."""
+
+
+def _listed_tasks(
+    client_config: ClientConfig, identities: Sequence[str], *, hydrate: bool
+) -> list[Task]:
+    """Build task handles in listing order, optionally pinning their snapshots.
+
+    Args:
+        client_config: Settings of the client that listed the tasks.
+        identities: Full task IDs from the listing.
+        hydrate: Inspect in bounded batches and omit tasks that have vanished.
+
+    Returns:
+        Task handles in listing order.
+    """
+    tasks = [
+        Task(client_config, identity, is_immutable_id=True) for identity in identities
+    ]
+    if not hydrate:
+        return tasks
+
+    def inspect_json(ids: Sequence[str]) -> str:
+        try:
+            return run(
+                Command([*client_config.docker_cmd, "inspect", "--type", "task", *ids])
+            )
+        except DockerException as error:
+            stderr = error.stderr
+            if type(error) is DockerException and stderr is not None and stderr != "":
+                missing_lines = {
+                    f"Error response from daemon: task {id_} not found" for id_ in ids
+                }
+                if missing_lines.issuperset(stderr.splitlines()):
+                    raise _TaskGone(error.docker_command, error.return_code) from error
+            raise
+
+    return hydrate_handles(tasks, inspect_json, _TaskGone)
+
+
 class TaskCLI(DockerCLICaller):
     """Task-inspection commands retaining the originating client configuration."""
 
-    def list(self) -> builtins.list[Task]:
+    def list(self, *, hydrate: bool = False) -> builtins.list[Task]:
         """List tasks associated with the services listed in the Swarm.
 
+        Args:
+            hydrate: Pin inspection snapshots in bounded batches across all
+                listed services, omitting tasks that vanish before inspection.
+
         Returns:
-            Task handles from a service-list call followed by service ps.
+            Task handles in output order from one service ps call when there
+            are services to list. Handles are lazy unless hydrated.
         """
         service_cli = pywhales.components.service.cli_wrapper.ServiceCLI(
             self.client_config
         )
-        return service_cli.ps(service_cli.list())
+        return service_cli.ps(service_cli.list(), hydrate=hydrate)
 
     @overload
     def inspect(self, x: str) -> Task: ...
@@ -147,7 +203,9 @@ class TaskCLI(DockerCLICaller):
         Raises:
             ParsingError: If batch shape, task identities, or duplicate snapshot
                 consistency is invalid.
+            ValueError: If a reference starts with "-".
         """
+        validate_operands(x)
         if isinstance(x, str):
             return Task(self.client_config, x)
         else:
@@ -271,7 +329,7 @@ class TaskCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or task starts with "-".
             DockerException: If Docker rejects the request, such as an unknown task.
             DockerTimeout: If the logs CLI exceeds its deadline, delivered during
                 collection or stream consumption/clean context exit.
@@ -279,6 +337,7 @@ class TaskCLI(DockerCLICaller):
                 configured stream buffer budget.
         """
         validate_timeout(timeout)
+        validate_operands(task)
         full_cmd = logs_command(
             self.docker_cmd,
             task,

@@ -25,6 +25,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
@@ -47,9 +48,7 @@ jobs:
         continue-on-error: true
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
-          password: ${{ secrets.PYPI_PUBLISH_PACKAGE_TOKEN }}
           packages-dir: delivery-upload/
-          attestations: false
       - name: Confirm both destination hashes before issuing receipt
         run: uv run --locked python -m scripts.delivery confirm --run-id "$PRODUCER_RUN_ID" --output delivery-receipt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

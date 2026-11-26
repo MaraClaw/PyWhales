@@ -61,7 +61,10 @@ from `DockerException` and is not a `ValueError` subclass. Safe mode suppresses
 payload-bearing parsing chains; `raw_diagnostics=True` chains the original error
 for these command parsers. Event streams retain the launch-time diagnostics
 setting and close the local CLI before delivering a malformed-record error.
-`DockerClient.version()` and container stats retain their existing parsing errors.
+`DockerClient.version()`, container `stats()` and Buildx Bake `print=True` or
+`return_config` output also raise `ParsingError` for malformed JSON, output that doesn't
+match the model, and JSON nested too deeply to decode. In safe mode the error has no
+payload, cause or context; raw diagnostics chain the original error.
 
 ## Example
 

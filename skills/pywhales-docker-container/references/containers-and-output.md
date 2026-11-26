@@ -32,6 +32,17 @@ example, with `source = Path.cwd().resolve()`, mount that directory read-only
 and run `["ls", "/work"]`. Import `Path` from `pathlib`. A remote engine must
 have the source path on its own host.
 
+## Operands And Command Lists
+
+A container, image, volume, network or other identifier operand that starts with
+`-` raises `ValueError` before the executable is looked up, because Docker would
+read it as a flag; PyWhales inserts no `--`. The command list after the image
+(`run`, `create`) or container (`execute`) is passed literally and isn't checked,
+so `docker.run("alpine", ["ls", "-la"])` works as written, and option values such
+as `envs` or `volumes` entries keep their existing rules. See
+[Handle the right failure](client-and-errors.md#handle-the-right-failure) for the
+full operand list.
+
 ## Startup Health Interval And Approved Profiles
 
 Container `create` and every `run` mode, including `docker.create`/`docker.run`
@@ -364,6 +375,10 @@ root exports none of them.
 | `docker.wait(container)` | `int` exit code |
 | `docker.wait([container, ...])` | `list[int]` in Docker's output order; `[]` for an empty iterable, with no launch |
 
+`container.stats(containers=None, all=False)` returns `list[ContainerStats]` and
+raises `ParsingError` (from `pywhales.client_config`) when the CLI prints malformed
+JSON; the error carries no payload unless `raw_diagnostics=True`.
+
 Streaming `container.run`, `container.prune(stream_logs=True)`, and
 `service.logs(stream=True)` are also typed as closeable `ProcessStream` returns.
 Container prune is destructive and suppresses confirmation; stream cleanup
@@ -531,6 +546,18 @@ filesystem to a local tar path and returns `None`; `Container.export()` takes
 the output path and the same deadline. It doesn't return archive chunks and
 isn't an image backup. For image archives, use
 [save and load](registry-and-archives.md#save-and-load).
+
+## Copy Or Clone A Volume
+
+`docker.volume.copy(source, destination, *, timeout=None)` copies between one
+volume endpoint, a `(volume, path_in_volume)` tuple, and one local path, and
+`docker.volume.clone(source, new_volume_name=None, driver=None, labels=..., options=...,
+*, timeout=None)` returns a new `Volume`. Both run a helper container that
+attaches the volume with `--mount type=volume,...`, so a name such as `/etc` can
+never become a host bind. An empty name, a name starting with `/`, or a subpath
+that escapes the volume raises `ValueError` before the helper image is built or the
+clone's destination is created. Names starting with `-` follow the operand rule
+above. Local paths refer to the Python host, as with `docker.copy`.
 
 ## Docker CLI 29 Container Changes
 

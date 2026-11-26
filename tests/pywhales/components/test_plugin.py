@@ -2,16 +2,32 @@ import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pywhales import DockerClient
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.plugin.models import PluginInspectResult
 from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_plugin_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Plugin(config, identity, is_immutable_id=True)
+    snapshot = PluginInspectResult(id=identity, name="repo/plugin:latest")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Plugin(id='0123456789ab', name='<not loaded>')",
+        loaded="pywhales.Plugin(id='0123456789ab', name='repo/plugin:latest')",
+        partial="pywhales.Plugin(id='None', name='<not loaded>')",
+    )
+
 
 test_plugin_name = "vieux/sshfs:latest"
 
@@ -362,3 +378,53 @@ def test_plugin_removed_inside_its_context_exits_cleanly(
         assert not my_plugin.exists()
     assert not my_plugin.exists()
     assert not docker_client.plugin.exists(test_plugin_name)
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.plugin.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create": lambda client: client.plugin.create(
+        "--leak-marker", "/tmp/pywhales-plugin"
+    ),
+    "disable": lambda client: client.plugin.disable("--leak-marker"),
+    "enable": lambda client: client.plugin.enable("--leak-marker"),
+    "inspect": lambda client: client.plugin.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.plugin.inspect(["ok", "--leak-marker"]),
+    "install-name": lambda client: client.plugin.install("--leak-marker"),
+    "install-setting": lambda client: client.plugin.install(
+        "vendor/plugin", {"--leak-marker": "1"}
+    ),
+    "push": lambda client: client.plugin.push("--leak-marker"),
+    "remove": lambda client: client.plugin.remove("--leak-marker"),
+    "remove-list": lambda client: client.plugin.remove(["ok", "--leak-marker"]),
+    "set-plugin": lambda client: client.plugin.set("--leak-marker", {"key": "1"}),
+    "set-setting": lambda client: client.plugin.set("plugin", {"--leak-marker": "1"}),
+    "upgrade-plugin": lambda client: client.plugin.upgrade("--leak-marker"),
+    "upgrade-remote": lambda client: client.plugin.upgrade("plugin", "--leak-marker"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_plugin_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

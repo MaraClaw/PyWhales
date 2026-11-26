@@ -3,12 +3,12 @@ import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pywhales import DockerClient, Network
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.container.models import ContainerEndpointIPAMConfig
 from pywhales.components.network.cli_wrapper import NetworkInspectResult
 from pywhales.exceptions import (
@@ -24,6 +24,21 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+
+
+def test_network_repr_uses_only_held_snapshot() -> None:
+    identity = "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Network(config, identity, is_immutable_id=True)
+    snapshot = NetworkInspectResult(id=identity, name="repr-network")
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Network(id='0123456789ab', name=<not loaded>)",
+        loaded="pywhales.Network(id='0123456789ab', name=repr-network)",
+        partial="pywhales.Network(id='None', name=<not loaded>)",
+    )
 
 
 def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:
@@ -349,3 +364,51 @@ def test_reload_and_mutating_calls_release_the_pin_of_a_hydrated_network() -> No
             assert len(cli.launches) == used + 1
             assert removed.driver is not None
             assert len(cli.launches) == used + 2
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.network.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create": lambda client: client.network.create("--leak-marker"),
+    "connect-network": lambda client: client.network.connect("--leak-marker", "ctr"),
+    "connect-container": lambda client: client.network.connect("net", "--leak-marker"),
+    "disconnect-network": lambda client: client.network.disconnect(
+        "--leak-marker", "ctr"
+    ),
+    "disconnect-container": lambda client: client.network.disconnect(
+        "net", "--leak-marker"
+    ),
+    "inspect": lambda client: client.network.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.network.inspect(["ok", "--leak-marker"]),
+    "inspect-verbose": lambda client: client.network.inspect(
+        ["ok", "--leak-marker"], verbose=True
+    ),
+    "remove": lambda client: client.network.remove("--leak-marker"),
+    "remove-list": lambda client: client.network.remove(["ok", "--leak-marker"]),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_network_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

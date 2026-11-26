@@ -175,3 +175,48 @@ def test_create_rejects_removed_parameters_before_launch(
     assert "swarm" not in str(raised.value)
     assert "/kube/config" not in str(raised.value)
     assert calls(log) == []
+
+
+def test_create_sends_a_comma_host_as_one_docker_field(tmp_path: Path) -> None:
+    client, log = make_fake_cli(
+        tmp_path,
+        [
+            Rule(match=("create",), stdout="ctx\n"),
+            INSPECT_RULE,
+        ],
+    )
+    client.context.create("ctx", docker=DockerContextConfig(host="tcp://h:1,x"))
+    assert calls(log)[0] == [
+        "context",
+        "create",
+        "--docker",
+        '"host=tcp://h:1,x",skip-tls-verify=False',
+        "ctx",
+    ]
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("create", lambda c: c.context.create("--bad")),
+    ("inspect-list", lambda c: c.context.inspect(["web", "--bad"])),
+    ("use", lambda c: c.context.use("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_context_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path, [INSPECT_RULE])
+    client.context.use("my-ctx")
+
+    assert calls(log)[0] == ["context", "use", "my-ctx"]

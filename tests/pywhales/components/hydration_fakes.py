@@ -28,6 +28,7 @@ _LIST_VERBS: Final = {
     "volume": "list",
     "node": "list",
     "service": "list",
+    "task": "ps",
     "config": "list",
     "secret": "list",
 }
@@ -38,6 +39,7 @@ _MISSING_STDERR: Final = {
     "volume": "Error: No such volume: {}",
     "node": "Error response from daemon: node {} not found",
     "service": "Error response from daemon: service {} not found",
+    "task": "Error response from daemon: task {} not found",
     "config": "Error response from daemon: config {} not found",
     "secret": "Error response from daemon: secret {} not found",
 }
@@ -65,7 +67,7 @@ def identity_of(kind: str, index: int) -> str:
             return f"sha256:{index:064x}"
         case "volume":
             return f"volume-{index}"
-        case "node" | "service" | "config" | "secret":
+        case "node" | "service" | "task" | "config" | "secret":
             # 25 characters, the first 12 unique per index like a truncated ID
             return f"{kind[:3]}{index:04d}{'k' * 18}"
         case _:
@@ -97,6 +99,8 @@ def snapshot_of(kind: str, identity: str, **overrides: object) -> Snapshot:
             }
         case "service" | "config" | "secret":
             body = {"ID": identity, "Spec": {"Name": f"{kind[:3]}-{identity[3:7]}"}}
+        case "task":
+            body = {"ID": identity, "Name": f"task-{identity[3:7]}"}
         case unknown:
             raise ValueError(unknown)
     return {**body, **overrides}
@@ -106,10 +110,12 @@ def _arguments(command: Sequence[str]) -> tuple[list[str], str | None]:
     """Split a launch's arguments after the verb into targets and a template."""
     targets: list[str] = []
     template: str | None = None
-    rest = iter(command[3:])
+    rest = iter(command[2:] if command[1] == "inspect" else command[3:])
     for part in rest:
         if part == "--format":
             template = next(rest, None)
+        elif part == "--type":
+            next(rest, None)
         elif not part.startswith("-"):
             targets.append(part)
     return targets, template
@@ -123,8 +129,8 @@ class FakeCli:
         present: Inspect objects by identity; tests mutate it between launches.
         listing: Lines the list command prints; duplicates are allowed.
         vanish_on_list: Identities deleted as soon as the list command answers.
-        vanish_on_resolve: Identities deleted as soon as an `inspect --format`
-            launch answers.
+        vanish_on_resolve: Identities deleted after being returned by an
+            `inspect --format` launch.
         reorder: Return inspect objects in reverse request order when set.
         corrupt: Replacement identity reported for a requested identity.
     """
@@ -146,10 +152,10 @@ class FakeCli:
     ) -> CompletedProcess[bytes]:
         command = [str(part) for part in argv]
         self.launches.append(command)
-        verb = command[2] if command[1] == self.kind else command[1]
+        verb = self._verb(command)
         targets, template = _arguments(command)
         match verb:
-            case "list" | "ls":
+            case "list" | "ls" | "ps":
                 return self._list()
             case "inspect":
                 return self._inspect(targets, template)
@@ -161,6 +167,13 @@ class FakeCli:
             case _:
                 pass
         return CompletedProcess(command, 0, b"", b"")
+
+    def _verb(self, command: Sequence[str]) -> str:
+        if self.kind == "service" and command[1:3] == ["stack", "services"]:
+            return "list"
+        if self.kind == "task" and command[1] in {"node", "service", "stack"}:
+            return command[2]
+        return command[2] if command[1] == self.kind else command[1]
 
     def _list(self) -> CompletedProcess[bytes]:
         lines = self.listing
@@ -195,8 +208,9 @@ class FakeCli:
             stdout = "\n".join(
                 str(self._corrupted(item)[self._id_key]) for item in found
             ).encode()
-            for identity in self.vanish_on_resolve:
-                self.present.pop(identity, None)
+            for _, identity in looked_up:
+                if identity is not None and identity in self.vanish_on_resolve:
+                    self.present.pop(identity, None)
         else:
             raise ValueError(template)
         if missing:
@@ -211,7 +225,7 @@ class FakeCli:
         match self.kind:
             case "volume":
                 return "Name"
-            case "node" | "service" | "config" | "secret":
+            case "node" | "service" | "task" | "config" | "secret":
                 return "ID"
             case _:
                 return "Id"
@@ -266,7 +280,7 @@ class FakeCli:
             argv: Sequence[object], *args: object, **kwargs: object
         ) -> CompletedProcess[bytes]:
             command = [str(part) for part in argv]
-            verb = command[2] if command[1] == self.kind else command[1]
+            verb = self._verb(command)
             template = _arguments(command)[1]
             if verb not in failed or (
                 formatted is not None and (template is not None) != formatted
@@ -309,7 +323,7 @@ class FakeCli:
         return [
             _arguments(launch)[0]
             for launch in self.launches
-            if launch[1:3] == [self.kind, "inspect"] and _arguments(launch)[1] is None
+            if self._verb(launch) == "inspect" and _arguments(launch)[1] is None
         ]
 
     def resolves(self) -> list[list[str]]:
@@ -324,7 +338,7 @@ class FakeCli:
     def lists(self) -> list[list[str]]:
         """Return every list launch argv."""
         verb = _LIST_VERBS[self.kind]
-        return [launch for launch in self.launches if launch[1:3] == [self.kind, verb]]
+        return [launch for launch in self.launches if self._verb(launch) == verb]
 
 
 @contextmanager

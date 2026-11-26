@@ -25,9 +25,13 @@ from pydantic import JsonValue, TypeAdapter
 import pywhales.components.buildx.dap
 import pywhales.components.buildx.replay
 import pywhales.components.image.cli_wrapper
-from pywhales._environment import container_environment
+from pywhales._environment import (
+    container_environment,
+    validate_interpolation_environment,
+)
 from pywhales._json import loads_compat
 from pywhales.client_config import (
+    _NOT_LOADED,
     ClientConfig,
     Command,
     DockerCLICaller,
@@ -51,12 +55,14 @@ from pywhales.enums import BuildxReportCall as BuildxReportCall
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    format_csv_fields_for_cli,
     format_filters_for_cli,
     format_mapping_for_cli,
     run,
     stream_stdout_and_stderr,
     to_list,
     to_seconds,
+    validate_operands,
     validate_timeout,
 )
 
@@ -150,7 +156,10 @@ class Builder(ReloadableObject[BuilderInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pywhales.Builder(name='{self.name}', driver='{self.driver}')"
+        name = getattr(self, "_immutable_id", None)
+        snapshot = self._held_inspect_result()
+        driver = snapshot.driver if snapshot is not None else _NOT_LOADED
+        return f"pywhales.Builder(name='{name}', driver='{driver}')"
 
     def remove(
         self,
@@ -552,6 +561,9 @@ class BuildxCLI(DockerCLICaller):
             set: Overrides mapping target patterns and keys to values, such as
                 `{"*.args.VERSION": "1"}`.
             variables: Environment overrides for Bake variables on each invocation.
+                Before executable lookup, dynamic-loader names are refused, or
+                all reserved CLI and runtime names with
+                `strict_interpolation_environment=True`.
             metadata_file: Local path for build-result metadata; `None` omits it.
             stream_logs: Return decoded output chunks instead of waiting for
                 completion and returning configuration or report text.
@@ -603,10 +615,12 @@ class BuildxCLI(DockerCLICaller):
         Raises:
             ValueError: `print=True` conflicts with streaming, a report call,
                 `list`, or `return_config=False`, or timeout is Boolean,
-                nonpositive, or nonfinite.
+                nonpositive, or nonfinite, an interpolation name is disallowed, or a target
+                starts with `-`.
             DockerTimeout: A local CLI exceeds its deadline; the CLI is killed
                 and reaped without guaranteeing cancellation of the build.
             DockerException: A local CLI exits unsuccessfully.
+            ParsingError: The printed Bake configuration cannot be decoded.
         """
         validate_timeout(timeout)
         report = call in ("check", "outline", "targets") or list is not None
@@ -622,6 +636,16 @@ class BuildxCLI(DockerCLICaller):
         if print and report:
             raise ValueError("print=True cannot be combined with a report call.")
 
+        provenance_option = _attestation_option("--provenance", provenance)
+        sbom_option = _attestation_option("--sbom", sbom)
+        env = dict(variables)
+        validate_interpolation_environment(
+            env, strict=self.client_config.strict_interpolation_environment
+        )
+
+        targets = to_list(targets)
+        validate_operands(targets)
+
         full_cmd = Command([*self.docker_cmd, "buildx", "bake"])
 
         full_cmd.add_flag("--debug", debug)
@@ -636,8 +660,8 @@ class BuildxCLI(DockerCLICaller):
         full_cmd.add_args_iterable_or_single("--allow", allow)
         full_cmd.add_simple_arg("--list", list)
         full_cmd.add_args_iterable_or_single("--policy", policies)
-        full_cmd += _attestation_option("--provenance", provenance)
-        full_cmd += _attestation_option("--sbom", sbom)
+        full_cmd += provenance_option
+        full_cmd += sbom_option
         full_cmd.add_args_iterable_or_single(
             "--var", format_mapping_for_cli(variables_set)
         )
@@ -650,12 +674,11 @@ class BuildxCLI(DockerCLICaller):
             full_cmd.append(remote_definition)
         if metadata_file is not None:
             full_cmd.add_simple_arg("--metadata-file", metadata_file)
-        targets = to_list(targets)
-        env = dict(variables)
         if print:
-            return _BAKE_RESULT_ADAPTER.validate_json(
-                run([*full_cmd, *targets], env=env, timeout=timeout)
-            )
+            output = run([*full_cmd, *targets], env=env, timeout=timeout)
+            return JsonOutputParser(
+                "buildx bake", self.client_config.raw_diagnostics
+            ).parse(_BAKE_RESULT_ADAPTER.validate_json, output)
         elif stream_logs:
             return stream_buildx_logs([*full_cmd, *targets], env=env, timeout=timeout)
         else:
@@ -668,9 +691,10 @@ class BuildxCLI(DockerCLICaller):
             if report:
                 return output
             if return_config:
-                return _BAKE_RESULT_ADAPTER.validate_json(
-                    run([*full_cmd, "--print", *targets], env=env, timeout=timeout)
-                )
+                config = run([*full_cmd, "--print", *targets], env=env, timeout=timeout)
+                return JsonOutputParser(
+                    "buildx bake", self.client_config.raw_diagnostics
+                ).parse(_BAKE_RESULT_ADAPTER.validate_json, config)
 
     @overload
     def build(
@@ -1301,6 +1325,11 @@ class BuildxCLI(DockerCLICaller):
             `leave=True`, because Buildx then prints nothing to identify a
             builder.
         """
+        driver_option = (
+            format_dict_for_buildx(driver_options) if driver_options != {} else None
+        )
+        if context_or_endpoint is not None:
+            validate_operands(context_or_endpoint)
         full_cmd = Command([*self.docker_cmd, "buildx", "create"])
 
         full_cmd.add_flag("--debug", debug)
@@ -1311,10 +1340,8 @@ class BuildxCLI(DockerCLICaller):
         if platforms is not None:
             full_cmd += ["--platform", ",".join(platforms)]
         full_cmd.add_simple_arg("--driver", driver)
-        if driver_options != {}:
-            full_cmd.add_simple_arg(
-                "--driver-opt", format_dict_for_buildx(driver_options)
-            )
+        if driver_option is not None:
+            full_cmd.add_simple_arg("--driver-opt", driver_option)
         full_cmd.add_simple_arg("--name", name)
         full_cmd.add_flag("--use", use)
         full_cmd.add_flag("--leave", leave)
@@ -1502,11 +1529,14 @@ class BuildxCLI(DockerCLICaller):
 
         Raises:
             ValueError: The inspected builder is absent from the subsequent list,
-                for example because it was concurrently removed.
+                for example because it was concurrently removed, or `x` starts
+                with `-`.
         """
         # Sadly, docker buildx inspect has no json support,
         # so, it's ugly, but we grab the name from the first line and
         # then filter "docker buildx ls".
+        if x is not None:
+            validate_operands(x)
         full_cmd = Command([*self.docker_cmd, "buildx", "inspect"])
         full_cmd.add_flag("--debug", debug)
         if x is not None:
@@ -1751,11 +1781,13 @@ class BuildxCLI(DockerCLICaller):
             debug: Forward Buildx `--debug` immediately after `buildx rm`.
 
         Raises:
-            ValueError: `all_inactive` is combined with a builder. Raised before
-                any lookup or launch.
+            ValueError: `all_inactive` is combined with a builder, or the builder
+                starts with `-`. Raised before any lookup or launch.
         """
         if all_inactive and builder is not None:
             raise ValueError("all_inactive cannot be combined with a builder.")
+        if builder is not None:
+            validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "rm"])
         full_cmd.add_flag("--debug", debug)
         full_cmd.add_flag("--all-inactive", all_inactive)
@@ -1775,6 +1807,8 @@ class BuildxCLI(DockerCLICaller):
                 the current builder is stopped.
             debug: Forward Buildx `--debug` immediately after `buildx stop`.
         """
+        if builder is not None:
+            validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "stop"])
         full_cmd.add_flag("--debug", debug)
         if builder is not None:
@@ -1797,6 +1831,7 @@ class BuildxCLI(DockerCLICaller):
             global_: Builder will be used even when changing contexts
             debug: Forward Buildx `--debug` immediately after `buildx use`.
         """
+        validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "use"])
 
         full_cmd.add_flag("--debug", debug)
@@ -1873,7 +1908,12 @@ class BuildxCLI(DockerCLICaller):
 
 
 def format_dict_for_buildx(options: BuildxOptions) -> str:
-    return ",".join(format_mapping_for_cli(options, separator="="))
+    """Join Buildx option fields, quoting any field that holds CSV syntax.
+
+    Raises:
+        ValueError: If a key contains `=`, a comma, a double quote, CR or LF.
+    """
+    return format_csv_fields_for_cli(options)
 
 
 def _run_with_debug_log(
@@ -1988,6 +2028,21 @@ def _build_command(
         overrides for build arguments.
     """
     build_arguments, child_env = container_environment(build_args, client_config)
+    # Format CSV option values first, so an unrepresentable key fails before lookup.
+    attest_option = format_dict_for_buildx(attest) if isinstance(attest, dict) else None
+    provenance_option = _attestation_option("--provenance", provenance)
+    sbom_option = _attestation_option("--sbom", sbom)
+    cache_from_options: builtins.list[str | None]
+    if isinstance(cache_from, list):
+        cache_from_options = [format_dict_for_buildx(item) for item in cache_from]
+    elif isinstance(cache_from, Mapping):
+        cache_from_options = [format_dict_for_buildx(cache_from)]
+    else:
+        cache_from_options = [cache_from]
+    cache_to_option = (
+        format_dict_for_buildx(cache_to) if isinstance(cache_to, Mapping) else cache_to
+    )
+    output_option = format_dict_for_buildx(output) if output != {} else None
     full_cmd = Command([*client_config.docker_cmd, *subcommand])
 
     full_cmd.add_flag("--debug", debug)
@@ -1998,8 +2053,8 @@ def _build_command(
         "--add-host", format_mapping_for_cli(add_hosts, separator=":")
     )
     full_cmd.add_args_iterable_or_single("--allow", allow)
-    if isinstance(attest, dict):
-        full_cmd.add_simple_arg("--attest", format_dict_for_buildx(attest))
+    if attest_option is not None:
+        full_cmd.add_simple_arg("--attest", attest_option)
     full_cmd.add_args_iterable("--build-arg", build_arguments)
     full_cmd.add_args_iterable_or_single(
         "--build-context", format_mapping_for_cli(build_contexts)
@@ -2009,28 +2064,20 @@ def _build_command(
 
     full_cmd.add_simple_arg("--ssh", ssh)
 
-    full_cmd += _attestation_option("--provenance", provenance)
+    full_cmd += provenance_option
     full_cmd.add_flag("--pull", pull)
     full_cmd.add_flag("--push", push)
-    full_cmd += _attestation_option("--sbom", sbom)
+    full_cmd += sbom_option
     full_cmd.add_flag("--load", load)
     full_cmd.add_simple_arg("--metadata-file", metadata_file)
     full_cmd.add_simple_arg("--file", file)
     full_cmd.add_simple_arg("--target", target)
-    if isinstance(cache_from, list):
-        for item in cache_from:
-            full_cmd.add_simple_arg("--cache-from", format_dict_for_buildx(item))
-    elif isinstance(cache_from, Mapping):
-        full_cmd.add_simple_arg("--cache-from", format_dict_for_buildx(cache_from))
-    else:
-        full_cmd.add_simple_arg("--cache-from", cache_from)
-    if isinstance(cache_to, Mapping):
-        full_cmd.add_simple_arg("--cache-to", format_dict_for_buildx(cache_to))
-    else:
-        full_cmd.add_simple_arg("--cache-to", cache_to)
+    for item in cache_from_options:
+        full_cmd.add_simple_arg("--cache-from", item)
+    full_cmd.add_simple_arg("--cache-to", cache_to_option)
     full_cmd.add_args_iterable_or_single("--secret", to_list(secrets))
-    if output != {}:
-        full_cmd += ["--output", format_dict_for_buildx(output)]
+    if output_option is not None:
+        full_cmd += ["--output", output_option]
     if platforms is not None:
         full_cmd += ["--platform", ",".join(platforms)]
     full_cmd.add_simple_arg("--network", network)

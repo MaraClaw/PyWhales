@@ -1,4 +1,4 @@
-"""Safe and raw parse failures for system and Compose JSON, daemon-free.
+"""Safe and raw parse failures for captured and streamed CLI JSON, daemon-free.
 
 One-shot surfaces run behind a patched transport. Event surfaces run real
 Python children behind a patched stream launcher, so reaping and reader-thread
@@ -18,11 +18,23 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales.client_config import ParsingError
-from pywhales.exceptions import DockerException
+from pywhales.components.container.cli_wrapper import ContainerStats
+from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
 SECRET: Final = "parse-diagnostic-sentinel"
 DISK_KINDS: Final = ("Images", "Containers", "Local Volumes", "Build Cache")
+STATS_ROW: Final = {
+    "BlockIO": "1kB / 2kB",
+    "CPUPerc": "1.25%",
+    "Container": "first",
+    "ID": "id-1",
+    "MemPerc": "25%",
+    "MemUsage": "1MB / 4MB",
+    "Name": "first",
+    "NetIO": "3kB / 4kB",
+}
+DEEP_JSON: Final = b"[" * 1_000_000 + SECRET.encode()
 
 
 def _disk_listing(size: str) -> bytes:
@@ -48,6 +60,7 @@ class OneShot:
     payload: bytes
     cause: type[Exception]
     leaks: bool = False
+    source: str | None = None
 
 
 ONE_SHOT: Final = {
@@ -106,6 +119,37 @@ ONE_SHOT: Final = {
         ValueError,
         leaks=True,
     ),
+    "imagetools-deep-json": OneShot(
+        lambda c: c.buildx.imagetools.inspect("example:latest"),
+        DEEP_JSON,
+        RecursionError,
+        source="imagetools manifest",
+    ),
+    "version-malformed-json": OneShot(
+        lambda c: c.version(), SECRET.encode(), json.JSONDecodeError, source="version"
+    ),
+    "version-deep-json": OneShot(
+        lambda c: c.version(), DEEP_JSON, RecursionError, source="version"
+    ),
+    "stats-malformed-line": OneShot(
+        lambda c: c.container.stats(),
+        json.dumps(STATS_ROW).encode() + b"\n" + SECRET.encode(),
+        json.JSONDecodeError,
+        source="container stats",
+    ),
+    "stats-invalid-record": OneShot(
+        lambda c: c.container.stats(),
+        json.dumps({**STATS_ROW, "CPUPerc": f"{SECRET}%"}).encode(),
+        ValueError,
+        leaks=True,
+        source="container stats",
+    ),
+    "stats-deep-json": OneShot(
+        lambda c: c.container.stats(),
+        DEEP_JSON,
+        RecursionError,
+        source="container stats",
+    ),
 }
 
 
@@ -116,7 +160,7 @@ def _client(*, raw: bool) -> DockerClient:
 
 
 def _rendered(error: BaseException) -> str:
-    return str(error) + "".join(traceback.format_exception(error))
+    return str(error) + repr(error) + "".join(traceback.format_exception(error))
 
 
 @pytest.mark.parametrize("raw", [False, True], ids=["safe", "raw"])
@@ -135,8 +179,13 @@ def test_one_shot_parse_failure_is_parsing_error_by_policy(
         case.call(_client(raw=raw))
 
     error = raised.value
+    if case.source is not None:
+        assert str(error) == f"Invalid {case.source} JSON response"
     if raw:
-        assert isinstance(error.__cause__, case.cause)
+        cause = error.__cause__
+        assert isinstance(cause, case.cause)
+        if isinstance(cause, json.JSONDecodeError) and SECRET.encode() in case.payload:
+            assert cause.doc == case.payload.decode().splitlines()[-1]
         assert (SECRET in _rendered(error)) is case.leaks
     else:
         assert error.__cause__ is None
@@ -164,14 +213,62 @@ def test_command_failure_is_not_a_parsing_error(
         call(_client(raw=False))
 
 
-def test_version_keeps_raw_json_decode_error() -> None:
-    """Given a malformed version payload, then the documented exception remains."""
-    done = subprocess.CompletedProcess([], 0, b"not-json", b"")
+def test_stats_preserves_typed_records_in_cli_order() -> None:
+    second = {**STATS_ROW, "ID": "id-2", "Name": "second", "CPUPerc": "0.5%"}
+    payload = "\n".join(map(json.dumps, (STATS_ROW, second))).encode()
+    done = subprocess.CompletedProcess([], 0, payload, b"")
+    with patch("subprocess.run", return_value=done):
+        result = _client(raw=False).container.stats()
+
+    assert all(isinstance(record, ContainerStats) for record in result)
+    assert [(r.container_id, r.container_name, r.cpu_percentage) for r in result] == [
+        ("id-1", "first", 1.25),
+        ("id-2", "second", 0.5),
+    ]
+    assert [r.memory_used for r in result] == [1_000_000, 1_000_000]
+
+
+@pytest.mark.parametrize(
+    ("target", "call", "launch_count"),
+    [
+        ("pywhales.docker_client.run", lambda c: c.version(), 1),
+        (
+            "pywhales.components.container.cli_wrapper.run",
+            lambda c: c.container.stats(),
+            1,
+        ),
+        (
+            "pywhales.components.buildx.cli_wrapper.run",
+            lambda c: c.buildx.bake(print=True),
+            1,
+        ),
+        ("pywhales.components.buildx.cli_wrapper.run", lambda c: c.buildx.bake(), 2),
+    ],
+    ids=["version", "stats", "bake-print", "bake-follow-up"],
+)
+@pytest.mark.parametrize(
+    "error",
+    [
+        DockerException(["fake-docker"], 1),
+        DockerTimeout(["fake-docker"], 1),
+        ObservationLimitError("total_io", 1, 2),
+        RecursionError("outside the parser"),
+    ],
+    ids=["cli-failure", "timeout", "observation-limit", "outside-recursion"],
+)
+def test_new_parse_surfaces_propagate_launch_errors(
+    target: str,
+    call: Callable[[DockerClient], object],
+    launch_count: int,
+    error: Exception,
+) -> None:
+    """Launch errors stay unchanged, even when their type is a parse error type."""
     with (
-        patch("subprocess.run", return_value=done),
-        pytest.raises(json.JSONDecodeError),
+        patch(target, side_effect=[""] * (launch_count - 1) + [error]),
+        pytest.raises(type(error)) as raised,
     ):
-        _client(raw=False).version()
+        call(_client(raw=False))
+    assert raised.value is error
 
 
 def test_raw_compose_config_preserves_large_integer_and_unicode() -> None:

@@ -105,8 +105,26 @@ builds, then runs a separate `--print` query. That query isn't a build-time
 snapshot. `return_config=False` skips it and returns `None`; `print=True` only
 queries configuration and conflicts with streaming, report calls, and
 `return_config=False`. Bake reports return `str`, and Bake streams yield decoded
-`str`; neither performs the follow-up query. `variables={...}` overlays the
-Bake subprocess environment on each invocation.
+`str`; neither performs the follow-up query. Malformed JSON from `print=True` or
+the follow-up query raises `ParsingError`, not `json.JSONDecodeError`.
+`variables={...}` overlays the Bake subprocess environment on each invocation.
+Every `bake()` path rejects dynamic-loader names (`LD_*`, `DYLD_*`, any case) in
+`variables` with a value-free `ValueError` before executable lookup. With
+`DockerClient(strict_interpolation_environment=True)` it rejects every name that
+container `envs` transport reserves; see
+[Guard stack and bake interpolation environments](client-and-errors.md#guard-stack-and-bake-interpolation-environments).
+`variables_set` (`--var`) isn't checked.
+
+## CSV-Structured Options
+
+Several options reach Buildx as comma-separated `key=value` fields: `output`,
+`cache_from`, `cache_to`, `attest`, `provenance`, `sbom`, and `driver_opt` (replay builds share the same formatter). PyWhales wraps a
+field in double quotes, doubling embedded quotes, only when its value contains a
+comma, double quote, CR or LF, the way Docker's CSV readers expect. A value such
+as `dest=a,b` therefore stays one field instead of injecting a second option.
+Ordinary values keep their argv unchanged. A key that can't be represented, such as
+one containing `=` or one of those characters, raises `ValueError` before the
+executable is looked up; the message names neither key nor value.
 
 ## Stream Decoded Build Logs
 

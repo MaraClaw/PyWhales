@@ -59,8 +59,9 @@ Neither path is a secret vault. See
 including the Compose interpolation caveat.
 
 If passing an existing `client_config=...`, configure that object directly,
-`inherited_environment_names`, `inherit_environment`, `strict_env_transport`, and
-`strict_workload_errors` included: the constructor retains it unchanged and
+`inherited_environment_names`, `inherit_environment`, `strict_env_transport`,
+`strict_workload_errors`, `max_captured_output_bytes`, and
+`strict_interpolation_environment` included: the constructor retains it unchanged and
 ignores the other constructor options.
 
 ## Isolate The CLI Environment
@@ -154,6 +155,61 @@ happens, depends on the call. See
 [Build arguments](buildx.md#build-arguments), and
 [Compose build and run environment](compose.md#build-and-run-environment).
 
+## Cap Captured Output
+
+`DockerClient(max_captured_output_bytes=...)` caps the combined captured stdout
+and stderr of each local CLI launch that runs outside an `observation()` scope.
+The default `None` keeps today's behavior. A supplied value must be a positive
+integer, never a bool; anything else raises a value-free `ValueError` at
+construction.
+
+```python
+from pywhales import DockerClient
+
+client = DockerClient(max_captured_output_bytes=16 * 1024 * 1024)
+```
+
+Use it when a context or endpoint you don't control could print without limit.
+Output exactly at the cap succeeds. On overflow PyWhales kills and reaps the
+local CLI right away, without the usual one-second drain, and raises
+`ObservationLimitError` with `reason == "response"` and the cap as its limit; the
+safe rendering carries no captured payload. Nothing rolls back daemon-side work.
+The cap is read at each launch, so changing the config later affects only new
+launches. Inside an `observation()` scope the smaller of this cap and the scope's
+`max_response_bytes` applies; see
+[Observation budgets and convergence](observation-and-convergence.md). Telemetry
+records one `limit` completion with stop reason `response`, as described in
+[Telemetry and admission](telemetry-and-admission.md).
+
+This bounds captured output only. Streams and archive reads keep their own
+buffers and observation limits, and it isn't a total-memory cap.
+
+## Guard Stack And Bake Interpolation Environments
+
+`stack.deploy()` merges `env_files` and `variables` into the Docker CLI's child
+environment, and `buildx.bake()` does the same with `variables`. Both now reject
+dynamic-loader names (`LD_*` and `DYLD_*`, any case) with `ValueError` before the
+executable is looked up, so an env file in a repository can't inject a shared
+library into the CLI. The message names neither variable nor value, and
+`stack.deploy()` now reads its env files before resolving the executable.
+`bake(variables_set=...)` (`--var`) isn't an environment overlay and isn't checked.
+
+For stricter control, opt in on the client:
+
+```python
+from pywhales import DockerClient
+
+deployer = DockerClient(strict_interpolation_environment=True)
+```
+
+With `True`, `stack.deploy()` and `buildx.bake()` reject every name that container
+`envs` transport reserves (`DOCKER_*`, `PYTHON*`, `LC_*`, proxy names and the rest
+listed under [Container environment values](containers-and-output.md#container-environment-values))
+from env files and `variables`. Use it when an env file must never change which
+daemon, credentials or runtime a deploy uses. The default is `False` because
+Compose files often interpolate such names legitimately. Container `envs`
+transport and `strict_env_transport` are unchanged by this option.
+
 ## Default CLI Deadlines
 
 `DockerClient(default_timeout=30)` applies a 30-second deadline to each local
@@ -191,8 +247,9 @@ For tables that read many resource properties, use the keyword-only
 `hydrate=True` on `client.container.list`, `client.image.list`,
 `client.network.list`, `client.volume.list`, or the Swarm groups
 `client.node.list`, `client.service.list`, `client.config.list` and
-`client.secret.list`. `client.ps(hydrate=True)` is the container alias. Default
-listings remain lazy and keep their existing ordering; hydrated image listings
+`client.secret.list`. `client.ps(hydrate=True)` is the container alias. Swarm task
+producers take it too; see [Swarm tasks and stack services](#swarm-tasks-and-stack-services).
+Default listings remain lazy and keep their existing ordering; hydrated image listings
 deduplicate in first-seen CLI order. All return lists.
 
 ```python
@@ -217,7 +274,23 @@ snapshot inspect: about three launches for up to 100 services. A node counts as
 removed only when the CLI reports exactly `node <ID> not found` for a requested
 ID; there is no `NoSuchNode` exception.
 
-Hydrated properties keep their pinned snapshots until a successful explicit
+### Swarm Tasks And Stack Services
+
+Keyword-only `hydrate=True` is also accepted by `service.ps()`, `node.ps()`,
+`stack.ps()` and `task.list()`, and by the `ps()` methods on `Service`, `Node` and
+`Stack` handles. A hydrated call returns the same tasks in the same order, with
+pinned snapshots from one inspect launch per 100 tasks instead of one per task.
+`task.list(hydrate=True)` hydrates across all services in one pass after its
+single `service ps` launch. Defaults keep their launches and lazy handles. A task
+removed mid-listing is omitted; timeouts, `NotASwarmManager` and malformed
+responses propagate. There is still no `NoSuchTask` exception.
+
+`stack.services()` and `Stack.services()` also take `hydrate=True`. With or
+without it, truncated service IDs are now resolved with batched `service inspect`
+launches (one per 100 services), and a service removed between listing and
+resolution is omitted from the result.
+
+Hydrated properties (tasks included) keep their pinned snapshots until a successful explicit
 `reload()` or a mutation through that handle releases the pin, including Swarm
 node update/promote/demote/remove, service update/scale/rollback/remove, and
 config and secret remove. A failed mutation launch also releases it. Mutating by a plain name or through another handle
@@ -266,12 +339,29 @@ missing resources, registry authentication, and unsupported plugin flags.
 Don't retry a mutating command just because it failed. Invalid Python arguments
 may raise `TypeError` or `ValueError` before a subprocess is started.
 
+Identifier operands that start with `-` raise `ValueError` before the executable
+is looked up or anything launches, because Docker would read them as flags. This
+covers container, image, volume, network, secret, config, plugin, node, service,
+stack, context, manifest, task, checkpoint, Buildx and Compose names, IDs,
+references and tags. The message names no operand, and PyWhales inserts no `--`.
+The command list after the image, container or service in `run()`, `create()`,
+`execute()` and Compose `run()`/`execute()` is still passed literally, and option
+values aren't checked, so valid calls keep their argv. `secret.create()` and
+`config.create()` pass a relative file path starting with `-` as `./<path>` and
+reject a bare `-`, which Docker reads as standard input.
+
 For registry login, `docker.login(server=..., username=..., password=...)`
 passes the password through stdin, always requesting `--password-stdin`.
 Omitting `password` (`None`) still requests `--password-stdin` but inherits
 the caller's own stdin instead of writing a value; pass an explicit password
 when running non-interactively. Obtain credentials from the application's
 existing secret mechanism; don't embed them in generated examples or reports.
+
+`docker.login_ecr(...)` needs botocore, which the base install no longer
+includes. Install the extra with `pip install 'pywhales[ecr]'` (or
+`uv add 'pywhales[ecr]'`) before calling it. Boto3 and s3transfer are no longer
+dependencies. Check with `importlib.util.find_spec("botocore")`; see
+[Usage validation](validation.md).
 
 ### Separate Workload Failures From Docker Errors
 
@@ -386,12 +476,15 @@ printing. Raw exception attributes, returned
 payloads, uncaptured terminal output, and caller logging remain outside this
 policy.
 
-Malformed responses from Buildx builder reload/list, Compose config/ls/events,
-system disk-free/events/info, and imagetools manifest parsing raise
-`ParsingError` from `pywhales.client_config`, not a `ValueError` subclass.
-Safe mode suppresses the payload-bearing parsing chain; raw diagnostics chains
-the original error. Event parsing keeps the launch-time diagnostics setting.
-`version()` and container stats keep their existing exception behavior.
+Malformed responses from `DockerClient.version()`, container stats, Buildx
+builder reload/list, Buildx Bake `print=True` and `return_config` output, Compose
+config/ls/events, system disk-free/events/info, and imagetools manifest parsing
+raise `ParsingError` from `pywhales.client_config`, not a `ValueError` subclass.
+`version()` used to raise `json.JSONDecodeError` or pydantic's `ValidationError`;
+catch `ParsingError` instead. Deeply nested CLI JSON also raises `ParsingError`
+rather than an unclassified `RecursionError`. Safe mode gives the error no
+payload, cause or context; raw diagnostics chains the original error. Event
+parsing keeps the launch-time diagnostics setting.
 
 Scalar inspection of container, image, network, volume, config, secret, node,
 service, task, plugin, and context handles requires exactly one JSON object in
@@ -406,6 +499,10 @@ These checks don't replace command failures with parsing failures: classified
 `DockerException` subclasses retain their raw command, status, and output fields.
 Builder listings, manifest object responses, and batch inspection retain their
 separate contracts; don't assume the scalar array rule for them.
+
+A handle's `repr()` never runs `docker inspect`, refreshes a snapshot or changes
+a pin, and never raises. It shows the last held snapshot, even an expired one, or
+`<not loaded>`; read a property or call `reload()` when current state matters.
 
 If an argument is rejected, inspect that method in the installed package before
 changing versions or guessing SDK-style names. New Compose flags are forwarded

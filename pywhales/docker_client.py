@@ -13,6 +13,7 @@ import pydantic
 
 from pywhales._json import loads_compat
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.checkpoint.cli_wrapper import CheckpointCLI
 from pywhales.components.compose.cli_wrapper import ComposeCLI
@@ -34,7 +35,7 @@ from pywhales.components.volume.cli_wrapper import VolumeCLI
 from pywhales.enums import ClientTypeInput, ComposeProgressInput
 from pywhales.telemetry import TelemetryObserver
 
-from .utils import DockerCamelModel, ValidPath, run
+from .utils import DockerCamelModel, ValidPath, run, validate_operands
 
 
 class ClientVersion(DockerCamelModel):
@@ -163,6 +164,8 @@ class DockerClient(DockerCLICaller):
         inherited_environment_names: Collection[str] | None = None,
         compose_all_resources: bool = False,
         compose_ansi: Literal["never", "always", "auto"] | None = None,
+        strict_interpolation_environment: bool = False,
+        max_captured_output_bytes: int | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -238,6 +241,12 @@ class DockerClient(DockerCLICaller):
                 resources no service uses, only when true.
             compose_ansi: Compose control-character mode (`"never"`, `"always"`
                 or `"auto"`); `None` omits `--ansi`.
+            strict_interpolation_environment: Reject every reserved child-environment
+                name in stack deploy and Bake interpolation overlays, not only
+                dynamic-loader names. Defaults off.
+            max_captured_output_bytes: Positive cap on combined captured stdout and
+                stderr bytes per CLI launch, or `None` for no client cap. A tighter
+                observation response limit still applies.
 
         Raises:
             ValueError: If a newly created config has an invalid budget, default
@@ -281,6 +290,8 @@ class DockerClient(DockerCLICaller):
                 inherited_environment_names=inherited_environment_names,
                 compose_all_resources=compose_all_resources,
                 compose_ansi=compose_ansi,
+                strict_interpolation_environment=strict_interpolation_environment,
+                max_captured_output_bytes=max_captured_output_bytes,
             )
         super().__init__(client_config)
 
@@ -354,11 +365,13 @@ class DockerClient(DockerCLICaller):
         Raises:
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the version command fails.
-            json.JSONDecodeError: If command output is not valid JSON.
-            pydantic.ValidationError: If the JSON fails version-model validation.
+            ParsingError: If command output cannot be decoded as version metadata.
         """
         full_cmd = Command([*self.docker_cmd, "version", "-f", "{{json .}}"])
-        return Version(**loads_compat(run(full_cmd)))
+        output = run(full_cmd)
+        return JsonOutputParser("version", self.client_config.raw_diagnostics).parse(
+            lambda text: Version(**loads_compat(text)), output
+        )
 
     def login(
         self,
@@ -378,9 +391,13 @@ class DockerClient(DockerCLICaller):
                 stdin while still requesting ``--password-stdin``.
 
         Raises:
+            ValueError: If `server` starts with `-`. Raised before the
+                executable is looked up.
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the login command fails.
         """
+        if server is not None:
+            validate_operands(server)
         full_cmd = Command([*self.docker_cmd, "login", "--password-stdin"])
 
         full_cmd.add_simple_arg("--username", username)
@@ -403,9 +420,13 @@ class DockerClient(DockerCLICaller):
             server: Registry address; ``None`` leaves the CLI's default registry.
 
         Raises:
+            ValueError: If `server` starts with `-`. Raised before the
+                executable is looked up.
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the logout command fails.
         """
+        if server is not None:
+            validate_operands(server)
         full_cmd = Command([*self.docker_cmd, "logout"])
 
         if server is not None:
@@ -422,7 +443,7 @@ class DockerClient(DockerCLICaller):
     ) -> None:
         """Fetch an AWS ECR token and log in using the configured Docker CLI.
 
-        Require the optional botocore dependency and network access to ECR.
+        Install the ``pywhales[ecr]`` extra for botocore. Network access to ECR is required.
         Credential and region arguments pass directly to botocore's client
         creation; omitted values use its normal configuration resolution.
         Use the first authorization response, then perform a blocking login

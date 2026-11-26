@@ -9,7 +9,7 @@ from pywhales import DockerClient, _archive_deadline
 from pywhales.telemetry import CompletionRecord, TelemetryRecord
 
 
-def test_default_save_reads_long_lines_in_bulk_without_changing_framing(
+def test_default_save_reads_binary_blocks_in_bulk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given long binary lines that must not be read one syscall per byte.
@@ -37,8 +37,8 @@ def test_default_save_reads_long_lines_in_bulk_without_changing_framing(
     with patch.object(client.image, "inspect", return_value=[]):
         result = list(client.image.save("sample"))
 
-    # Then raw reads are bulk-sized and counted exactly once, preserving lines.
-    assert result == [b"x" * (128 * 1024) + b"\n", b"\x00\xff\n", b"last"]
+    # Then raw reads are bulk-sized and counted exactly once, regardless of newlines.
+    assert result == [payload[:65536], payload[65536:131072], payload[131072:]]
     assert sum(sizes) == len(payload)
     assert len(sizes) < len(payload) // 100
     completed = records[-1]
@@ -46,15 +46,16 @@ def test_default_save_reads_long_lines_in_bulk_without_changing_framing(
     assert completed.stdout_bytes == len(payload)
 
 
-def test_save_close_counts_buffered_read_ahead_not_only_yielded_bytes() -> None:
-    # Given several lines written atomically before the first pipe read.
+def test_save_close_counts_only_blocks_actually_read() -> None:
+    # Given more than one block, with newlines inside the first.
     records: list[TelemetryRecord] = []
-    payload = b"first\nremaining\n"
+    block = b"a\n" * 32768
     client = DockerClient(
         client_call=[
             sys.executable,
             "-c",
-            f"import os,threading; os.write(1,{payload!r}); threading.Event().wait()",
+            "import sys,threading; sys.stdout.buffer.write(b'a\\n'*32768 + b'remaining'); "
+            "sys.stdout.flush(); threading.Event().wait()",
         ],
         telemetry_observer=records.append,
     )
@@ -62,12 +63,12 @@ def test_save_close_counts_buffered_read_ahead_not_only_yielded_bytes() -> None:
         archive = client.image.save("sample")
     assert isinstance(archive, GeneratorType)
     try:
-        # When closing after yielding only the first buffered line.
-        assert next(archive) == b"first\n"
+        # When closing after yielding only the first full block.
+        assert next(archive) == block
     finally:
         archive.close()
 
-    # Then telemetry includes every byte actually read, including read-ahead.
+    # Then telemetry includes every byte actually read, not unread trailing output.
     completed = records[-1]
     assert isinstance(completed, CompletionRecord)
-    assert (completed.outcome, completed.stdout_bytes) == ("closed", len(payload))
+    assert (completed.outcome, completed.stdout_bytes) == ("closed", len(block))

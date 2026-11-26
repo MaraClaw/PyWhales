@@ -18,6 +18,8 @@ from pywhales import (
     Node,
     Secret,
     Service,
+    Stack,
+    Task,
     Volume,
 )
 from pywhales.client_config import ClientConfig
@@ -39,6 +41,13 @@ def _check_strict_environment_setting(flag: bool) -> None:
     assert_type(config.strict_env_transport, bool)
     client = DockerClient(strict_env_transport=flag)
     assert_type(client.client_config.strict_env_transport, bool)
+
+
+def _check_strict_interpolation_environment_setting(flag: bool) -> None:
+    config = ClientConfig(strict_interpolation_environment=flag)
+    assert_type(config.strict_interpolation_environment, bool)
+    client = DockerClient(strict_interpolation_environment=flag)
+    assert_type(client.client_config.strict_interpolation_environment, bool)
 
 
 def _check_resource_inspection_contracts(client: DockerClient) -> None:
@@ -69,6 +78,20 @@ def _check_root_alias_contracts(client: DockerClient) -> None:
     assert_type(client.port("container"), list[PublishedPort])
     assert_type(client.port("container", 80, "tcp"), list[PublishedPort])
     assert_type(client.events(), MappedProcessStream[DockerEvent])
+
+
+def _check_swarm_listing_hydration(
+    client: DockerClient, service: Service, node: Node, stack: Stack, hydrate: bool
+) -> None:
+    assert_type(client.service.ps(service, hydrate=hydrate), list[Task])
+    assert_type(service.ps(hydrate=hydrate), list[Task])
+    assert_type(client.node.ps(node, hydrate=hydrate), list[Task])
+    assert_type(node.ps(hydrate=hydrate), list[Task])
+    assert_type(client.stack.ps(stack, hydrate=hydrate), list[Task])
+    assert_type(stack.ps(hydrate=hydrate), list[Task])
+    assert_type(client.task.list(hydrate=hydrate), list[Task])
+    assert_type(client.stack.services(stack, hydrate=hydrate), list[Service])
+    assert_type(stack.services(hydrate=hydrate), list[Service])
 
 
 def _check_process_contracts(client: DockerClient, raw: bool) -> None:

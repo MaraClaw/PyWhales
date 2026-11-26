@@ -8,6 +8,7 @@ images, and require disposable daemon state.
 import contextlib
 import inspect
 import json
+import os
 import sys
 import time
 from collections.abc import Callable, Generator, Iterable, Iterator
@@ -28,7 +29,7 @@ from pywhales import DockerClient, Image, docker
 from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._execution_policy import get_execution_policy
 from pywhales._observation import ObservationState, get_observation, observation
-from pywhales.client_config import Command, ParsingError
+from pywhales.client_config import ClientConfig, Command, ParsingError
 from pywhales.components.image.cli_wrapper import ImageCLI
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
@@ -50,6 +51,22 @@ from tests.pywhales.components.hydration_fakes import (
     fake_daemon,
     identity_of,
 )
+from tests.pywhales.components.repr_fakes import assert_handle_reprs
+from tests.pywhales.process_groups import stdin_from
+
+
+def test_image_repr_uses_only_held_snapshot() -> None:
+    identity = "sha256:" + "0123456789abcdef" * 4
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    handle = Image(config, identity, is_immutable_id=True)
+    snapshot = ImageInspectResult(id=identity, repo_tags=["repo:test", "repo:other"])
+    assert_handle_reprs(
+        handle,
+        snapshot,
+        lazy="pywhales.Image(id='sha256:0123456789abc', tags=<not loaded>)",
+        loaded="pywhales.Image(id='sha256:0123456789abc', tags=['repo:test', 'repo:other'])",
+        partial="pywhales.Image(id='None', tags=<not loaded>)",
+    )
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
@@ -989,14 +1006,52 @@ def test_archive_path_save_uses_each_client_environment(
     assert [output.read_text() for output in outputs] == ["first", "second"]
 
 
+def test_unbounded_save_waits_for_exit_after_stdout_eof() -> None:
+    # The final short block proves stdout reached EOF; the gate still holds the CLI alive.
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os, sys; sys.stdout.buffer.write(bytes(range(256))*513); "
+            "sys.stdout.flush(); os.close(1); os.read(0, 1)",
+        ]
+    )
+    reached_eof = Event()
+
+    def collect() -> list[bytes]:
+        blocks = []
+        for block in client.image.save("sample"):
+            blocks.append(block)
+            if len(block) < 65536:
+                reached_eof.set()
+        return blocks
+
+    read_fd, write_fd = os.pipe()
+    with (
+        os.fdopen(read_fd, "rb") as gate,
+        stdin_from(gate.fileno()),
+        patch.object(client.image, "inspect", return_value=[]),
+        ThreadPoolExecutor(max_workers=1) as pool,
+        os.fdopen(write_fd, "wb") as release,
+    ):
+        result = pool.submit(collect)
+        assert reached_eof.wait(timeout=5)
+        # The CLI can't exit before the gate opens, so the save is still waiting.
+        assert not result.done()
+        release.close()
+        blocks = result.result(timeout=5)
+    assert list(map(len, blocks)) == [65536, 65536, 256]
+    assert b"".join(blocks) == bytes(range(256)) * 513
+
+
 def test_archive_lazy_save_snapshots_environment_at_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
     code = (
-        "import os; "
-        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True); "
-        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True)"
+        "import os, sys; "
+        "value = os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing').encode(); "
+        "sys.stdout.buffer.write(value.ljust(65536) + value)"
     )
     clients = [
         DockerClient(
@@ -1020,10 +1075,10 @@ def test_archive_lazy_save_snapshots_environment_at_launch(
     with contextlib.closing(first), contextlib.closing(second):
         first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "first"
         second_environment["PYWHALES_ARCHIVE_SENTINEL"] = "second"
-        assert next(first) == b"first\n"
+        assert next(first) == b"first".ljust(65536)
         first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "changed"
-        assert list(second) == [b"second\n", b"second\n"]
-        assert list(first) == [b"first\n"]
+        assert list(second) == [b"second".ljust(65536), b"second"]
+        assert list(first) == [b"first"]
     assert first.gi_frame is None
     assert second.gi_frame is None
 
@@ -2234,8 +2289,9 @@ def test_load_json(json_file: Path) -> None:
 def test_image_repr(ctr_client: DockerClient) -> None:
     ctr_client.image.pull("busybox:1", quiet=True)
     ctr_client.image.pull("busybox:1.32", quiet=True)
-    assert "busybox:1" in repr(ctr_client.image.list())
-    assert "busybox:1.32" in repr(ctr_client.image.list())
+    images = ctr_client.image.list(hydrate=True)
+    assert "busybox:1" in repr(images)
+    assert "busybox:1.32" in repr(images)
     ctr_client.image.remove(["busybox:1", "busybox:1.32"])
 
 
@@ -3131,3 +3187,59 @@ def test_mutating_image_call_releases_the_pin(
         with contextlib.suppress(NoSuchImage):
             assert image.repo_tags is not None
     assert len(cli.inspects()) == before + 1
+
+
+FLAG_LIKE = "--platform"
+
+IMAGE_OPERAND_CALLS = {
+    "history": lambda c: c.image.history(FLAG_LIKE),
+    "import_tag": lambda c: c.image.import_("/src.tar", FLAG_LIKE),
+    "inspect_scalar": lambda c: c.image.inspect(FLAG_LIKE),
+    "inspect_platform": lambda c: c.image.inspect(FLAG_LIKE, platform="linux/amd64"),
+    "inspect_list": lambda c: c.image.inspect(["alpine", FLAG_LIKE]),
+    "list": lambda c: c.image.list(FLAG_LIKE),
+    "pull_scalar": lambda c: c.image.pull(FLAG_LIKE),
+    "pull_list": lambda c: c.image.pull(["alpine", FLAG_LIKE]),
+    "pull_iterator": lambda c: c.image.pull(iter(["alpine", "busybox", FLAG_LIKE])),
+    "pull_all_tags": lambda c: c.image.pull(FLAG_LIKE, all_tags=True),
+    "push_scalar": lambda c: c.image.push(FLAG_LIKE),
+    "push_list": lambda c: c.image.push(["alpine", FLAG_LIKE]),
+    "push_all_tags": lambda c: c.image.push(FLAG_LIKE, all_tags=True),
+    "remove": lambda c: c.image.remove(FLAG_LIKE),
+    "remove_list": lambda c: c.image.remove(["alpine", FLAG_LIKE]),
+    "save": lambda c: c.image.save(FLAG_LIKE, "/out.tar"),
+    "save_list": lambda c: c.image.save(["alpine", FLAG_LIKE]),
+    "search": lambda c: c.image.search(FLAG_LIKE),
+    "tag_source": lambda c: c.image.tag(FLAG_LIKE, "new"),
+    "tag_target": lambda c: c.image.tag("alpine", FLAG_LIKE),
+}
+
+
+@pytest.mark.parametrize(
+    "call", IMAGE_OPERAND_CALLS.values(), ids=list(IMAGE_OPERAND_CALLS)
+)
+def test_image_rejects_flag_like_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.image.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        patch(
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert FLAG_LIKE not in str(rejected.value)
+    assert FLAG_LIKE not in repr(rejected.value.args)

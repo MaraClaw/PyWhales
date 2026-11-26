@@ -66,7 +66,7 @@
   returning a new `Image` with optional `new_tag`. Both forward `pull`, defaulting to `"missing"`.
   Their `timeout` times each launch they make (inspect through removal) via `execution_timeout()`, not config mutation.
 - `save()` rejects empty input and inspects references before saving. An output path returns `None`;
-  omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream.
+  omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream. With neither an observation scope nor a deadline (`owner.bounded` false) the lazy save yields 64 KiB blocks from `ArchiveDeadline.chunks()` (not newline-split pieces) and waits for the CLI with `ArchiveDeadline.wait()`, which has no 0.1 s timeout and so can't raise `subprocess.TimeoutExpired`. Image references and tags are validated as operands before lookup; `Image.__repr__` shows only a held snapshot's tags or `<not loaded>`, never launching.
 - `platform` on `load()`, `save()` and `remove()` is `str | Iterable[str] | None`, emitted through
   `_add_platforms` as repeated `--platform` options (Docker's `strings` flags also take a comma list in one value) and
   only when not `None`, so existing argv is unchanged. `Image.save()` and `Image.remove()` forward it. The save

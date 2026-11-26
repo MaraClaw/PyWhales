@@ -1,5 +1,90 @@
 # Changelog
 
+## 1.4.0
+
+### Breaking Changes
+
+- The AWS SDK is no longer installed by default. Install `pywhales[ecr]` to use
+  `login_ecr()` with botocore. Boto3 and s3transfer are no longer dependencies.
+- `DockerClient.version()` now raises `ParsingError` for malformed JSON or
+  output that doesn't match the `Version` model, where it used to raise
+  `json.JSONDecodeError` or pydantic's `ValidationError`. Valid output returns
+  the same `Version`.
+- Identifier operands starting with `-` now raise `ValueError` before the
+  executable is looked up or anything is launched, because Docker would read
+  them as flags: container, image, volume, network, secret, config, plugin,
+  node, service, stack, context, manifest, task, checkpoint, Buildx and
+  Compose names, IDs, references and tags. The message names no operand. The
+  command after the image, container or service in `run()`, `create()`,
+  `execute()` and Compose `run()`/`execute()` is still passed literally, option
+  values aren't checked, and no `--` is inserted, so argv for valid input is
+  unchanged. `secret.create()` and `config.create()` pass a relative file path
+  starting with `-` as `./<path>` and reject `-`, which Docker reads as
+  standard input.
+
+### New Features
+
+- `DockerClient(max_captured_output_bytes=...)` (the last `ClientConfig` field)
+  caps the combined captured stdout and stderr of each CLI launch outside an
+  `observation()` scope, on every capture branch. The default `None` keeps
+  today's behavior. The cap is snapshotted per launch. On overflow PyWhales
+  kills and reaps the local CLI without the one-second drain and raises
+  `ObservationLimitError` with reason `response` and the cap as its limit;
+  telemetry records one `limit` completion with stop reason `response`. Inside
+  an observation scope the smaller of the cap and `max_response_bytes` applies.
+- `DockerClient(strict_interpolation_environment=True)` (appended after
+  `compose_ansi` on `ClientConfig`) makes `stack.deploy()` and `buildx.bake()`
+  reject every name that container `envs` transport reserves, such as
+  `DOCKER_*`, `PYTHON*`, `LC_*` and proxy names, from env files and
+  `variables`. Container environment transport is unchanged.
+- Swarm task producers accept keyword-only `hydrate=True`: `service.ps()`,
+  `node.ps()`, `stack.ps()`, `task.list()` and the `Service`, `Node` and
+  `Stack` handle `ps()` methods. Hydrated calls return the same tasks in the
+  same order with pinned snapshots from one inspect launch per 100 tasks;
+  a task removed before it is inspected is omitted.
+  `stack.services()` and `Stack.services()` accept `hydrate=True` too.
+
+### Behavior Changes And Fixes
+
+- `stack.deploy()` and every `buildx.bake()` path reject dynamic-loader names
+  (`LD_*`, `DYLD_*`, any case) from env files or `variables` with `ValueError`
+  before lookup. The error names neither variable nor value. `stack.deploy()`
+  now reads its env files before resolving the executable.
+- `stack.services()` resolves truncated service IDs with batched
+  `service inspect` launches (one per 100 services) instead of inspecting each
+  service separately. A service removed between listing and resolution is
+  omitted from the result.
+- Resource handle `repr()` no longer runs `docker inspect`, refreshes a
+  snapshot or changes a pin. It shows the last held snapshot, even an expired
+  one, or `<not loaded>`, and never raises.
+- PyWhales now quotes the comma-separated fields it builds when a value
+  contains a comma, double quote, CR or LF, the way Docker's CSV readers expect:
+  Buildx `--output`, `--cache-from`, `--cache-to`, `--attest`, provenance, SBOM
+  and `--driver-opt` values, service long-form options and mapping ports, and
+  context endpoint fields. A key that can't be represented raises `ValueError`
+  before lookup. Other values keep their argv.
+- `volume.copy()` and `volume.clone()` attach the volume with
+  `--mount type=volume,...` instead of `--volume`, so a name such as `/etc` can
+  no longer become a host bind. They reject empty or `/`-prefixed names and
+  paths that leave the volume with `ValueError` before building the helper
+  image or creating the clone's destination.
+- `container.stats()` and Buildx Bake `print=True` and `return_config` output
+  now raise `ParsingError` for malformed JSON. Deeply nested CLI JSON raises
+  `ParsingError` instead of an unclassified `RecursionError`. In safe
+  diagnostics the error has no payload, cause or context; raw diagnostics chain
+  the original error.
+- `image.save()` without an observation scope or deadline (including a client
+  `default_timeout`) streams the archive in 64 KiB chunks instead of
+  newline-split pieces. Lazy saves wait for the CLI to exit without a
+  0.1-second timeout that could raise `subprocess.TimeoutExpired`.
+
+### Packaging and Publishing
+
+- Restrict wheel and source distribution contents, verify their member paths
+  and declared dependencies before delivery, and build with a hash-pinned backend.
+- Use PyPI Trusted Publishing and require matching per-file provenance before
+  issuing a publication receipt. Keep the GitHub token out of curl's arguments.
+
 ## 1.3.3
 
 ### Static Typing

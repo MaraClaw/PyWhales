@@ -1,5 +1,6 @@
 """Task logs launched through a recording fake CLI, without a daemon."""
 
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -121,3 +122,23 @@ def test_expired_deadline_kills_the_local_cli(tmp_path: Path) -> None:
     )
     with pytest.raises(DockerTimeout):
         client.task.logs(TASK_ID, timeout=0.5)
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("logs", lambda c: c.task.logs("--bad")),
+    ("inspect", lambda c: c.task.inspect("--bad")),
+    ("inspect-list", lambda c: c.task.inspect([TASK_ID, "--bad"])),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []

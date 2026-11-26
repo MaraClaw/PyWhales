@@ -15,7 +15,13 @@ from pydantic import JsonValue, TypeAdapter
 import pywhales.components.buildx.cli_wrapper
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._json_output import JsonOutputParser
-from pywhales.utils import MappedProcessStream, run, to_list, validate_timeout
+from pywhales.utils import (
+    MappedProcessStream,
+    run,
+    to_list,
+    validate_operands,
+    validate_timeout,
+)
 
 type ReplayOutput = str | Mapping[str, str | Path]
 type ReplayProgress = Literal["auto", "plain", "tty", "quiet", "rawjson"]
@@ -190,8 +196,9 @@ class BuildxReplayCLI(DockerCLICaller):
             when `stream_logs=True`; otherwise `None` after the CLI completes.
 
         Raises:
-            ValueError: `timeout` is not positive and finite, or `dry_run` is
-                combined with `stream_logs`. Raised before the CLI is looked up.
+            ValueError: `timeout` is not positive and finite, `dry_run` is
+                combined with `stream_logs`, or `subject` starts with `-`. Raised
+                before the CLI is looked up.
             ParsingError: The dry-run output is malformed or is not a JSON
                 object. Safe mode withholds the payload and chains no cause; a
                 client with `raw_diagnostics=True` chains the original error.
@@ -202,6 +209,8 @@ class BuildxReplayCLI(DockerCLICaller):
         validate_timeout(timeout)
         if dry_run and stream_logs:
             raise ValueError("dry_run cannot be combined with stream_logs")
+        validate_operands(subject)
+        output_specs = _output_specs(outputs)
         full_cmd = Command([*self.docker_cmd, "buildx", "replay", "build"])
         full_cmd.add_flag("--debug", debug)
         full_cmd.add_simple_arg("--builder", builder)
@@ -209,7 +218,7 @@ class BuildxReplayCLI(DockerCLICaller):
             full_cmd.extend(["--dry-run", "--format", "json"])
         full_cmd.add_flag("--load", load)
         full_cmd.add_simple_arg("--network", network)
-        full_cmd.add_args_iterable("--output", _output_specs(outputs))
+        full_cmd.add_args_iterable("--output", output_specs)
         full_cmd.add_args_iterable_or_single("--platform", to_list(platforms))
         full_cmd.add_simple_arg("--progress", progress)
         full_cmd.add_flag("--push", push)
