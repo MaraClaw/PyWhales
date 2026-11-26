@@ -1900,6 +1900,101 @@ def test_distribution_inspection_rejects_build_sidecar() -> None:
         inspect(files, "0.6.1")
 
 
+@pytest.mark.parametrize(
+    "name", ["pywhales/AGENTS.md", "checkout.pth", "pywhales-0.6.2.dist-info/RECORD"]
+)
+def test_distribution_inspection_rejects_unexpected_wheel_members(name: str) -> None:
+    files = distributions()
+    contents = archives.zip_files(files[WHEEL], limits.DISTRIBUTION) | {name: b""}
+
+    with pytest.raises(Rejected, match=r"^unexpected wheel member$"):
+        inspect(files | {WHEEL: zipped(contents)}, "0.6.1")
+
+
+@pytest.mark.parametrize("is_directory", [False, True])
+def test_distribution_inspection_rejects_stray_sdist_directory(
+    is_directory: bool,
+) -> None:
+    files = distributions()
+    result = io.BytesIO()
+    with tarfile.open(fileobj=result, mode="w:gz") as archive:
+        for name, data in archives.tar_files(files[SDIST], limits.DISTRIBUTION).items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+        stray = tarfile.TarInfo(
+            "pywhales-0.6.1/docs" if is_directory else "pywhales-0.6.1/docs/leaked.py"
+        )
+        if is_directory:
+            stray.type = tarfile.DIRTYPE
+        archive.addfile(stray)
+
+    with pytest.raises(Rejected, match=r"^unexpected sdist member$"):
+        inspect(files | {SDIST: result.getvalue()}, "0.6.1")
+
+
+@pytest.mark.parametrize("kind", [WHEEL, SDIST])
+@pytest.mark.parametrize(
+    "requirement",
+    ["undeclared-package>=1", "botocore>=1", 'botocore>=1; extra == "other"'],
+)
+def test_distribution_inspection_rejects_undeclared_requirements(
+    kind: str, requirement: str
+) -> None:
+    files = distributions()
+    header = f"Requires-Dist: {requirement}\n".encode()
+    if kind == WHEEL:
+        contents = archives.zip_files(files[kind], limits.DISTRIBUTION)
+        contents["pywhales-0.6.1.dist-info/METADATA"] += header
+        files[kind] = zipped(contents)
+    else:
+        contents = archives.tar_files(files[kind], limits.DISTRIBUTION)
+        contents["pywhales-0.6.1/PKG-INFO"] += header
+        files[kind] = tarred(contents, compressed=True)
+
+    with pytest.raises(Rejected, match=r"^unexpected distribution dependency$"):
+        inspect(files, "0.6.1")
+
+
+def test_distribution_inspection_accepts_clean_setuptools_members_and_requirements() -> (
+    None
+):
+    metadata = (
+        b"Name: pywhales\nVersion: 0.6.1\nRequires-Dist: pydantic>=2\n"
+        b"Requires-Dist: TYPING.Extensions>=4\nRequires-Dist: orjson>=3\n"
+        b'Provides-Extra: ecr\nRequires-Dist: botocore>=1; extra == "ecr"\n'
+    )
+    package = {"pywhales/__init__.py": b"", "pywhales/py.typed": b""}
+    wheel = zipped(
+        package
+        | {
+            "pywhales-0.6.1.dist-info/METADATA": metadata,
+            "pywhales-0.6.1.dist-info/RECORD": b"",
+            "pywhales-0.6.1.dist-info/licenses/LICENSE": b"MIT",
+        }
+    )
+    source = package | {
+        "PKG-INFO": metadata,
+        "setup.cfg": b"",
+        "pywhales.egg-info/PKG-INFO": metadata,
+        "pywhales.egg-info/SOURCES.txt": b"",
+        "pywhales.egg-info/entry_points.txt": b"",
+        "pywhales.egg-info/top_level.txt": b"",
+        "pywhales.egg-info/dependency_links.txt": b"",
+        "pywhales.egg-info/requires.txt": b"",
+    }
+    inspect(
+        {
+            WHEEL: wheel,
+            SDIST: tarred(
+                {f"pywhales-0.6.1/{name}": data for name, data in source.items()},
+                compressed=True,
+            ),
+        },
+        "0.6.1",
+    )
+
+
 @pytest.mark.parametrize("checkout_import", [False, True])
 def test_smoke_checks_actual_uv_installs_with_cache_backed_module_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkout_import: bool
@@ -1920,7 +2015,13 @@ def test_smoke_checks_actual_uv_installs_with_cache_backed_module_paths(
         "pywhales-0.6.1.dist-info/METADATA": b"Metadata-Version: 2.1\nName: pywhales\nVersion: 0.6.1\n",
         "pywhales-0.6.1.dist-info/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
     }
+    contents["pywhales-0.6.1.dist-info/RECORD"] = "".join(
+        f"{filename},,\n" for filename in contents
+    ).encode()
+    wheel = zipped(contents)
     if checkout_import:
+        # The input wheel must pass inspection. Simulate checkout shadowing in
+        # the wheel built by uv from the sdist, after input inspection instead.
         (tmp_path / "pywhales").mkdir()
         (tmp_path / "pywhales" / "__init__.py").write_bytes(package)
         contents["checkout.pth"] = (
@@ -1929,14 +2030,14 @@ def test_smoke_checks_actual_uv_installs_with_cache_backed_module_paths(
     contents["pywhales-0.6.1.dist-info/RECORD"] = "".join(
         f"{filename},,\n" for filename in contents
     ).encode()
-    wheel = zipped(contents)
+    rebuilt_wheel = zipped(contents)
     (tmp_path / "dist").mkdir()
     (tmp_path / "dist" / WHEEL).write_bytes(wheel)
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.1"\n')
     backend = (
         "import base64,pathlib\n"
         "def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):\n"
-        f" pathlib.Path(wheel_directory, {WHEEL!r}).write_bytes(base64.b64decode({base64.b64encode(wheel)!r}))\n"
+        f" pathlib.Path(wheel_directory, {WHEEL!r}).write_bytes(base64.b64decode({base64.b64encode(rebuilt_wheel)!r}))\n"
         f" return {WHEEL!r}\n"
     ).encode()
     with tarfile.open(tmp_path / "dist" / SDIST, mode="w:gz") as archive:
@@ -1944,8 +2045,8 @@ def test_smoke_checks_actual_uv_installs_with_cache_backed_module_paths(
             "pywhales/__init__.py": package,
             "pywhales/py.typed": b"",
             "PKG-INFO": contents["pywhales-0.6.1.dist-info/METADATA"],
-            "pyproject.toml": b'[build-system]\nrequires=[]\nbuild-backend="backend"\nbackend-path=["."]\n',
-            "backend.py": backend,
+            "pyproject.toml": b'[build-system]\nrequires=[]\nbuild-backend="backend"\nbackend-path=["pywhales"]\n',
+            "pywhales/backend.py": backend,
         }.items():
             member = tarfile.TarInfo(f"pywhales-0.6.1/{filename}")
             member.size = len(data)
@@ -1955,8 +2056,9 @@ def test_smoke_checks_actual_uv_installs_with_cache_backed_module_paths(
         with pytest.raises(subprocess.CalledProcessError):
             smoke(tmp_path)
         imported = [json.loads(line) for line in record.read_text().splitlines()]
-        assert len(imported) == 1
-        assert Path(imported[0]["module"]).is_relative_to(tmp_path.resolve())
+        assert len(imported) == 2
+        assert not Path(imported[0]["module"]).is_relative_to(tmp_path.resolve())
+        assert Path(imported[1]["module"]).is_relative_to(tmp_path.resolve())
     else:
         smoke(tmp_path)
         imported = [json.loads(line) for line in record.read_text().splitlines()]
@@ -2511,7 +2613,11 @@ def tarred(files: dict[str, bytes], *, compressed: bool) -> bytes:
 
 
 def sized_distribution(kind: str) -> tuple[dict[str, bytes], dict[str, bytes]]:
-    contents = {"pywhales/py.typed": b"", "payload": b"x" * 128, "second": b"y" * 64}
+    contents = {
+        "pywhales/py.typed": b"",
+        "pywhales/payload.py": b"x" * 128,
+        "pywhales/second.py": b"y" * 64,
+    }
     metadata = b"Name: pywhales\nVersion: 0.6.1\n"
     files = distributions()
     if kind == "wheel":
@@ -2595,7 +2701,7 @@ def test_dishonest_member_metadata_cannot_bypass_actual_expansion(
     if kind in {"wheel", "sdist"}:
         files, contents = sized_distribution(kind)
         contents = {
-            name: b"x" if name.endswith("payload") else data
+            name: b"x" if name.endswith("payload.py") else data
             for name, data in contents.items()
         }
         files[WHEEL if kind == "wheel" else SDIST] = (
@@ -2614,14 +2720,14 @@ def test_dishonest_member_metadata_cannot_bypass_actual_expansion(
     tar_open = tarfile.TarFile.extractfile
 
     def zip_stream(package: zipfile.ZipFile, entry: zipfile.ZipInfo) -> IO[bytes]:
-        if entry.filename.endswith("payload"):
+        if entry.filename in {"payload", "pywhales/payload.py"}:
             return io.BytesIO(b"x" * 128)
         return zip_open(package, entry)
 
     def tar_stream(
         package: tarfile.TarFile, member: tarfile.TarInfo
     ) -> IO[bytes] | None:
-        if member.name.endswith("payload"):
+        if member.name == "payload" or member.name.endswith("/payload.py"):
             return io.BytesIO(b"x" * 128)
         return tar_open(package, member)
 

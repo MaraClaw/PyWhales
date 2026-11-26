@@ -28,8 +28,10 @@ def safe_path(name: str) -> str:
     return str(path)
 
 
-def zip_files(data: bytes, limits: ArchiveLimits) -> dict[str, bytes]:
-    """Read bounded regular ZIP members; never return partial or ambiguous data."""
+def zip_files(
+    data: bytes, limits: ArchiveLimits, *, directories: set[str] | None = None
+) -> dict[str, bytes]:
+    """Read bounded ZIP files and optionally collect explicit directories on success."""
     budget = Expansion(limits)
     files: dict[str, bytes] = {}
     seen: set[str] = set()
@@ -55,16 +57,23 @@ def zip_files(data: bytes, limits: ArchiveLimits) -> dict[str, bytes]:
                     files[name] = budget.member(stream)
     except zipfile.BadZipFile, EOFError, RuntimeError, NotImplementedError, zlib.error:
         raise Rejected("invalid ZIP archive") from None
+    if directories is not None:
+        directories.update(seen.difference(files))
     return files
 
 
 def tar_files(
-    data: bytes, limits: ArchiveLimits, *, pages: bool = False
+    data: bytes,
+    limits: ArchiveLimits,
+    *,
+    pages: bool = False,
+    directories: set[str] | None = None,
 ) -> dict[str, bytes]:
     """Read bounded regular tar members, accepting the Pages uploader's ./ root.
 
     Iterate instead of building an unbounded getmembers list. Tar parser and
     decompressor internal allocations are outside the retained-payload budget.
+    Explicit directories are optionally collected after a successful read.
     """
     budget = Expansion(limits)
     files: dict[str, bytes] = {}
@@ -97,4 +106,6 @@ def tar_files(
                     files[name] = budget.member(stream)
     except tarfile.TarError, EOFError, zlib.error:
         raise Rejected("invalid tar archive") from None
+    if directories is not None:
+        directories.update(seen.difference(files))
     return files
