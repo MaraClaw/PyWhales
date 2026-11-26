@@ -3187,3 +3187,59 @@ def test_mutating_image_call_releases_the_pin(
         with contextlib.suppress(NoSuchImage):
             assert image.repo_tags is not None
     assert len(cli.inspects()) == before + 1
+
+
+FLAG_LIKE = "--platform"
+
+IMAGE_OPERAND_CALLS = {
+    "history": lambda c: c.image.history(FLAG_LIKE),
+    "import_tag": lambda c: c.image.import_("/src.tar", FLAG_LIKE),
+    "inspect_scalar": lambda c: c.image.inspect(FLAG_LIKE),
+    "inspect_platform": lambda c: c.image.inspect(FLAG_LIKE, platform="linux/amd64"),
+    "inspect_list": lambda c: c.image.inspect(["alpine", FLAG_LIKE]),
+    "list": lambda c: c.image.list(FLAG_LIKE),
+    "pull_scalar": lambda c: c.image.pull(FLAG_LIKE),
+    "pull_list": lambda c: c.image.pull(["alpine", FLAG_LIKE]),
+    "pull_iterator": lambda c: c.image.pull(iter(["alpine", "busybox", FLAG_LIKE])),
+    "pull_all_tags": lambda c: c.image.pull(FLAG_LIKE, all_tags=True),
+    "push_scalar": lambda c: c.image.push(FLAG_LIKE),
+    "push_list": lambda c: c.image.push(["alpine", FLAG_LIKE]),
+    "push_all_tags": lambda c: c.image.push(FLAG_LIKE, all_tags=True),
+    "remove": lambda c: c.image.remove(FLAG_LIKE),
+    "remove_list": lambda c: c.image.remove(["alpine", FLAG_LIKE]),
+    "save": lambda c: c.image.save(FLAG_LIKE, "/out.tar"),
+    "save_list": lambda c: c.image.save(["alpine", FLAG_LIKE]),
+    "search": lambda c: c.image.search(FLAG_LIKE),
+    "tag_source": lambda c: c.image.tag(FLAG_LIKE, "new"),
+    "tag_target": lambda c: c.image.tag("alpine", FLAG_LIKE),
+}
+
+
+@pytest.mark.parametrize(
+    "call", IMAGE_OPERAND_CALLS.values(), ids=list(IMAGE_OPERAND_CALLS)
+)
+def test_image_rejects_flag_like_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.image.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        patch(
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert FLAG_LIKE not in str(rejected.value)
+    assert FLAG_LIKE not in repr(rejected.value.args)

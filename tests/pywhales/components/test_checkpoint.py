@@ -1,12 +1,14 @@
 """Checkpoint command group asserted as exact argv; never launches Docker."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from pywhales import DockerClient
+from pywhales.client_config import ClientConfig
 from pywhales.components.checkpoint.cli_wrapper import CheckpointCLI
 from pywhales.exceptions import DockerException, DockerTimeout
 from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
@@ -145,3 +147,40 @@ def test_failed_create_still_releases_the_pin(tmp_path: Path) -> None:
         with pytest.raises(DockerException):
             checkpoints(client).create(container, "cp1")
         assert container.size_rw is None
+
+
+FLAG_LIKE = "--leave-running"
+
+CHECKPOINT_OPERAND_CALLS = {
+    "create_container": lambda c: c.checkpoint.create(FLAG_LIKE, "cp1"),
+    "create_checkpoint": lambda c: c.checkpoint.create("web", FLAG_LIKE),
+    "list_container": lambda c: c.checkpoint.list(FLAG_LIKE),
+    "remove_container": lambda c: c.checkpoint.remove(FLAG_LIKE, "cp1"),
+    "remove_checkpoint": lambda c: c.checkpoint.remove("web", FLAG_LIKE),
+}
+
+
+@pytest.mark.parametrize(
+    "call", CHECKPOINT_OPERAND_CALLS.values(), ids=list(CHECKPOINT_OPERAND_CALLS)
+)
+def test_checkpoint_rejects_flag_like_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.checkpoint.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert FLAG_LIKE not in str(rejected.value)
+    assert FLAG_LIKE not in repr(rejected.value.args)

@@ -1,10 +1,14 @@
+import shutil
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 import pywhales.components.buildx.imagetools.cli_wrapper as imagetools
 from pywhales import DockerClient
-from pywhales.client_config import Command
+from pywhales.client_config import ClientConfig, Command
 from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
 
 INDEX = '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json"}'
@@ -162,3 +166,43 @@ def test_create_rejects_a_bare_string_sequence_before_launch(tmp_path: Path) -> 
     with pytest.raises(TypeError):
         imagetools.create(["alpine"], platforms="linux/arm64")
     assert calls(log) == []
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+IMAGETOOLS_DASH_OPERAND_CALLS = [
+    pytest.param(
+        lambda client: client.buildx.imagetools.inspect(DASH_OPERAND), id="inspect"
+    ),
+    pytest.param(
+        lambda client: client.buildx.imagetools.create([DASH_OPERAND]),
+        id="create-first",
+    ),
+    pytest.param(
+        lambda client: client.buildx.imagetools.create(["alpine", DASH_OPERAND]),
+        id="create-later",
+    ),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", IMAGETOOLS_DASH_OPERAND_CALLS)
+def test_imagetools_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)

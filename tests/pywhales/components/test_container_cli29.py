@@ -522,3 +522,24 @@ def test_port_for_an_unpublished_port_raises_the_cli_error(tmp_path: Path) -> No
     )
     with pytest.raises(DockerException):
         client.container.port("web", 9999)
+
+
+@pytest.mark.parametrize("command", [["ls", "-la"], ["--version"]])
+def test_workload_arguments_starting_with_a_dash_reach_the_cli_unchanged(
+    tmp_path: Path, command: list[str]
+) -> None:
+    client, log = make_fake_cli(
+        tmp_path,
+        [Rule(match=("create",), stdout="cid\n"), Rule(match=("run",), stdout="out\n")],
+    )
+    client.container.run("alpine", command, pull="never")
+    client.container.create("alpine", command, pull="never")
+    client.container.execute("web", command)
+    recorded = calls(log)
+    assert recorded[0][-1 - len(command) : -len(command)] == ["alpine"]
+    assert recorded[0][-len(command) :] == command
+    assert recorded[1][-1 - len(command) : -len(command)] == ["alpine"]
+    assert recorded[1][-len(command) :] == command
+    assert recorded[2] == ["exec", "web", *command]
+    assert recorded[0][:2] == ["container", "run"]
+    assert recorded[1][:1] == ["create"]

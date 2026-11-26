@@ -1,8 +1,10 @@
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -364,3 +366,34 @@ def test_docker_client_options(docker_client: DockerClient) -> None:
         assert "Hello from Docker!" in caller_client.run("hello-world", remove=True)
     finally:
         engine.remove(force=True, volumes=True)
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+LOGIN_DASH_OPERAND_CALLS = [
+    pytest.param(lambda client: client.login(DASH_OPERAND), id="login"),
+    pytest.param(lambda client: client.logout(DASH_OPERAND), id="logout"),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", LOGIN_DASH_OPERAND_CALLS)
+def test_login_and_logout_reject_dash_server_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)

@@ -345,3 +345,54 @@ def test_stack_services_propagates_other_failures(
     assert type(caught.value) is expected
     assert cli.resolves() == [[identity[:12] for identity in ids]]
     assert cli.inspects() == ([] if formatted else [ids])
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("deploy", lambda c: c.stack.deploy("--bad")),
+    ("ps", lambda c: c.stack.ps("--bad")),
+    ("remove", lambda c: c.stack.remove("--bad")),
+    ("remove-list", lambda c: c.stack.remove(["web", "--bad"])),
+    ("services", lambda c: c.stack.services("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.stack.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)
+
+
+def test_stack_deploy_rejects_operand_before_reading_env_files(tmp_path: Path) -> None:
+    client = DockerClient()
+    with (
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        client.stack.deploy("--bad", env_files=[tmp_path / "missing.env"])
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

@@ -21,6 +21,7 @@ from pywhales.utils import (
     read_env_files,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -197,11 +198,13 @@ class StackCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, an interpolation name is disallowed, or name
+                starts with "-".
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the deploy or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(name)
         env = read_env_files([Path(x) for x in env_files])
         env.update(variables)
         validate_interpolation_environment(
@@ -258,8 +261,10 @@ class StackCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: If x starts with "-".
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
+        validate_operands(x)
         full_cmd = Command([*self.docker_cmd, "stack", "ps", "--quiet", "--no-trunc"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(x)
@@ -280,6 +285,7 @@ class StackCLI(DockerCLICaller):
                 option and keeps Docker's own default.
         """
         stacks = to_list(x)
+        validate_operands(stacks)
         if not stacks:
             return
         full_cmd = Command([*self.docker_cmd, "stack", "remove"])
@@ -317,8 +323,10 @@ class StackCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: If stack starts with "-".
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
+        validate_operands(stack)
         full_cmd = Command([*self.docker_cmd, "stack", "services", "--quiet"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(stack)

@@ -3,7 +3,7 @@ import json
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -364,3 +364,51 @@ def test_reload_and_mutating_calls_release_the_pin_of_a_hydrated_network() -> No
             assert len(cli.launches) == used + 1
             assert removed.driver is not None
             assert len(cli.launches) == used + 2
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.network.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create": lambda client: client.network.create("--leak-marker"),
+    "connect-network": lambda client: client.network.connect("--leak-marker", "ctr"),
+    "connect-container": lambda client: client.network.connect("net", "--leak-marker"),
+    "disconnect-network": lambda client: client.network.disconnect(
+        "--leak-marker", "ctr"
+    ),
+    "disconnect-container": lambda client: client.network.disconnect(
+        "net", "--leak-marker"
+    ),
+    "inspect": lambda client: client.network.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.network.inspect(["ok", "--leak-marker"]),
+    "inspect-verbose": lambda client: client.network.inspect(
+        ["ok", "--leak-marker"], verbose=True
+    ),
+    "remove": lambda client: client.network.remove("--leak-marker"),
+    "remove-list": lambda client: client.network.remove(["ok", "--leak-marker"]),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_network_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

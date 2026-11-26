@@ -6,15 +6,17 @@ Every case runs a recording Python script as the Docker CLI, so no daemon is use
 import csv
 import io
 import json
+import shutil
+import subprocess
 from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pywhales import DockerClient
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.buildx.cli_wrapper import Builder
 from pywhales.components.buildx.dap import BuildxDapCLI
 from pywhales.components.buildx.history import BuildxHistoryCLI
@@ -1026,3 +1028,41 @@ def test_unrepresentable_csv_keys_are_rejected_before_lookup(
     with pytest.raises(ValueError) as raised:
         call(client)
     assert "secret-value" not in str(raised.value)
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+BUILDX_DASH_OPERAND_CALLS = [
+    pytest.param(lambda client: client.buildx.bake(DASH_OPERAND), id="bake-scalar"),
+    pytest.param(
+        lambda client: client.buildx.bake(["web", DASH_OPERAND]), id="bake-list"
+    ),
+    pytest.param(lambda client: client.buildx.create(DASH_OPERAND), id="create"),
+    pytest.param(lambda client: client.buildx.inspect(DASH_OPERAND), id="inspect"),
+    pytest.param(lambda client: client.buildx.remove(DASH_OPERAND), id="remove"),
+    pytest.param(lambda client: client.buildx.stop(DASH_OPERAND), id="stop"),
+    pytest.param(lambda client: client.buildx.use(DASH_OPERAND), id="use"),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", BUILDX_DASH_OPERAND_CALLS)
+def test_buildx_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)

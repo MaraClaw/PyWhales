@@ -5,7 +5,7 @@ import pickle
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -576,3 +576,49 @@ def test_copied_hydrated_node_and_batch_inspected_node_hold_no_pin() -> None:
         assert pickle.loads(pickle.dumps(node))._pinned is False
         (inspected,) = client.node.inspect(ids)
         assert inspected._pinned is False
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.node.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "demote": lambda client: client.node.demote("--leak-marker"),
+    "demote-list": lambda client: client.node.demote(["ok", "--leak-marker"]),
+    "inspect": lambda client: client.node.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.node.inspect(["ok", "--leak-marker"]),
+    "inspect-pretty": lambda client: client.node.inspect(
+        ["ok", "--leak-marker"], pretty=True
+    ),
+    "promote": lambda client: client.node.promote("--leak-marker"),
+    "promote-list": lambda client: client.node.promote(["ok", "--leak-marker"]),
+    "ps": lambda client: client.node.ps("--leak-marker"),
+    "ps-list": lambda client: client.node.ps(["ok", "--leak-marker"]),
+    "remove": lambda client: client.node.remove("--leak-marker"),
+    "remove-list": lambda client: client.node.remove(["ok", "--leak-marker"]),
+    "update": lambda client: client.node.update("--leak-marker"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_node_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

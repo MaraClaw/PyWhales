@@ -33,6 +33,7 @@ from pywhales.utils import (
     ProcessStream,
     run,
     stream_stdout_and_stderr,
+    validate_operands,
     validate_timeout,
 )
 
@@ -202,7 +203,9 @@ class TaskCLI(DockerCLICaller):
         Raises:
             ParsingError: If batch shape, task identities, or duplicate snapshot
                 consistency is invalid.
+            ValueError: If a reference starts with "-".
         """
+        validate_operands(x)
         if isinstance(x, str):
             return Task(self.client_config, x)
         else:
@@ -326,7 +329,7 @@ class TaskCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or task starts with "-".
             DockerException: If Docker rejects the request, such as an unknown task.
             DockerTimeout: If the logs CLI exceeds its deadline, delivered during
                 collection or stream consumption/clean context exit.
@@ -334,6 +337,7 @@ class TaskCLI(DockerCLICaller):
                 configured stream buffer budget.
         """
         validate_timeout(timeout)
+        validate_operands(task)
         full_cmd = logs_command(
             self.docker_cmd,
             task,

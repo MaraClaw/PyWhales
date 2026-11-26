@@ -465,3 +465,30 @@ def test_stack_listing_hydration_is_keyword_only_and_opt_in(
     parameter = inspect.signature(method).parameters["hydrate"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is False
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("deploy", lambda c: c.stack.deploy("--bad", env_files=["missing.env"])),
+    ("remove-list", lambda c: c.stack.remove(["web", "--bad"])),
+    ("services", lambda c: c.stack.services("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_stack_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.stack.remove(["web-1"])
+
+    assert calls(log) == [["stack", "remove", "web-1"]]

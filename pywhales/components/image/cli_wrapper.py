@@ -75,6 +75,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -622,11 +623,13 @@ class ImageCLI(DockerCLICaller):
         Raises:
             ValueError: `timeout` is not positive and finite. Booleans are
                 rejected before any CLI is resolved.
+                An operand starts with `-`.
             NoSuchImage: The image does not exist in the selected daemon.
             ParsingError: The CLI output is not the expected JSON records.
             DockerTimeout: The CLI exceeds its deadline.
         """
         validate_timeout(timeout)
+        validate_operands(image)
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -668,6 +671,8 @@ class ImageCLI(DockerCLICaller):
         Returns:
             The imported image, inspected using the originating configuration.
         """
+        if tag is not None:
+            validate_operands(tag)
         full_cmd = Command([*self.docker_cmd, "image", "import"])
         full_cmd.add_args_iterable("--change", changes)
         full_cmd.add_simple_arg("--message", message)
@@ -736,16 +741,19 @@ class ImageCLI(DockerCLICaller):
             returns `[]`.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchImage: A requested image does not exist in the selected daemon.
             ParsingError: Batch data cannot be validated or associated with its
                 requested image reference.
         """
         if isinstance(x, str):
+            validate_operands(x)
             if platform is None:
                 return Image(self.client_config, x)
             ((_, snapshot),) = self._inspect_snapshots([x], platform)
             return snapshot
         references = list(x)
+        validate_operands(references)
         if not references:
             return []
         inspected = self._inspect_snapshots(references, platform)
@@ -1046,6 +1054,7 @@ class ImageCLI(DockerCLICaller):
         Raises:
             TypeError: `filters` is a mapping.
             ValueError: `tree` and `hydrate` are both `True`.
+                An operand starts with `-`.
             ParsingError: A hydration response is malformed or does not match
                 the listed IDs.
         """
@@ -1053,6 +1062,8 @@ class ImageCLI(DockerCLICaller):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         if tree and hydrate:
             raise ValueError("tree cannot be combined with hydrate")
+        if repository_or_tag is not None:
+            validate_operands(repository_or_tag)
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -1301,6 +1312,7 @@ class ImageCLI(DockerCLICaller):
                 an observation, `quiet=False` without streaming is rejected too.
                 With `all_tags=True`, `x` is not one string or names a tag or
                 digest; this is raised before any CLI is resolved.
+                An operand starts with `-`.
             DockerException: A transfer or subsequent image inspection fails.
             DockerTimeout: A transfer subprocess exceeds its own deadline; it is
                 killed and reaped without undoing the pull or guaranteeing that
@@ -1321,6 +1333,7 @@ class ImageCLI(DockerCLICaller):
             buffer_bytes = self.client_config.stream_buffer_bytes
 
         if repository is not None:
+            validate_operands(repository)
             return self._pull_single_tag(
                 image_name=repository,
                 quiet=quiet,
@@ -1332,6 +1345,7 @@ class ImageCLI(DockerCLICaller):
             )
 
         if isinstance(x, str):
+            validate_operands(x)
             result = self._pull_single_tag(
                 image_name=x,
                 quiet=quiet,
@@ -1346,6 +1360,7 @@ class ImageCLI(DockerCLICaller):
             return Image(self.client_config, x)
 
         images = list(OrderedDict.fromkeys(x))
+        validate_operands(images)
         if len(images) == 0:
             return _EmptyImageStream() if stream_logs else []
         if len(images) == 1:
@@ -1631,6 +1646,7 @@ class ImageCLI(DockerCLICaller):
                 observation is active and `quiet=False` without streaming.
                 With `all_tags=True`, `x` is not one string or names a tag or
                 digest; this is raised before any CLI is resolved.
+                An operand starts with `-`.
             NoSuchImage: A locally inspected reference does not exist.
             DockerException: Inspection or a push command fails.
             DockerTimeout: A transfer subprocess exceeds its own deadline; it is
@@ -1652,6 +1668,7 @@ class ImageCLI(DockerCLICaller):
             buffer_bytes = self.client_config.stream_buffer_bytes
 
         if repository is not None:
+            validate_operands(repository)
             return self._push_single_tag(
                 tag_or_repo=repository,
                 quiet=quiet,
@@ -1663,6 +1680,7 @@ class ImageCLI(DockerCLICaller):
             )
 
         images = list(OrderedDict.fromkeys(to_list(x)))
+        validate_operands(images)
 
         # this is just to raise a correct exception if the images don't exist
         self.inspect(images)
@@ -1797,9 +1815,11 @@ class ImageCLI(DockerCLICaller):
                 emitted as repeated options. `None` removes the whole image.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchImage: A selected image does not exist.
         """
         images = to_list(x)
+        validate_operands(images)
         if not images:
             return
         full_cmd = Command([*self.docker_cmd, "image", "rm"])
@@ -1896,6 +1916,7 @@ class ImageCLI(DockerCLICaller):
         Raises:
             ValueError: No images were supplied, or `timeout` is not positive
                 and finite. Booleans are rejected before inspection.
+                An operand starts with `-`.
             NoSuchImage: A requested image does not exist.
             DockerException: Inspection or the save command fails, with lazy save
                 failures delivered during iteration.
@@ -1908,6 +1929,7 @@ class ImageCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         image_list = [images] if isinstance(images, (str, Image)) else list(images)
+        validate_operands(image_list)
         if len(image_list) == 0:
             raise ValueError("One or more images must be provided")
 
@@ -2050,12 +2072,14 @@ class ImageCLI(DockerCLICaller):
         Raises:
             ValueError: `timeout` is not positive and finite. Booleans are
                 rejected before any CLI is resolved.
+                An operand starts with `-`.
             TypeError: `filters` is a string, bytes, or contains an item that is
                 not a pair of strings. Raised before any CLI is resolved.
             ParsingError: The CLI output is not the expected JSON records.
             DockerTimeout: The CLI exceeds its deadline.
         """
         validate_timeout(timeout)
+        validate_operands(term)
         full_cmd = Command(
             [*self.docker_cmd, "search", "--format", "{{json .}}", "--no-trunc"]
         )
@@ -2079,8 +2103,10 @@ class ImageCLI(DockerCLICaller):
             new_tag: The tag to add to the Docker image.
 
         Raises:
+            ValueError: An operand starts with `-`.
             NoSuchImage: The source image does not exist.
         """
+        validate_operands([source_image, new_tag])
         full_cmd = Command(
             [
                 *self.docker_cmd,

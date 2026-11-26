@@ -31,7 +31,7 @@ from pywhales.components.node.models import (
 )
 from pywhales.enums import NodeAvailabilityInput, NodeRoleInput
 from pywhales.exceptions import DockerException
-from pywhales.utils import format_filters_for_cli, run, to_list
+from pywhales.utils import format_filters_for_cli, run, to_list, validate_operands
 
 type NodeListFilter = (
     tuple[Literal["id"], str]
@@ -196,6 +196,7 @@ class NodeCLI(DockerCLICaller):
             x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "demote"])
@@ -232,10 +233,12 @@ class NodeCLI(DockerCLICaller):
             text for all references, or an empty string for an empty list.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If response identities cannot be associated unambiguously
                 with the requests or snapshots are inconsistent.
         """
         references = to_list(x)
+        validate_operands(references)
         if not references:
             return "" if pretty else []
         if pretty:
@@ -313,6 +316,7 @@ class NodeCLI(DockerCLICaller):
             x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "promote"])
@@ -351,6 +355,7 @@ class NodeCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up, even for an empty selection.
+            ValueError: A node starts with `-`. Nothing is launched.
         """
         filter_args = [] if filters is None else format_filters_for_cli(filters)
         if x is None:
@@ -359,6 +364,7 @@ class NodeCLI(DockerCLICaller):
             command_args = []
         else:
             command_args = to_list(x)
+            validate_operands(command_args)
             if not command_args:
                 return []
         full_cmd = Command([*self.docker_cmd, "node", "ps", "--quiet", "--no-trunc"])
@@ -378,6 +384,7 @@ class NodeCLI(DockerCLICaller):
             force: Force node removal when True.
         """
         nodes = to_list(x)
+        validate_operands(nodes)
         if not nodes:
             return
         full_cmd = Command([*self.docker_cmd, "node", "remove"])
@@ -406,6 +413,7 @@ class NodeCLI(DockerCLICaller):
             rm_labels: Labels to remove from the node.
             role: Set worker or manager; None leaves it unchanged.
         """
+        validate_operands(node)
         full_cmd = Command([*self.docker_cmd, "node", "update"])
 
         full_cmd.add_simple_arg("--availability", availability)

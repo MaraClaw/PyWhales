@@ -27,10 +27,12 @@ from pywhales.components.config.models import (
 )
 from pywhales.exceptions import NoSuchConfig
 from pywhales.utils import (
+    file_operand,
     format_filters_for_cli,
     format_mapping_for_cli,
     run,
     to_list,
+    validate_operands,
 )
 
 type ConfigListFilter = (
@@ -137,7 +139,14 @@ class ConfigCLI(DockerCLICaller):
 
         Returns:
             A handle to the newly created config.
+
+        Raises:
+            ValueError: The name starts with `-`, or the file is `-`, which
+                Docker reads as standard input. A relative file starting with
+                `-` is passed as `./<file>`. Nothing is launched.
         """
+        validate_operands(name)
+        file = file_operand(file)
         full_cmd = Command([*self.docker_cmd, "config", "create"])
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
         full_cmd.add_simple_arg("--template-driver", template_driver)
@@ -188,10 +197,12 @@ class ConfigCLI(DockerCLICaller):
             text for all references, or an empty string for an empty list.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If the response cannot be associated unambiguously with
                 the requested references or contains inconsistent snapshots.
         """
         references = to_list(x)
+        validate_operands(references)
         if not references:
             return "" if pretty else []
         if pretty:
@@ -266,6 +277,7 @@ class ConfigCLI(DockerCLICaller):
                 An empty selection means the function call does nothing.
         """
         configs = to_list(x)
+        validate_operands(configs)
         if not configs:
             return
         full_cmd = Command([*self.docker_cmd, "config", "rm"])

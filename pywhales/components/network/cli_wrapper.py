@@ -35,7 +35,13 @@ from pywhales.components.network.models import (
 )
 from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchNetwork
-from pywhales.utils import format_mapping_for_cli, run, to_list, validate_timeout
+from pywhales.utils import (
+    format_mapping_for_cli,
+    run,
+    to_list,
+    validate_operands,
+    validate_timeout,
+)
 
 type NetworkListFilter = (
     tuple[Literal["driver"], str]
@@ -206,7 +212,12 @@ class NetworkCLI(DockerCLICaller):
                 allowed. None omits the option, while zero is sent.
             link_local_ips: Link-local addresses to add to the container; the
                 default adds none.
+
+        Raises:
+            ValueError: The network or container starts with `-`. Nothing is
+                launched.
         """
+        validate_operands([network, container])
         full_cmd = Command([*self.docker_cmd, "network", "connect"])
         full_cmd.add_simple_arg("--alias", alias)
         full_cmd.add_args_iterable_or_single("--driver-opt", driver_options)
@@ -271,10 +282,11 @@ class NetworkCLI(DockerCLICaller):
 
         Raises:
             ValueError: For conflicting or ambiguous pool settings, invalid
-                mapping keys, pool address values that expand as CSV, or a scope
-                other than `"local"` or `"swarm"`.
+                mapping keys, pool address values that expand as CSV, a scope
+                other than `"local"` or `"swarm"`, or a name starting with `-`.
             TypeError: For malformed option structures or boolean values.
         """
+        validate_operands(name)
         extra_options = create_options(
             gateway=gateway,
             subnet=subnet,
@@ -312,7 +324,12 @@ class NetworkCLI(DockerCLICaller):
             network: The name of the network.
             container: The container to disconnect.
             force: Force Docker to disconnect the container when True.
+
+        Raises:
+            ValueError: The network or container starts with `-`. Nothing is
+                launched.
         """
+        validate_operands([network, container])
         full_cmd = Command([*self.docker_cmd, "network", "disconnect"])
         full_cmd.add_flag("--force", force)
         full_cmd += [network, container]
@@ -370,19 +387,23 @@ class NetworkCLI(DockerCLICaller):
             order with duplicates retained as distinct handles.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If a batch response has invalid shape, inconsistent
                 duplicate snapshots, or identities that do not match the requests.
         """
         if verbose:
             references = [x] if isinstance(x, str) else list(x)
+            validate_operands(references)
             if not references:
                 return ""
             return run(
                 [*self.docker_cmd, "network", "inspect", "--verbose", *references]
             )
         if isinstance(x, str):
+            validate_operands(x)
             return Network(self.client_config, x)
         references = list(x)
+        validate_operands(references)
         if not references:
             return []
         json_str = run([*self.docker_cmd, "network", "inspect", *references])
@@ -476,6 +497,7 @@ class NetworkCLI(DockerCLICaller):
                 that doesn't exist.
         """
         selected = to_list(networks)
+        validate_operands(selected)
         if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "network", "remove"])

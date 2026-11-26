@@ -7,12 +7,15 @@ newline-delimited stream the CLI prints.
 """
 
 import inspect
+import shutil
+import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from inspect import Parameter
 from pathlib import Path
 from time import monotonic
 from typing import Literal
+from unittest.mock import Mock
 
 import pytest
 
@@ -1439,3 +1442,161 @@ def test_up_gains_no_second_prompt_option() -> None:
 )
 def test_new_commands_are_reachable_from_the_client(name: str) -> None:
     assert callable(getattr(DockerClient().compose, name))
+
+
+DASH_OPERAND = "-private-operand"
+
+
+@pytest.fixture
+def no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    lookup = Mock(side_effect=AssertionError("executable lookup"))
+    monkeypatch.setattr(ClientConfig, "get_client_call_with_path", lookup)
+    monkeypatch.setattr(shutil, "which", lookup)
+    launch = Mock(side_effect=AssertionError("launch"))
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setattr(subprocess, "run", launch)
+
+
+COMPOSE_DASH_OPERAND_CALLS = [
+    pytest.param(lambda client: client.compose.build(DASH_OPERAND), id="build-scalar"),
+    pytest.param(
+        lambda client: client.compose.build(["web", DASH_OPERAND]), id="build-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.create(DASH_OPERAND), id="create-scalar"
+    ),
+    pytest.param(
+        lambda client: client.compose.create(["web", DASH_OPERAND]), id="create-list"
+    ),
+    pytest.param(lambda client: client.compose.down(DASH_OPERAND), id="down-scalar"),
+    pytest.param(
+        lambda client: client.compose.down(["web", DASH_OPERAND]), id="down-list"
+    ),
+    pytest.param(lambda client: client.compose.kill(DASH_OPERAND), id="kill-scalar"),
+    pytest.param(
+        lambda client: client.compose.kill(["web", DASH_OPERAND]), id="kill-list"
+    ),
+    pytest.param(lambda client: client.compose.logs(DASH_OPERAND), id="logs-scalar"),
+    pytest.param(
+        lambda client: client.compose.logs(["web", DASH_OPERAND]), id="logs-list"
+    ),
+    pytest.param(lambda client: client.compose.pause(DASH_OPERAND), id="pause-scalar"),
+    pytest.param(
+        lambda client: client.compose.pause(["web", DASH_OPERAND]), id="pause-list"
+    ),
+    pytest.param(lambda client: client.compose.pull(DASH_OPERAND), id="pull-scalar"),
+    pytest.param(
+        lambda client: client.compose.pull(["web", DASH_OPERAND]), id="pull-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.restart(DASH_OPERAND), id="restart-scalar"
+    ),
+    pytest.param(
+        lambda client: client.compose.restart(["web", DASH_OPERAND]), id="restart-list"
+    ),
+    pytest.param(lambda client: client.compose.rm(DASH_OPERAND), id="rm-scalar"),
+    pytest.param(lambda client: client.compose.rm(["web", DASH_OPERAND]), id="rm-list"),
+    pytest.param(lambda client: client.compose.start(DASH_OPERAND), id="start-scalar"),
+    pytest.param(
+        lambda client: client.compose.start(["web", DASH_OPERAND]), id="start-list"
+    ),
+    pytest.param(lambda client: client.compose.stop(DASH_OPERAND), id="stop-scalar"),
+    pytest.param(
+        lambda client: client.compose.stop(["web", DASH_OPERAND]), id="stop-list"
+    ),
+    pytest.param(lambda client: client.compose.top(DASH_OPERAND), id="top-scalar"),
+    pytest.param(
+        lambda client: client.compose.top(["web", DASH_OPERAND]), id="top-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.unpause(DASH_OPERAND), id="unpause-scalar"
+    ),
+    pytest.param(
+        lambda client: client.compose.unpause(["web", DASH_OPERAND]), id="unpause-list"
+    ),
+    pytest.param(lambda client: client.compose.up(DASH_OPERAND), id="up-scalar"),
+    pytest.param(lambda client: client.compose.up(["web", DASH_OPERAND]), id="up-list"),
+    pytest.param(lambda client: client.compose.watch(DASH_OPERAND), id="watch-scalar"),
+    pytest.param(
+        lambda client: client.compose.watch(["web", DASH_OPERAND]), id="watch-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.images(DASH_OPERAND), id="images-scalar"
+    ),
+    pytest.param(
+        lambda client: client.compose.images(["web", DASH_OPERAND]), id="images-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.volumes(DASH_OPERAND), id="volumes-scalar"
+    ),
+    pytest.param(
+        lambda client: client.compose.volumes(["web", DASH_OPERAND]), id="volumes-list"
+    ),
+    pytest.param(lambda client: client.compose.ps(["web", DASH_OPERAND]), id="ps-list"),
+    pytest.param(
+        lambda client: client.compose.push(["web", DASH_OPERAND]), id="push-list"
+    ),
+    pytest.param(
+        lambda client: client.compose.events(["web", DASH_OPERAND]), id="events-list"
+    ),
+    pytest.param(lambda client: client.compose.attach(DASH_OPERAND), id="attach"),
+    pytest.param(
+        lambda client: client.compose.port(DASH_OPERAND, 80), id="port-service"
+    ),
+    pytest.param(lambda client: client.compose.port("web", "-80"), id="port-private"),
+    pytest.param(
+        lambda client: client.compose.commit(DASH_OPERAND), id="commit-service"
+    ),
+    pytest.param(
+        lambda client: client.compose.commit("web", DASH_OPERAND),
+        id="commit-repository",
+    ),
+    pytest.param(
+        lambda client: client.compose.cp((DASH_OPERAND, "/etc/hosts"), "hosts"),
+        id="cp-source",
+    ),
+    pytest.param(
+        lambda client: client.compose.cp("hosts", (DASH_OPERAND, "/etc/hosts")),
+        id="cp-destination",
+    ),
+    pytest.param(
+        lambda client: client.compose.export(DASH_OPERAND, output="bundle"), id="export"
+    ),
+    pytest.param(lambda client: client.compose.scale({DASH_OPERAND: 2}), id="scale"),
+    pytest.param(lambda client: client.compose.stats(DASH_OPERAND), id="stats"),
+    pytest.param(lambda client: client.compose.wait(DASH_OPERAND), id="wait-scalar"),
+    pytest.param(
+        lambda client: client.compose.wait(["web", DASH_OPERAND]), id="wait-list"
+    ),
+    pytest.param(lambda client: client.compose.publish(DASH_OPERAND), id="publish"),
+    pytest.param(
+        lambda client: client.compose.execute(DASH_OPERAND, ["ls"]), id="execute"
+    ),
+    pytest.param(lambda client: client.compose.run(DASH_OPERAND, ["ls"]), id="run"),
+]
+
+
+@pytest.mark.usefixtures("no_launch")
+@pytest.mark.parametrize("call", COMPOSE_DASH_OPERAND_CALLS)
+def test_compose_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert DASH_OPERAND not in str(rejected.value)
+    assert DASH_OPERAND not in repr(rejected.value.args)
+
+
+def test_compose_run_and_execute_keep_workload_arguments_starting_with_dash(
+    tmp_path: Path,
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+
+    client.compose.run("app", ["-la"], tty=False)
+    client.compose.execute("app", ["--version"], tty=False)
+
+    run_argv, exec_argv = calls(log)
+    assert run_argv == ["compose", "run", "--no-tty", "app", "-la"]
+    assert exec_argv[:2] == ["compose", "exec"]
+    assert exec_argv[-2:] == ["app", "--version"]

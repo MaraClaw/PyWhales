@@ -2443,3 +2443,78 @@ def test_context_exit_refreshes_a_pinned_snapshot_before_choosing_stop(
     verbs = [launch[2] for launch in cli.launches[launched:]]
     assert verbs == ["inspect", *(["stop"] if daemon_running else []), "rm"]
     assert identity not in cli.present
+
+
+FLAG_LIKE = "--volumes"
+
+CONTAINER_OPERAND_CALLS = {
+    "attach": lambda c: c.container.attach(FLAG_LIKE),
+    "commit_container": lambda c: c.container.commit(FLAG_LIKE),
+    "commit_tag": lambda c: c.container.commit("web", FLAG_LIKE),
+    "copy_source": lambda c: c.container.copy((FLAG_LIKE, "/etc"), "/dest"),
+    "copy_destination": lambda c: c.container.copy("/src", (FLAG_LIKE, "/etc")),
+    "create_image": lambda c: c.container.create(FLAG_LIKE, ["ls"]),
+    "run_image": lambda c: c.container.run(FLAG_LIKE, ["ls"]),
+    "run_image_never_pull": lambda c: c.container.run(FLAG_LIKE, pull="never"),
+    "diff": lambda c: c.container.diff(FLAG_LIKE),
+    "execute": lambda c: c.container.execute(FLAG_LIKE, ["ls"]),
+    "export": lambda c: c.container.export(FLAG_LIKE, "/out.tar"),
+    "inspect_scalar": lambda c: c.container.inspect(FLAG_LIKE),
+    "inspect_sized": lambda c: c.container.inspect(FLAG_LIKE, size=True),
+    "inspect_list": lambda c: c.container.inspect(["web", FLAG_LIKE]),
+    "kill": lambda c: c.container.kill(FLAG_LIKE),
+    "kill_list": lambda c: c.container.kill(["web", FLAG_LIKE]),
+    "logs": lambda c: c.container.logs(FLAG_LIKE),
+    "pause": lambda c: c.container.pause(["web", FLAG_LIKE]),
+    "port_container": lambda c: c.container.port(FLAG_LIKE),
+    "port_spec": lambda c: c.container.port("web", FLAG_LIKE),
+    "rename_container": lambda c: c.container.rename(FLAG_LIKE, "new"),
+    "rename_new_name": lambda c: c.container.rename("web", FLAG_LIKE),
+    "restart_list": lambda c: c.container.restart(["web", FLAG_LIKE]),
+    "remove": lambda c: c.container.remove(FLAG_LIKE),
+    "remove_list": lambda c: c.container.remove(["web", FLAG_LIKE]),
+    "start": lambda c: c.container.start(FLAG_LIKE),
+    "start_list": lambda c: c.container.start(["web", FLAG_LIKE]),
+    "stats": lambda c: c.container.stats(["web", FLAG_LIKE]),
+    "stop": lambda c: c.container.stop(FLAG_LIKE),
+    "stop_list": lambda c: c.container.stop(["web", FLAG_LIKE]),
+    "top": lambda c: c.container.top(FLAG_LIKE),
+    "unpause": lambda c: c.container.unpause(["web", FLAG_LIKE]),
+    "update": lambda c: c.container.update(["web", FLAG_LIKE], cpus=1),
+    "wait": lambda c: c.container.wait(FLAG_LIKE),
+    "wait_list": lambda c: c.container.wait(["web", FLAG_LIKE]),
+}
+
+
+@pytest.mark.parametrize(
+    "call", CONTAINER_OPERAND_CALLS.values(), ids=list(CONTAINER_OPERAND_CALLS)
+)
+def test_container_rejects_flag_like_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.container.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        patch(
+            "pywhales.components.container.cli_wrapper.stream_stdout_and_stderr",
+            side_effect=AssertionError("launch"),
+        ),
+        patch(
+            "pywhales.components.image.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert FLAG_LIKE not in str(rejected.value)
+    assert FLAG_LIKE not in repr(rejected.value.args)

@@ -1183,3 +1183,31 @@ def test_unrepresentable_long_form_keys_precede_executable_lookup(
     with pytest.raises(ValueError) as raised:
         client.service.create("img", None, **options)
     assert "secret-value" not in str(raised.value)
+
+
+_REJECTED: list[tuple[str, Callable[[DockerClient], object]]] = [
+    ("inspect-list", lambda c: c.service.inspect(["web", "--bad"])),
+    ("logs", lambda c: c.service.logs("--bad")),
+    ("scale", lambda c: c.service.scale({"web": 1, "--bad": 2})),
+    ("update", lambda c: c.service.update("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_launch_nothing(
+    tmp_path: Path, call: Callable[[DockerClient], object]
+) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        call(client)
+
+    assert calls(log) == []
+
+
+def test_inner_dash_in_a_service_name_is_forwarded(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    client.service.rollback("web-1")
+
+    assert calls(log) == [["service", "rollback", "web-1"]]

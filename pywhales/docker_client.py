@@ -35,7 +35,7 @@ from pywhales.components.volume.cli_wrapper import VolumeCLI
 from pywhales.enums import ClientTypeInput, ComposeProgressInput
 from pywhales.telemetry import TelemetryObserver
 
-from .utils import DockerCamelModel, ValidPath, run
+from .utils import DockerCamelModel, ValidPath, run, validate_operands
 
 
 class ClientVersion(DockerCamelModel):
@@ -391,9 +391,13 @@ class DockerClient(DockerCLICaller):
                 stdin while still requesting ``--password-stdin``.
 
         Raises:
+            ValueError: If `server` starts with `-`. Raised before the
+                executable is looked up.
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the login command fails.
         """
+        if server is not None:
+            validate_operands(server)
         full_cmd = Command([*self.docker_cmd, "login", "--password-stdin"])
 
         full_cmd.add_simple_arg("--username", username)
@@ -416,9 +420,13 @@ class DockerClient(DockerCLICaller):
             server: Registry address; ``None`` leaves the CLI's default registry.
 
         Raises:
+            ValueError: If `server` starts with `-`. Raised before the
+                executable is looked up.
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the logout command fails.
         """
+        if server is not None:
+            validate_operands(server)
         full_cmd = Command([*self.docker_cmd, "logout"])
 
         if server is not None:

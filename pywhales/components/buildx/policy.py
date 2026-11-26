@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from pywhales.client_config import Command, DockerCLICaller
-from pywhales.utils import ValidPath, validate_timeout
+from pywhales.utils import ValidPath, validate_operands, validate_timeout
 from pywhales.utils import run as run_cli
 
 
@@ -55,13 +55,14 @@ class BuildxPolicyCLI(DockerCLICaller):
             unless `print=True`.
 
         Raises:
-            ValueError: `timeout` is not positive and finite. Raised before the
-                CLI is looked up.
+            ValueError: `timeout` is not positive and finite, or `source` starts
+                with `-`. Raised before the CLI is looked up.
             DockerTimeout: The local CLI exceeds its deadline.
             DockerException: The Buildx command fails, including when the policy
                 denies the source.
         """
         validate_timeout(timeout)
+        validate_operands(source)
         full_cmd = Command([*self.docker_cmd, "buildx", "policy", "eval"])
         full_cmd.add_flag("--debug", debug)
         full_cmd.add_simple_arg("--builder", builder)

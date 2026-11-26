@@ -32,6 +32,7 @@ from pywhales.utils import (
     format_csv_fields_for_cli,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -269,12 +270,14 @@ class ContextCLI(DockerCLICaller):
 
         Raises:
             ValueError: If `default_stack_orchestrator` or `kubernetes` is not
-                None. Raised before the Docker executable is looked up.
+                None, or `context_name` starts with "-". Raised before the Docker
+                executable is looked up.
         """
         if default_stack_orchestrator is not None or kubernetes is not None:
             raise ValueError(
                 "Docker CLI 29 removed Kubernetes contexts and stack orchestrators"
             )
+        validate_operands(context_name)
 
         full_cmd = Command([*self.docker_cmd, "context", "create"])
 
@@ -321,10 +324,12 @@ class ContextCLI(DockerCLICaller):
                 inherit the client default.
 
         Raises:
-            ValueError: If `timeout` is not positive and finite, or `output` is
-                `-`. Raised before the Docker executable is looked up.
+            ValueError: If `timeout` is not positive and finite, `output` is
+                `-`, or `context` starts with "-". Raised before the Docker
+                executable is looked up.
         """
         validate_timeout(timeout)
+        validate_operands(context)
         if output is not None:
             _require_archive_file(output)
         full_cmd = Command([*self.docker_cmd, "context", "export", context])
@@ -349,10 +354,12 @@ class ContextCLI(DockerCLICaller):
             A freshly inspected handle to the imported context.
 
         Raises:
-            ValueError: If `timeout` is not positive and finite, or `source` is
-                `-`. Raised before the Docker executable is looked up.
+            ValueError: If `timeout` is not positive and finite, `source` is
+                `-`, or `name` starts with "-". Raised before the Docker
+                executable is looked up.
         """
         validate_timeout(timeout)
+        validate_operands(name)
         _require_archive_file(source)
         run(
             Command([*self.docker_cmd, "context", "import", name, source]),
@@ -383,7 +390,10 @@ class ContextCLI(DockerCLICaller):
         Raises:
             ParsingError: If a batch response has invalid shape, inconsistent
                 snapshots, or names that do not exactly match the requests.
+            ValueError: If a name starts with "-".
         """
+        if x is not None:
+            validate_operands(x)
         if isinstance(x, str) or x is None:
             return Context(self.client_config, x)
         else:
@@ -422,6 +432,7 @@ class ContextCLI(DockerCLICaller):
             force: Force removal, including the current context.
         """
         contexts = to_list(x)
+        validate_operands(contexts)
         if not contexts:
             return
         full_cmd = Command([*self.docker_cmd, "context", "remove"])
@@ -455,6 +466,7 @@ class ContextCLI(DockerCLICaller):
         Returns:
             A freshly inspected handle to the updated context.
         """
+        validate_operands(context)
         full_cmd = Command([*self.docker_cmd, "context", "update"])
         full_cmd.add_simple_arg("--description", description)
         full_cmd.add_simple_arg("--docker", _docker_endpoint_option(docker))
@@ -471,6 +483,7 @@ class ContextCLI(DockerCLICaller):
         Returns:
             A freshly inspected handle to the selected context.
         """
+        validate_operands(context)
         full_cmd = Command([*self.docker_cmd, "context", "use", context])
         run(full_cmd)
         return self.inspect(str(context))

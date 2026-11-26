@@ -5,12 +5,12 @@ import pickle
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pywhales import Config, DockerClient
-from pywhales.client_config import ParsingError
+from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.components.config.models import ConfigInspectResult
 from pywhales.exceptions import (
     DockerException,
@@ -20,6 +20,7 @@ from pywhales.exceptions import (
     NotASwarmManager,
 )
 from pywhales.test_utils import random_name
+from tests.pywhales.components.argv_fakes import Rule, calls, make_fake_cli
 from tests.pywhales.components.hydration_fakes import (
     INSPECT_FAILURES,
     FakeCli,
@@ -592,3 +593,79 @@ def test_copied_hydrated_config_and_batch_inspected_config_hold_no_pin() -> None
         assert pickle.loads(pickle.dumps(config))._pinned is False
         (inspected,) = client.config.inspect(ids)
         assert inspected._pinned is False
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.config.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create-name": lambda client: client.config.create("--leak-marker", "payload.txt"),
+    "create-stdin-file": lambda client: client.config.create("name", "-"),
+    "inspect": lambda client: client.config.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.config.inspect(["ok", "--leak-marker"]),
+    "inspect-pretty": lambda client: client.config.inspect(
+        ["ok", "--leak-marker"], pretty=True
+    ),
+    "remove": lambda client: client.config.remove("--leak-marker"),
+    "remove-list": lambda client: client.config.remove(["ok", "--leak-marker"]),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_config_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)
+
+
+@pytest.mark.parametrize(
+    ("file", "expected"),
+    [("-x", "./-x"), (Path("-x"), "./-x"), ("--leading/file", "./--leading/file")],
+    ids=["relative-str", "relative-path", "relative-dir"],
+)
+def test_config_create_prefixes_dash_file_operand(
+    tmp_path: Path, file: str | Path, expected: str
+) -> None:
+    client, log = make_fake_cli(tmp_path, [Rule(match=("create",), stdout="new-id\n")])
+    client.config.create("name", file)
+    assert calls(log) == [["config", "create", "name", expected]]
+
+
+@pytest.mark.parametrize("kind", ["absolute-str", "absolute-path", "ordinary"])
+def test_config_create_leaves_other_file_operands_unchanged(
+    tmp_path: Path, kind: str
+) -> None:
+    client, log = make_fake_cli(tmp_path, [Rule(match=("create",), stdout="new-id\n")])
+    absolute = tmp_path / "-x"
+    file = {
+        "absolute-str": str(absolute),
+        "absolute-path": absolute,
+        "ordinary": "a/-x",
+    }[kind]
+    client.config.create("name", file)
+    assert calls(log) == [["config", "create", "name", str(file)]]
+
+
+def test_config_create_rejects_stdin_file_without_launch(tmp_path: Path) -> None:
+    client, log = make_fake_cli(tmp_path)
+    with pytest.raises(ValueError):
+        client.config.create("name", "-")
+    assert calls(log) == []

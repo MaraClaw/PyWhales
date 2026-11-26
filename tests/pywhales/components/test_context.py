@@ -594,3 +594,42 @@ def test_docker_endpoint_without_csv_syntax_keeps_its_text() -> None:
     assert config.format_for_docker_cli() == (
         "host=unix:///var/run/docker.sock,key=/certs/key.pem,skip-tls-verify=False"
     )
+
+
+type _Call = Callable[[DockerClient], object]
+
+_REJECTED: list[tuple[str, _Call]] = [
+    ("create", lambda c: c.context.create("--bad")),
+    ("export", lambda c: c.context.export("--bad")),
+    ("import", lambda c: c.context.import_("--bad", Path("archive.tar"))),
+    ("inspect", lambda c: c.context.inspect("--bad")),
+    ("inspect-list", lambda c: c.context.inspect(["web", "--bad"])),
+    ("remove", lambda c: c.context.remove("--bad")),
+    ("remove-list", lambda c: c.context.remove(["web", "--bad"])),
+    ("update", lambda c: c.context.update("--bad", "description")),
+    ("use", lambda c: c.context.use("--bad")),
+]
+
+
+@pytest.mark.parametrize(
+    "call", [call for _, call in _REJECTED], ids=[name for name, _ in _REJECTED]
+)
+def test_flag_like_operands_are_rejected_before_lookup(call: _Call) -> None:
+    client = DockerClient()
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch.object(
+            ClientConfig,
+            "get_client_call_with_path",
+            side_effect=AssertionError("command lookup"),
+        ),
+        patch(
+            "pywhales.components.context.cli_wrapper.run",
+            side_effect=AssertionError("launch"),
+        ),
+        pytest.raises(ValueError) as rejected,
+    ):
+        call(client)
+
+    assert "--bad" not in str(rejected.value)
+    assert "--bad" not in repr(rejected.value.args)

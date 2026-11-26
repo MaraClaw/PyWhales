@@ -212,6 +212,54 @@ def validate_timeout(timeout: float | None) -> None:
         raise ValueError("timeout must be positive finite seconds or None")
 
 
+def validate_operands(operands: object) -> None:
+    """Reject identifier operands that the Docker CLI would parse as flags.
+
+    Most Docker subcommands parse flags anywhere in their arguments, so a
+    caller-supplied name such as `--volumes` would otherwise change the command.
+    Call this after timeout validation and before resolving the executable.
+
+    Args:
+        operands: One operand, or an iterable of operands. Strings, bytes and
+            path-like objects count as one operand; other iterables are read
+            once, so pass a materialized collection rather than an iterator.
+            Each operand is checked by its `str()` form, as wrappers append it.
+
+    Raises:
+        ValueError: If an operand starts with `-`. The message names no operand.
+    """
+    items = (
+        operands
+        if isinstance(operands, Iterable)
+        and not isinstance(operands, str | bytes | os.PathLike)
+        else (operands,)
+    )
+    for operand in items:
+        if str(operand).startswith("-"):
+            raise ValueError("A command operand cannot start with '-'")
+
+
+def file_operand[PathT: str | os.PathLike[str]](path: PathT) -> PathT | str:
+    """Return a local file operand that the Docker CLI reads as a path.
+
+    Args:
+        path: Local file path, appended as its `str()` form.
+
+    Returns:
+        The path unchanged, or a `./`-prefixed string for a relative path
+        whose text starts with `-`.
+
+    Raises:
+        ValueError: If the path is `-`, which Docker reads as standard input.
+    """
+    text = str(path)
+    if text == "-":
+        raise ValueError("A file operand must name a file, not standard input")
+    if text.startswith("-"):
+        return f"./{text}"
+    return path
+
+
 def _debug_enabled() -> bool:
     """Return whether PYWHALES_DEBUG is exactly 1."""
     return os.environ.get("PYWHALES_DEBUG") == "1"

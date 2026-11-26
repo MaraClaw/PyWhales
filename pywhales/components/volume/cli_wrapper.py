@@ -43,6 +43,7 @@ from pywhales.utils import (
     format_csv_fields_for_cli,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -70,6 +71,7 @@ def _copy_mount(volume: Volume | str) -> str:
             path rather than a volume name, or starts with `-`.
     """
     name = str(volume)
+    validate_operands(name)
     if not name or name.startswith("/"):
         raise ValueError("A volume copy endpoint must name a volume, not a path")
     return format_csv_fields_for_cli(
@@ -271,7 +273,12 @@ class VolumeCLI(DockerCLICaller):
 
         Returns:
             An inspected handle to the volume Docker created or returned.
+
+        Raises:
+            ValueError: `volume_name` starts with `-`. Nothing is launched.
         """
+        if volume_name is not None:
+            validate_operands(volume_name)
         full_cmd = Command([*self.docker_cmd, "volume", "create"])
 
         full_cmd.add_simple_arg("--driver", driver)
@@ -313,12 +320,15 @@ class VolumeCLI(DockerCLICaller):
             duplicates retained as distinct handles.
 
         Raises:
+            ValueError: A name starts with `-`. Nothing is launched.
             ParsingError: If a batch response has invalid shape, inconsistent
                 duplicate snapshots, or names that do not match the requests.
         """
         if isinstance(x, str):
+            validate_operands(x)
             return Volume(self.client_config, x)
         references = list(x)
+        validate_operands(references)
         if not references:
             return []
         json_str = run([*self.docker_cmd, "volume", "inspect", *references])
@@ -442,6 +452,7 @@ class VolumeCLI(DockerCLICaller):
             force: Pass `--force` to Docker's removal command.
         """
         volumes = to_list(x)
+        validate_operands(volumes)
         if not volumes:
             return
         full_cmd = Command([*self.docker_cmd, "volume", "remove"])
@@ -474,10 +485,12 @@ class VolumeCLI(DockerCLICaller):
                 the client default. Expiry cannot undo a daemon-side update.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or the volume
+                starts with `-`.
             DockerTimeout: The local CLI exceeds its deadline.
         """
         validate_timeout(timeout)
+        validate_operands(volume)
         full_cmd = Command([*self.docker_cmd, "volume", "update"])
         full_cmd.add_simple_arg("--availability", availability)
         full_cmd.append(str(volume))
@@ -516,7 +529,8 @@ class VolumeCLI(DockerCLICaller):
             The destination volume handle after both copies complete.
 
         Raises:
-            ValueError: `timeout` is not positive and finite.
+            ValueError: `timeout` is not positive and finite, or the source is
+                empty or starts with `/` or `-`. Nothing is created.
             DockerTimeout: A local CLI launch exceeds its deadline.
         """
         validate_timeout(timeout)
@@ -558,8 +572,10 @@ class VolumeCLI(DockerCLICaller):
                 launch.
 
         Raises:
-            ValueError: If neither endpoint is a volume/path tuple, or `timeout`
-                is not positive and finite.
+            ValueError: If neither endpoint is a volume/path tuple, `timeout` is
+                not positive and finite, the volume name is empty or starts with
+                `/` or `-`, or the path in the volume normalizes outside it. These are
+                checked before the helper image is built.
             DockerTimeout: A local CLI launch exceeds its deadline.
         """
         validate_timeout(timeout)

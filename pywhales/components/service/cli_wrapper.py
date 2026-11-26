@@ -65,6 +65,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -632,9 +633,9 @@ class ServiceCLI(DockerCLICaller):
             TypeError: If an option or policy value has the wrong shape or type.
             ValueError: If timeout is a Boolean or is neither None nor a positive
                 finite number of seconds, an option or policy value is out of
-                range or unsupported, or require_gpu is set without a
+                range or unsupported, require_gpu is set without a
                 `kind=<non-negative integer>` request of nonzero amount in
-                generic_resources.
+                generic_resources, or image starts with "-".
             GpuSupportError: If require_gpu finds no ready, active node whose
                 advertised generic resources cover every request; its reason is
                 `no_node_capacity`. Nothing is created.
@@ -642,6 +643,7 @@ class ServiceCLI(DockerCLICaller):
                 reaped, without undoing daemon-side service creation.
         """
         validate_timeout(timeout)
+        validate_operands(image)
         policy_args = update_options(
             "update",
             update_parallelism,
@@ -783,8 +785,10 @@ class ServiceCLI(DockerCLICaller):
             NoSuchService: If Docker reports that a requested service is absent.
             ParsingError: If response identities cannot be associated unambiguously
                 with the requests or snapshots are inconsistent.
+            ValueError: If a reference starts with "-".
         """
         references = to_list(x)
+        validate_operands(references)
         if pretty:
             if not references:
                 return ""
@@ -931,13 +935,14 @@ class ServiceCLI(DockerCLICaller):
         Raises:
             NoSuchService: If the service inspection reports that it is absent.
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or service starts with "-".
             DockerTimeout: If the logs CLI exceeds its deadline, delivered during
                 collection or stream consumption/clean context exit.
             BufferError: If a record or retained stderr history exceeds the
                 configured stream buffer budget.
         """
         validate_timeout(timeout)
+        validate_operands(str(service))
         # first we verify that the service exists and raise an exception if not.
         self.inspect(str(service))
 
@@ -1064,11 +1069,13 @@ class ServiceCLI(DockerCLICaller):
 
         Raises:
             TypeError: If filters is a mapping.
+            ValueError: If a service starts with "-".
             NoSuchService: If Docker reports that a requested service is absent.
         """
         if isinstance(filters, Mapping):
             raise TypeError("filters must be an iterable of pairs, not a mapping")
         services = to_list(x)
+        validate_operands(services)
         if not services:
             return []
         full_cmd = Command([*self.docker_cmd, "service", "ps", "--quiet", "--no-trunc"])
@@ -1088,8 +1095,10 @@ class ServiceCLI(DockerCLICaller):
 
         Raises:
             NoSuchService: If Docker reports that a requested service is absent.
+            ValueError: If a service starts with "-".
         """
         selected = to_list(services)
+        validate_operands(selected)
         if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "service", "remove"])
@@ -1125,11 +1134,12 @@ class ServiceCLI(DockerCLICaller):
         Raises:
             NoSuchService: If Docker reports that the service is absent.
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or service starts with "-".
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the rollback or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(service)
         full_cmd = Command([*self.docker_cmd, "service", "rollback"])
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
@@ -1160,21 +1170,24 @@ class ServiceCLI(DockerCLICaller):
         Raises:
             NoSuchService: If inspection reports that a requested service is absent.
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or a service starts with "-".
             DockerTimeout: If the scale CLI exceeds its deadline. It is killed and
                 reaped, without undoing the scale or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
         if not new_scales:
             return
+        scale_operands = [
+            f"{service!s}={new_scale}" for service, new_scale in new_scales.items()
+        ]
+        validate_operands(scale_operands)
         try:
             # verify that the services exists
             self.inspect([str(service) for service in new_scales])
 
             full_cmd = Command([*self.docker_cmd, "service", "scale"])
             full_cmd.add_flag("--detach", detach)
-            for service, new_scale in new_scales.items():
-                full_cmd.append(f"{service!s}={new_scale}")
+            full_cmd.extend(scale_operands)
             run(full_cmd, capture_stderr=False, capture_stdout=False, timeout=timeout)
         finally:
             release_pins(new_scales)
@@ -1414,11 +1427,12 @@ class ServiceCLI(DockerCLICaller):
             TypeError: If a policy or option value has an invalid type or shape.
             ValueError: If a policy or option value is out of range or
                 unsupported, or if timeout is a Boolean or is neither None nor a
-                positive finite number of seconds.
+                positive finite number of seconds, or service starts with "-".
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the update or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(service)
         policy_args = update_options(
             "update",
             update_parallelism,

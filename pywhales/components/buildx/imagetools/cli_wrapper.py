@@ -8,7 +8,7 @@ from typing import Literal, overload
 from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._json_output import JsonOutputParser
-from pywhales.utils import ValidPath, run
+from pywhales.utils import ValidPath, run, validate_operands
 
 from .models import Manifest
 
@@ -70,10 +70,12 @@ class ImagetoolsCLI(DockerCLICaller):
             combined text when `debug=True`.
 
         Raises:
+            ValueError: `name` starts with `-`.
             ParsingError: If the output is malformed or has an unexpected shape.
                 Safe mode withholds the payload and chains no cause; a client
                 with `raw_diagnostics=True` chains the original error.
         """
+        validate_operands(name)
         full_cmd = Command([*self.docker_cmd, "buildx", "imagetools", "inspect"])
         full_cmd.add_flag("--debug", debug)
         full_cmd.add_simple_arg("--builder", builder)
@@ -192,6 +194,7 @@ class ImagetoolsCLI(DockerCLICaller):
         Raises:
             TypeError: `sources`, `tags`, `files`, or `platforms` is not a
                 non-string sequence, or `annotations` is not a mapping.
+            ValueError: A source starts with `-`.
             DockerException: The Buildx command fails.
         """
         if not isinstance(sources, Sequence) or isinstance(sources, str):
@@ -215,6 +218,7 @@ class ImagetoolsCLI(DockerCLICaller):
                 "The argument 'annotations' of the function docker.buildx.imagetools.create() must be a dict."
             )
 
+        validate_operands(sources)
         full_cmd = Command([*self.docker_cmd, "buildx", "imagetools", "create"])
         full_cmd.add_flag("--debug", debug)
         for tag in tags:

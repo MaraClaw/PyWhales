@@ -22,6 +22,7 @@ from pywhales.utils import (
     run,
     to_list,
     type_adapter,
+    validate_operands,
     validate_timeout,
 )
 
@@ -180,6 +181,7 @@ class ManifestCLI(DockerCLICaller):
             os_version: Operating-system version override, or None to omit it.
             variant: Architecture variant override, or None to omit it.
         """
+        validate_operands([name, manifest])
         full_cmd = Command([*self.docker_cmd, "manifest", "annotate"])
         full_cmd.add_simple_arg("--arch", arch)
         full_cmd.add_simple_arg("--os", os)
@@ -208,11 +210,13 @@ class ManifestCLI(DockerCLICaller):
         Returns:
             A handle to the created manifest list.
         """
+        manifest_args = to_list(manifests)
+        validate_operands([name, *manifest_args])
         full_cmd = Command([*self.docker_cmd, "manifest", "create"])
         full_cmd.add_flag("--amend", ammend)
         full_cmd.add_flag("--insecure", insecure)
         full_cmd.append(name)
-        full_cmd += to_list(manifests)
+        full_cmd += manifest_args
         return ManifestList(
             self.client_config, run(full_cmd)[22:], is_immutable_id=True
         )
@@ -249,6 +253,7 @@ class ManifestCLI(DockerCLICaller):
             A handle with the inspected manifest-list data, or the CLI's text
             with `verbose=True`.
         """
+        validate_operands(x)
         if verbose:
             return run(_inspect_command(self.client_config, x, insecure, verbose=True))
         return ManifestList(self.client_config, x, insecure=insecure)
@@ -275,13 +280,14 @@ class ManifestCLI(DockerCLICaller):
                 inspection also keeps this setting.
 
         Raises:
-            ValueError: `timeout` is not positive and finite. Booleans are
-                rejected before the preflight inspection.
+            ValueError: `timeout` is not positive and finite, or `x` starts with
+                "-". Booleans are rejected before the preflight inspection.
             DockerTimeout: The push CLI exceeds its deadline and is killed and
                 reaped, without undoing the push or guaranteeing that
                 daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(x)
         # this is just to raise a correct exception if the manifest list doesn't exist
         self.inspect(x, insecure)
 
@@ -301,6 +307,7 @@ class ManifestCLI(DockerCLICaller):
                 a no-op.
         """
         selected = to_list(manifest_lists)
+        validate_operands(selected)
         if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "manifest", "rm"])

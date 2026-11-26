@@ -29,6 +29,7 @@ from pywhales.utils import (
     format_filters_for_cli,
     run,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -199,7 +200,11 @@ class PluginCLI(DockerCLICaller):
 
         Returns:
             An inspected handle to the created plugin.
+
+        Raises:
+            ValueError: `plugin_name` starts with `-`. Nothing is launched.
         """
+        validate_operands(plugin_name)
         full_cmd = Command([*self.docker_cmd, "plugin", "create"])
         full_cmd.add_flag("--compress", compress)
         full_cmd += [plugin_name, plugin_data_directory]
@@ -213,6 +218,7 @@ class PluginCLI(DockerCLICaller):
             plugin: The plugin to disable
             force: Force the disable of an active plugin
         """
+        validate_operands(plugin)
         full_cmd = Command([*self.docker_cmd, "plugin", "disable"])
         full_cmd.add_flag("--force", force)
         full_cmd.append(plugin)
@@ -226,6 +232,7 @@ class PluginCLI(DockerCLICaller):
             timeout: Docker's HTTP client timeout in seconds. None omits the option
                 and uses Docker's default, not a local subprocess deadline.
         """
+        validate_operands(plugin)
         full_cmd = Command([*self.docker_cmd, "plugin", "enable"])
         full_cmd.add_simple_arg("--timeout", timeout)
         full_cmd.append(plugin)
@@ -268,9 +275,11 @@ class PluginCLI(DockerCLICaller):
             positional association.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If batch shape, plugin identities, or duplicate snapshot
                 consistency is invalid.
         """
+        validate_operands(x)
         if isinstance(x, str):
             return Plugin(self.client_config, x)
         else:
@@ -320,22 +329,24 @@ class PluginCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds, or if `disable_content_trust` is false.
-                Raised before the Docker executable is looked up.
+                finite number of seconds, if `disable_content_trust` is false, or
+                if the plugin name or a setting formatted as `key=value` starts
+                with `-`. Raised before the Docker executable is looked up.
             DockerTimeout: If the install CLI exceeds its deadline. It is killed and
                 reaped, without undoing the install or guaranteeing daemon-side
                 work stops.
         """
         validate_timeout(timeout)
         _require_content_trust_skipped(disable_content_trust)
+        settings = [f"{key}={value}" for key, value in configuration.items()]
+        validate_operands([plugin_name, *settings])
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "install", "--grant-all-permissions"]
         )
         full_cmd.add_simple_arg("--alias", alias)
         full_cmd.add_flag("--disable", disable)
         full_cmd.append(plugin_name)
-        for key, value in configuration.items():
-            full_cmd.append(f"{key}={value}")
+        full_cmd += settings
         run(full_cmd, timeout=timeout)
         if alias is not None:
             return Plugin(self.client_config, alias)
@@ -395,15 +406,16 @@ class PluginCLI(DockerCLICaller):
                 used by `enable()`.
 
         Raises:
-            ValueError: `timeout` is not positive and finite, or
-                `disable_content_trust` is false. Raised before the Docker
-                executable is looked up.
+            ValueError: `timeout` is not positive and finite,
+                `disable_content_trust` is false, or the plugin starts with `-`.
+                Raised before the Docker executable is looked up.
             DockerTimeout: The push CLI exceeds its deadline and is killed and
                 reaped, without undoing the push or guaranteeing that
                 daemon-side work stops.
         """
         validate_timeout(timeout)
         _require_content_trust_skipped(disable_content_trust)
+        validate_operands(plugin)
         full_cmd = Command([*self.docker_cmd, "plugin", "push"])
         full_cmd.append(plugin)
         run(full_cmd, timeout=timeout)
@@ -418,6 +430,7 @@ class PluginCLI(DockerCLICaller):
             force: Force the removal of this plugin.
         """
         plugins = to_list(x)
+        validate_operands(plugins)
         if not plugins:
             return
         full_cmd = Command([*self.docker_cmd, "plugin", "remove"])
@@ -432,10 +445,11 @@ class PluginCLI(DockerCLICaller):
             plugin: The plugin that needs its settings changed
             configuration: The new configuration options.
         """
+        settings = [f"{key}={value}" for key, value in configuration.items()]
+        validate_operands([plugin, *settings])
         full_cmd = Command([*self.docker_cmd, "plugin", "set"])
         full_cmd.append(plugin)
-        for key, value in configuration.items():
-            full_cmd.append(f"{key}={value}")
+        full_cmd += settings
         run(full_cmd)
 
     def upgrade(
@@ -466,13 +480,17 @@ class PluginCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds, or if `disable_content_trust` is false.
-                Raised before the Docker executable is looked up.
+                finite number of seconds, if `disable_content_trust` is false, or
+                if the plugin or remote starts with `-`. Raised before the Docker
+                executable is looked up.
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the upgrade or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
         _require_content_trust_skipped(disable_content_trust)
+        validate_operands(plugin)
+        if remote is not None:
+            validate_operands(remote)
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "upgrade", "--grant-all-permissions"]
         )

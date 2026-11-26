@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Literal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from pytest_mock import MockerFixture
@@ -919,3 +919,47 @@ def test_reload_and_mutating_calls_release_the_pin_of_a_hydrated_volume() -> Non
         used = len(cli.launches)
         assert removed.driver is not None
         assert len(cli.launches) == used + 1
+
+
+@pytest.fixture
+def lookup_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        ClientConfig,
+        "get_client_call_with_path",
+        Mock(side_effect=AssertionError("executable lookup")),
+    )
+    monkeypatch.setattr("shutil.which", Mock(side_effect=AssertionError("lookup")))
+    monkeypatch.setattr(
+        "pywhales.components.volume.cli_wrapper.run",
+        Mock(side_effect=AssertionError("launch")),
+    )
+
+
+DASH_OPERAND_CALLS: dict[str, Callable[[DockerClient], object]] = {
+    "create": lambda client: client.volume.create("--leak-marker"),
+    "inspect": lambda client: client.volume.inspect("--leak-marker"),
+    "inspect-list": lambda client: client.volume.inspect(["ok", "--leak-marker"]),
+    "remove": lambda client: client.volume.remove("--leak-marker"),
+    "remove-list": lambda client: client.volume.remove(["ok", "--leak-marker"]),
+    "update": lambda client: client.volume.update(
+        "--leak-marker", availability="active"
+    ),
+    "copy": lambda client: client.volume.copy(
+        ("--leak-marker", "."), "/tmp/pywhales-dash"
+    ),
+    "clone": lambda client: client.volume.clone("--leak-marker", "dest"),
+}
+
+
+@pytest.mark.usefixtures("lookup_forbidden")
+@pytest.mark.parametrize(
+    "call", DASH_OPERAND_CALLS.values(), ids=list(DASH_OPERAND_CALLS)
+)
+def test_volume_rejects_dash_operands_before_lookup(
+    call: Callable[[DockerClient], object],
+) -> None:
+    with pytest.raises(ValueError) as rejected:
+        call(DockerClient())
+
+    assert "leak-marker" not in str(rejected.value)
+    assert "leak-marker" not in repr(rejected.value.args)

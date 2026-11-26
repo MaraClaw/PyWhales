@@ -22,6 +22,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_operands,
     validate_timeout,
 )
 
@@ -187,12 +188,14 @@ class BuildxHistoryCLI(DockerCLICaller):
             The parsed record, or the combined text when `debug=True`.
 
         Raises:
+            ValueError: `ref` starts with `-`. Raised before the CLI is looked up.
             ParsingError: The output is malformed or has an unexpected shape.
                 Safe mode withholds the payload and chains no cause; a client
                 with `raw_diagnostics=True` chains the original error.
             DockerException: The Buildx command fails, for example when no record
                 matches `ref`.
         """
+        validate_operands(ref)
         full_cmd = self._command("inspect", builder=builder, debug=debug)
         if not debug:
             full_cmd.extend(["--format", "json"])
@@ -231,12 +234,13 @@ class BuildxHistoryCLI(DockerCLICaller):
             The attachment content as text, with one trailing newline removed.
 
         Raises:
-            ValueError: `digest` is given without `ref`. Raised before the CLI is
-                looked up.
+            ValueError: `digest` is given without `ref`, or `ref` or `digest`
+                starts with `-`. Raised before the CLI is looked up.
             DockerException: The Buildx command fails.
         """
         if digest is not None and ref is None:
             raise ValueError("digest requires ref")
+        validate_operands([item for item in (ref, digest) if item is not None])
         full_cmd = self._command("inspect", "attachment", builder=builder, debug=debug)
         full_cmd.add_simple_arg("--type", type)
         full_cmd.add_simple_arg("--platform", platform)
@@ -276,12 +280,13 @@ class BuildxHistoryCLI(DockerCLICaller):
             The log text, with one trailing newline removed.
 
         Raises:
-            ValueError: `timeout` is not positive and finite. Raised before the
-                CLI is looked up.
+            ValueError: `timeout` is not positive and finite, or `ref` starts with
+                `-`. Raised before the CLI is looked up.
             DockerTimeout: The local CLI exceeds its deadline.
             DockerException: The Buildx command fails.
         """
         validate_timeout(timeout)
+        validate_operands(ref)
         full_cmd = self._command("logs", builder=builder, debug=debug)
         full_cmd.add_simple_arg("--progress", progress)
         if ref is not None:
@@ -317,8 +322,9 @@ class BuildxHistoryCLI(DockerCLICaller):
                 reaped on expiry.
 
         Raises:
-            ValueError: `timeout` is not positive and finite, or `all` is combined
-                with `refs`. Raised before the CLI is looked up.
+            ValueError: `timeout` is not positive and finite, `all` is combined
+                with `refs`, or a ref starts with `-`. Raised before the CLI is
+                looked up.
             DockerTimeout: The local CLI exceeds its deadline.
             DockerException: The Buildx command fails.
         """
@@ -326,6 +332,7 @@ class BuildxHistoryCLI(DockerCLICaller):
         references = _references(refs)
         if all and references:
             raise ValueError("all cannot be combined with refs")
+        validate_operands(references)
         full_cmd = self._command("export", builder=builder, debug=debug)
         full_cmd.add_flag("--all", all)
         full_cmd.add_flag("--finalize", finalize)
@@ -406,13 +413,14 @@ class BuildxHistoryCLI(DockerCLICaller):
                 reaped on expiry.
 
         Raises:
-            ValueError: `timeout` is not positive and finite. Raised before the
-                CLI is looked up.
+            ValueError: `timeout` is not positive and finite, or `ref` starts with
+                `-`. Raised before the CLI is looked up.
             DockerTimeout: The local CLI exceeds its deadline.
             DockerException: The Buildx command fails: no matching record, or
                 no handler can open the `docker-desktop://` URL.
         """
         validate_timeout(timeout)
+        validate_operands(ref)
         full_cmd = self._command("open", builder=builder, debug=debug)
         if ref is not None:
             full_cmd.append(ref)
@@ -441,13 +449,14 @@ class BuildxHistoryCLI(DockerCLICaller):
                 does not return.
 
         Raises:
-            ValueError: `all` is combined with `refs`. Raised before the CLI is
-                looked up.
+            ValueError: `all` is combined with `refs`, or a ref starts with `-`.
+                Raised before the CLI is looked up.
             DockerException: The Buildx command fails.
         """
         references = _references(refs)
         if all and references:
             raise ValueError("all cannot be combined with refs")
+        validate_operands(references)
         full_cmd = self._command("rm", builder=builder, debug=debug)
         full_cmd.add_flag("--all", all)
         full_cmd += references
@@ -499,14 +508,15 @@ class BuildxHistoryCLI(DockerCLICaller):
             context manager on early exit.
 
         Raises:
-            ValueError: `timeout` is not positive and finite. Raised before the
-                CLI is looked up.
+            ValueError: `timeout` is not positive and finite, or `ref` starts with
+                `-`. Raised before the CLI is looked up.
             DockerTimeout: Delivered by the stream when the local CLI exceeds its
                 deadline.
             DockerException: Delivered by the stream when the CLI exits
                 unsuccessfully.
         """
         validate_timeout(timeout)
+        validate_operands(ref)
         full_cmd = self._command("trace", builder=builder, debug=debug)
         full_cmd.add_simple_arg("--addr", addr)
         full_cmd.add_simple_arg("--compare", compare)

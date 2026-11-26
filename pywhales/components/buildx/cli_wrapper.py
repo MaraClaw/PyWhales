@@ -62,6 +62,7 @@ from pywhales.utils import (
     stream_stdout_and_stderr,
     to_list,
     to_seconds,
+    validate_operands,
     validate_timeout,
 )
 
@@ -614,7 +615,8 @@ class BuildxCLI(DockerCLICaller):
         Raises:
             ValueError: `print=True` conflicts with streaming, a report call,
                 `list`, or `return_config=False`, or timeout is Boolean,
-                nonpositive, or nonfinite.
+                nonpositive, or nonfinite, an interpolation name is disallowed, or a target
+                starts with `-`.
             DockerTimeout: A local CLI exceeds its deadline; the CLI is killed
                 and reaped without guaranteeing cancellation of the build.
             DockerException: A local CLI exits unsuccessfully.
@@ -640,6 +642,10 @@ class BuildxCLI(DockerCLICaller):
         validate_interpolation_environment(
             env, strict=self.client_config.strict_interpolation_environment
         )
+
+        targets = to_list(targets)
+        validate_operands(targets)
+
         full_cmd = Command([*self.docker_cmd, "buildx", "bake"])
 
         full_cmd.add_flag("--debug", debug)
@@ -1322,6 +1328,8 @@ class BuildxCLI(DockerCLICaller):
         driver_option = (
             format_dict_for_buildx(driver_options) if driver_options != {} else None
         )
+        if context_or_endpoint is not None:
+            validate_operands(context_or_endpoint)
         full_cmd = Command([*self.docker_cmd, "buildx", "create"])
 
         full_cmd.add_flag("--debug", debug)
@@ -1521,11 +1529,14 @@ class BuildxCLI(DockerCLICaller):
 
         Raises:
             ValueError: The inspected builder is absent from the subsequent list,
-                for example because it was concurrently removed.
+                for example because it was concurrently removed, or `x` starts
+                with `-`.
         """
         # Sadly, docker buildx inspect has no json support,
         # so, it's ugly, but we grab the name from the first line and
         # then filter "docker buildx ls".
+        if x is not None:
+            validate_operands(x)
         full_cmd = Command([*self.docker_cmd, "buildx", "inspect"])
         full_cmd.add_flag("--debug", debug)
         if x is not None:
@@ -1770,11 +1781,13 @@ class BuildxCLI(DockerCLICaller):
             debug: Forward Buildx `--debug` immediately after `buildx rm`.
 
         Raises:
-            ValueError: `all_inactive` is combined with a builder. Raised before
-                any lookup or launch.
+            ValueError: `all_inactive` is combined with a builder, or the builder
+                starts with `-`. Raised before any lookup or launch.
         """
         if all_inactive and builder is not None:
             raise ValueError("all_inactive cannot be combined with a builder.")
+        if builder is not None:
+            validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "rm"])
         full_cmd.add_flag("--debug", debug)
         full_cmd.add_flag("--all-inactive", all_inactive)
@@ -1794,6 +1807,8 @@ class BuildxCLI(DockerCLICaller):
                 the current builder is stopped.
             debug: Forward Buildx `--debug` immediately after `buildx stop`.
         """
+        if builder is not None:
+            validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "stop"])
         full_cmd.add_flag("--debug", debug)
         if builder is not None:
@@ -1816,6 +1831,7 @@ class BuildxCLI(DockerCLICaller):
             global_: Builder will be used even when changing contexts
             debug: Forward Buildx `--debug` immediately after `buildx use`.
         """
+        validate_operands(builder)
         full_cmd = Command([*self.docker_cmd, "buildx", "use"])
 
         full_cmd.add_flag("--debug", debug)

@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.enums import NodeAvailabilityInput
-from pywhales.utils import ValidPath, run, validate_timeout
+from pywhales.utils import ValidPath, run, validate_operands, validate_timeout
 
 
 class SwarmCLI(DockerCLICaller):
@@ -181,11 +181,12 @@ class SwarmCLI(DockerCLICaller):
 
         Raises:
             ValueError: If timeout is a Boolean or is neither None nor a positive
-                finite number of seconds.
+                finite number of seconds, or if `manager_address` starts with `-`.
             DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
                 without undoing the join or guaranteeing daemon-side work stops.
         """
         validate_timeout(timeout)
+        validate_operands(manager_address)
         full_cmd = Command([*self.docker_cmd, "swarm", "join"])
         full_cmd.add_simple_arg("--advertise-addr", advertise_address)
         full_cmd.add_simple_arg("--availability", availability)
@@ -206,7 +207,11 @@ class SwarmCLI(DockerCLICaller):
 
         Returns:
             The selected join token from Docker's quiet output.
+
+        Raises:
+            ValueError: `node_type` starts with `-`. Nothing is launched.
         """
+        validate_operands(node_type)
         full_cmd = Command([*self.docker_cmd, "swarm", "join-token", "--quiet"])
         full_cmd.add_flag("--rotate", rotate)
         full_cmd.append(node_type)

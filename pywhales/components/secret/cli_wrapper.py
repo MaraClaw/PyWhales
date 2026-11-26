@@ -27,9 +27,11 @@ from pywhales.components.secret.models import SecretInspectResult, SecretSpec
 from pywhales.exceptions import NoSuchSecret
 from pywhales.utils import (
     ValidPath,
+    file_operand,
     format_mapping_for_cli,
     run,
     to_list,
+    validate_operands,
 )
 
 type SecretListFilter = (
@@ -134,7 +136,14 @@ class SecretCLI(DockerCLICaller):
 
         Returns:
             A handle to the new secret without an initial inspect call.
+
+        Raises:
+            ValueError: The name starts with `-`, or the file is `-`, which
+                Docker reads as standard input. A relative file starting with
+                `-` is passed as `./<file>`. Nothing is launched.
         """
+        validate_operands(name)
+        file = file_operand(file)
         full_cmd = Command([*self.docker_cmd, "secret", "create"])
         full_cmd.add_simple_arg("--driver", driver)
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
@@ -187,10 +196,12 @@ class SecretCLI(DockerCLICaller):
             never prints secret payloads.
 
         Raises:
+            ValueError: A reference starts with `-`. Nothing is launched.
             ParsingError: If response identities cannot be associated unambiguously
                 with the requests or snapshots are inconsistent.
         """
         references = to_list(x)
+        validate_operands(references)
         if not references:
             return "" if pretty else []
         if pretty:
@@ -257,6 +268,7 @@ class SecretCLI(DockerCLICaller):
                 An empty iterable does not invoke the CLI.
         """
         secrets = [x] if isinstance(x, str | Secret) else list(x)
+        validate_operands(secrets)
         if not secrets:
             return
         full_cmd = Command([*self.docker_cmd, "secret", "remove", *secrets])
