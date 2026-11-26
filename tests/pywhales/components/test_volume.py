@@ -228,7 +228,10 @@ def test_volume_copy_forwards_timeout_to_every_launch(
     assert by_step["copy"]["timeout"] == timeout
     assert by_step["remove_container"]["target"] == container_name
     assert by_step["remove_image"]["target"] == image_name
-    assert by_step["create"]["volumes"] == [("data", Path("/volume"))]
+    assert by_step["create"]["mounts"] == [["type=volume,source=data,target=/volume"]]
+    assert "volumes" not in by_step["create"]
+    copied = by_step["copy"]["destination" if to_volume else "source"]
+    assert isinstance(copied, tuple) and copied[1] == "/volume/sub"
     assert {scoped for _, scoped, _ in launches} == {timeout}
     assert get_execution_policy(client.client_config.docker_cmd).default_timeout is None
 
@@ -269,6 +272,72 @@ def test_volume_copy_without_a_volume_endpoint_launches_nothing(
         client.volume.copy("here", "there")
 
     assert launches == []
+
+
+@pytest.mark.parametrize(
+    ("volume", "path"),
+    [
+        ("/", "."),
+        ("/etc", "sub"),
+        ("", "."),
+        ("data", "../etc"),
+        ("data", "/etc"),
+        ("data", "sub/../../x"),
+        ("data", Path("../x")),
+    ],
+)
+@pytest.mark.parametrize("to_volume", [False, True], ids=["from-volume", "to-volume"])
+def test_volume_copy_rejects_host_paths_before_the_helper_build(
+    mocker: MockerFixture, volume: str, path: str | Path, to_volume: bool
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+
+    with pytest.raises(ValueError):
+        if to_volume:
+            client.volume.copy("local", (volume, path))
+        else:
+            client.volume.copy((volume, path), "local")
+
+    assert launches == []
+
+
+@pytest.mark.parametrize("source", ["/", "/etc", ""])
+def test_volume_clone_rejects_a_path_source_before_creating_anything(
+    mocker: MockerFixture, source: str
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+    run = mocker.patch.object(volume_cli, "run")
+
+    with pytest.raises(ValueError):
+        client.volume.clone(source)
+
+    assert launches == []
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("", "/volume/"),
+        (".", "/volume/."),
+        ("sub/.", "/volume/sub/."),
+        (Path("a/b"), "/volume/a/b"),
+        ("a/../b", "/volume/a/../b"),
+    ],
+)
+def test_volume_copy_keeps_the_path_forms_clone_relies_on(
+    mocker: MockerFixture, path: str | Path, expected: str
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+
+    client.volume.copy(("data", path), "local")
+
+    by_step = {step: kwargs for step, _, kwargs in launches}
+    copied = by_step["copy"]["source"]
+    assert isinstance(copied, tuple) and copied[1] == expected
 
 
 @pytest.mark.parametrize(

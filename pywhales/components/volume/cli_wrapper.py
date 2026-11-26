@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-import os
+import posixpath
 import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
+    Final,
     Literal,
     Self,
     overload,
@@ -39,6 +40,7 @@ from pywhales.exceptions import NoSuchContainer, NoSuchImage, NoSuchVolume
 from pywhales.test_utils import random_name
 from pywhales.utils import (
     ValidPath,
+    format_csv_fields_for_cli,
     run,
     to_list,
     validate_timeout,
@@ -56,6 +58,38 @@ type VolumeListFilter = (
     | tuple[Literal["dangling"], str]
 )
 type VolumeAvailability = Literal["active", "pause", "drain"]
+
+_COPY_TARGET: Final = "/volume"
+
+
+def _copy_mount(volume: Volume | str) -> str:
+    """Return the helper's quoted `type=volume` mount for a volume name.
+
+    Raises:
+        ValueError: If the name is empty, starts with `/`, the form of a host
+            path rather than a volume name, or starts with `-`.
+    """
+    name = str(volume)
+    if not name or name.startswith("/"):
+        raise ValueError("A volume copy endpoint must name a volume, not a path")
+    return format_csv_fields_for_cli(
+        {"type": "volume", "source": name, "target": _COPY_TARGET}
+    )
+
+
+def _path_in_volume(path: ValidPath) -> str:
+    """Join a path below the helper's mount, keeping `''`, `.` and `/.` forms.
+
+    Raises:
+        ValueError: If the path normalizes outside the mounted volume.
+    """
+    joined = posixpath.join(
+        _COPY_TARGET, path.as_posix() if isinstance(path, Path) else path
+    )
+    normalized = posixpath.normpath(joined)
+    if normalized != _COPY_TARGET and not normalized.startswith(f"{_COPY_TARGET}/"):
+        raise ValueError("A path inside a volume must stay within the volume")
+    return joined
 
 
 class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
@@ -486,6 +520,7 @@ class VolumeCLI(DockerCLICaller):
             DockerTimeout: A local CLI launch exceeds its deadline.
         """
         validate_timeout(timeout)
+        _copy_mount(source)
         with execution_timeout(self.client_config, timeout):
             new_volume = self.create(new_volume_name, driver, labels, options)
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -503,10 +538,11 @@ class VolumeCLI(DockerCLICaller):
         """Copy files/folders between a volume and the local filesystem.
 
         This builds a temporary image with Buildx and creates a container mounting
-        the volume. The helper container and image are removed on success and on
-        failure; if removal also fails, both errors are kept in a
-        `BaseExceptionGroup`. Use one volume endpoint and one local endpoint,
-        with the local path resolved on the Python host.
+        the volume with `--mount type=volume`, so the name is never a bind. The
+        helper container and image are removed on success and on failure; if
+        removal also fails, both errors are kept in a `BaseExceptionGroup`. Use
+        one volume endpoint and one local endpoint, with the local path resolved
+        on the Python host.
 
         Args:
             source: If `source` is a directory/file inside a Docker volume,
@@ -528,9 +564,11 @@ class VolumeCLI(DockerCLICaller):
         """
         validate_timeout(timeout)
         if isinstance(source, tuple):
-            volume_name = str(source[0])
+            mount = _copy_mount(source[0])
+            path_in_volume = _path_in_volume(source[1])
         elif isinstance(destination, tuple):
-            volume_name = str(destination[0])
+            mount = _copy_mount(destination[0])
+            path_in_volume = _path_in_volume(destination[1])
         else:
             raise ValueError("source or destination should be a tuple.")
 
@@ -541,7 +579,6 @@ class VolumeCLI(DockerCLICaller):
         buildx = pywhales.components.buildx.cli_wrapper.BuildxCLI(self.client_config)
         image_name = random_name()
         container_name = random_name()
-        volume_in_container = Path("/volume")
         failure: BaseException | None = None
         with execution_timeout(self.client_config, timeout):
             try:
@@ -563,7 +600,7 @@ class VolumeCLI(DockerCLICaller):
                     dummy_container = containers.create(
                         dummy_image,
                         name=container_name,
-                        volumes=[(volume_name, volume_in_container)],
+                        mounts=[[mount]],
                     )
                     if isinstance(source, tuple):
                         target = (
@@ -572,20 +609,14 @@ class VolumeCLI(DockerCLICaller):
                             else destination
                         )
                         containers.copy(
-                            (
-                                dummy_container,
-                                os.path.join(volume_in_container, source[1]),
-                            ),
+                            (dummy_container, path_in_volume),
                             target,
                             timeout=timeout,
                         )
-                    elif isinstance(destination, tuple):
+                    else:
                         containers.copy(
                             source,
-                            (
-                                dummy_container,
-                                os.path.join(volume_in_container, destination[1]),
-                            ),
+                            (dummy_container, path_in_volume),
                             timeout=timeout,
                         )
                 except BaseException as error:
