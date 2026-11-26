@@ -83,8 +83,42 @@ WHEEL = "pywhales-0.6.1-py3-none-any.whl"
 SDIST = "pywhales-0.6.1.tar.gz"
 BASE_URL = "https://api.github.com/repos/owner/repo/"
 PYPI = "https://pypi.org/pypi/pywhales/0.6.1/json"
+INTEGRITY = "https://pypi.org/integrity/pywhales/0.6.1"
 NOTES = "### Added\n\n- Sealed release notes."
 CHANGELOG = f"# Changelog\n\n## 0.6.1\n\n{NOTES}\n\n## 0.6.0\n\n- Earlier release.\n"
+
+
+def provenance_bundle(filename: str, digest: str) -> dict[str, JsonValue]:
+    statement = {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": filename, "digest": {"sha256": digest}}],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+        "predicate": None,
+    }
+    return {
+        "publisher": {
+            "kind": "GitHub",
+            "repository": "owner/repo",
+            "workflow": "python-publish.yml",
+            "environment": None,
+            "claims": None,
+        },
+        "attestations": [
+            {
+                "version": 1,
+                "envelope": {
+                    "statement": base64.b64encode(
+                        json.dumps(statement).encode()
+                    ).decode(),
+                    "signature": "AA==",
+                },
+                "verification_material": {
+                    "certificate": "AA==",
+                    "transparency_entries": [],
+                },
+            }
+        ],
+    }
 
 
 def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> bytes:
@@ -298,6 +332,19 @@ class Service(Transport):
                 }
             ).encode(),
         )
+
+        for filename, data in material.items():
+            self.routes[("GET", f"{INTEGRITY}/{filename}/provenance")] = Response(
+                200,
+                json.dumps(
+                    {
+                        "version": 1,
+                        "attestation_bundles": [
+                            provenance_bundle(filename, sha256(data))
+                        ],
+                    }
+                ).encode(),
+            )
 
     def receipted(self) -> None:
         self.published()
@@ -1759,6 +1806,69 @@ def test_cli_confirm_succeeds_after_missing_inventory_becomes_complete(
         invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 0
     )
     assert json.loads((output / "receipt.json").read_text())["confirmed"] is True
+    assert [
+        url for _, url, _ in service.calls if url.startswith("https://pypi.org/")
+    ] == [
+        PYPI,
+        PYPI,
+        f"{INTEGRITY}/{WHEEL}/provenance",
+        f"{INTEGRITY}/{SDIST}/provenance",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("repository", "pypi provenance repository mismatch"),
+        ("workflow", "pypi provenance workflow mismatch"),
+        ("kind", "pypi provenance publisher kind mismatch"),
+        ("digest", "pypi provenance subject mismatch"),
+        ("filename", "pypi provenance subject mismatch"),
+        ("missing", "pypi provenance not found"),
+        ("base64", "pypi provenance malformed"),
+        ("empty", "pypi provenance malformed"),
+        ("boolean-version", "pypi provenance malformed"),
+        ("oversized", "HTTP response byte budget exceeded"),
+    ],
+)
+def test_cli_confirm_refuses_invalid_provenance_without_receipt(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+    reason: str,
+) -> None:
+    service.published()
+    url = f"{INTEGRITY}/{SDIST}/provenance"
+    bundle = provenance_bundle(
+        WHEEL if fault == "filename" else SDIST,
+        "0" * 64 if fault == "digest" else sha256(service.material[SDIST]),
+    )
+    publisher = bundle["publisher"]
+    assert isinstance(publisher, dict)
+    if fault in {"repository", "workflow", "kind"}:
+        publisher[fault] = "wrong"
+    if fault == "base64":
+        bundle["attestations"] = [{"version": 1, "envelope": {"statement": "!!!"}}]
+    body = json.dumps(
+        {
+            "version": True if fault == "boolean-version" else 1,
+            "attestation_bundles": [] if fault == "empty" else [bundle],
+        }
+    ).encode()
+    if fault == "oversized":
+        cap = max(len(response.body) for response in service.routes.values())
+        monkeypatch.setattr(limits, "RESPONSE_BYTES", cap)
+        body = body.ljust(cap + 1)
+    service.routes[("GET", url)] = Response(404 if fault == "missing" else 200, body)
+
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 1
+    )
+    assert capsys.readouterr().err.splitlines() == [f"delivery rejected: {reason}"]
+    assert not output.exists()
 
 
 def test_cli_confirm_exits_nonzero_after_bounded_exhaustion(

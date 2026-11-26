@@ -1,5 +1,6 @@
 """Typed GitHub, PyPI and delivery-document boundaries."""
 
+from base64 import b64decode
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -203,6 +204,66 @@ class PyPIRelease(APIModel):
     """Version-specific PyPI file inventory."""
 
     urls: tuple[PyPIFile, ...]
+
+
+class PyPIPublisher(APIModel):
+    """GitHub-shaped Trusted Publisher identity reported by PyPI."""
+
+    kind: str
+    repository: str
+    workflow: str
+    environment: str | None
+
+
+class PyPISubject(APIModel):
+    """PEP 740 binding between a distribution filename and its digest."""
+
+    name: str
+    digest: PyPIDigest
+
+
+class PyPIStatement(APIModel):
+    """The single-subject in-toto v1 statement used by PEP 740."""
+
+    type: Literal["https://in-toto.io/Statement/v1"] = Field(alias="_type")
+    subject: tuple[PyPISubject]
+
+
+class PyPIEnvelope(APIModel):
+    """Envelope with its statement decoded at the API boundary."""
+
+    statement: PyPIStatement
+
+    @field_validator("statement", mode="before")
+    @classmethod
+    def decode_statement(cls, value: object) -> PyPIStatement:
+        """Parse the base64-encoded JSON statement without coercing input types."""
+        if not isinstance(value, str):
+            raise ValueError("expected a base64 statement")
+        return PyPIStatement.model_validate_json(b64decode(value, validate=True))
+
+
+class PyPIAttestation(APIModel):
+    """Version-1 attestation fields used in the confirmation decision."""
+
+    version: Annotated[int, Field(ge=1, le=1)]
+    envelope: PyPIEnvelope
+
+
+class PyPIAttestationBundle(APIModel):
+    """A publisher and the attestations PyPI associates with it."""
+
+    publisher: PyPIPublisher
+    attestations: Annotated[tuple[PyPIAttestation, ...], Field(min_length=1)]
+
+
+class PyPIProvenance(APIModel):
+    """Version-1 per-file response from PyPI's Integrity API."""
+
+    version: Annotated[int, Field(ge=1, le=1)]
+    attestation_bundles: Annotated[
+        tuple[PyPIAttestationBundle, ...], Field(min_length=1)
+    ]
 
 
 class GitObject(APIModel):
