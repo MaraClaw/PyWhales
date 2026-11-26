@@ -48,20 +48,6 @@ wheels = [
 ]
 
 [[package]]
-name = "boto3"
-version = "1.44.12"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-    { name = "jmespath" },
-    { name = "s3transfer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/00/96/e538b78f081041395c531cff509e505be16f1003fb4e4e87b33a2573dbec/boto3-1.44.12.tar.gz", hash = "sha256:7459cd7a476eef9a5a8044f5cd6b2dfa47cef0fcb74aefa951e154c5102b1199", size = 112746, upload-time = "2026-11-25T20:18:18.198Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/7a/251809e37bf31f726f710424979f5b22ac8c2a4ce5f53fb4b70997ef398e/boto3-1.44.12-py3-none-any.whl", hash = "sha256:9f1cf241303edb523af912ebdc001e0563301d9ba8eef076d25fe9a8bfb6efaf", size = 140171, upload-time = "2026-11-25T20:18:15.769Z" },
-]
-
-[[package]]
 name = "botocore"
 version = "1.44.12"
 source = { registry = "https://pypi.org/simple" }
@@ -817,16 +803,20 @@ name = "pywhales"
 version = "1.3.3"
 source = { editable = "." }
 dependencies = [
-    { name = "boto3" },
     { name = "orjson" },
     { name = "pydantic" },
-    { name = "s3transfer" },
     { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+ecr = [
+    { name = "botocore" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "astunparse" },
+    { name = "botocore" },
     { name = "coverage" },
     { name = "griffe" },
     { name = "markdown" },
@@ -848,16 +838,17 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.44.5" },
+    { name = "botocore", marker = "extra == 'ecr'", specifier = ">=1.44.12" },
     { name = "orjson", specifier = ">=3.13.0" },
     { name = "pydantic", specifier = ">=2.14.4" },
-    { name = "s3transfer", specifier = ">=0.19.3" },
     { name = "typing-extensions", specifier = ">=4.16.0" },
 ]
+provides-extras = ["ecr"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "astunparse", specifier = "==1.6.3" },
+    { name = "botocore", specifier = ">=1.44.12" },
     { name = "coverage", specifier = ">=7.17.5" },
     { name = "griffe", specifier = "==2.4.1" },
     { name = "markdown", specifier = "==3.11.4" },
@@ -953,18 +944,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/09/28329441dfa2c463e2d377a69d4ebbe4d51665e9dbd49fb421f3bc80d775/ruff-0.17.6-py3-none-win32.whl", hash = "sha256:c2f4af6670b7a0501904e881bb3f1f24bd0d964dec1eedbd85f0eb73786e1128", size = 9966266, upload-time = "2026-11-19T15:56:21.581Z" },
     { url = "https://files.pythonhosted.org/packages/4b/9d/18ba9730addfc7554c70d6f171fb8dc2c08e774d9fb2b98e7946ef845c59/ruff-0.17.6-py3-none-win_amd64.whl", hash = "sha256:9cd2fd9923e9806b8b6b67a3469e2258e84bd4d21e45d5a1a690afdfb9c8e57d", size = 10365847, upload-time = "2026-11-19T15:56:23.582Z" },
     { url = "https://files.pythonhosted.org/packages/70/8a/59c33e2a64a4f9672f7f842a0dc522915cfbbaffd13d37d0cec57d1c5c5d/ruff-0.17.6-py3-none-win_arm64.whl", hash = "sha256:d8b14e1473dc86ab9069cf7a2ba5041dc012f59110201844ed04cfddf07055a0", size = 9926224, upload-time = "2026-11-19T15:56:25.269Z" },
-]
-
-[[package]]
-name = "s3transfer"
-version = "0.19.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "botocore" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/49/c5/0a5ce655109cb96b8dfad36908a4e108d15f5dc2eff8fbc3146c4312e704/s3transfer-0.19.3.tar.gz", hash = "sha256:8326acc3d056d7f7b8a37110c7d2aea41f67e83f6ae79cd3b5fbcca34c726406", size = 166087, upload-time = "2026-10-19T19:19:49.751Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/a4/88f9e10498759121060b8050a1554753dfc04df39bbbcc7aad9ecc8d9440/s3transfer-0.19.3-py3-none-any.whl", hash = "sha256:24eb7535804306355e31c952a90022bf5b2f9d760f9a11062c7493a217c08553", size = 90252, upload-time = "2026-10-19T19:19:48.309Z" },
 ]
 
 [[package]]

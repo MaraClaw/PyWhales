@@ -422,7 +422,7 @@ class DockerClient(DockerCLICaller):
     ) -> None:
         """Fetch an AWS ECR token and log in using the configured Docker CLI.
 
-        Require the optional botocore dependency and network access to ECR.
+        Install the ``pywhales[ecr]`` extra for botocore. Network access to ECR is required.
         Credential and region arguments pass directly to botocore's client
         creation; omitted values use its normal configuration resolution.
         Use the first authorization response, then perform a blocking login
