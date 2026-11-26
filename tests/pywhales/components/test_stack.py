@@ -11,6 +11,12 @@ from pywhales.client_config import ClientConfig
 from pywhales.components.stack.cli_wrapper import Stack
 from pywhales.exceptions import NotASwarmManager
 from pywhales.utils import PROJECT_ROOT
+from tests.pywhales.components.hydration_fakes import (
+    INSPECT_FAILURES,
+    FakeCli,
+    fake_daemon,
+    identity_of,
+)
 
 
 @pytest.fixture
@@ -244,3 +250,98 @@ def test_stack_remove_single_selection_builds_argv_once(
         client.stack.remove(make_selection())
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "stack", "remove", "alpha"]
+
+
+def test_default_stack_services_resolves_ids_in_batches_and_stays_lazy() -> None:
+    ids = [identity_of("service", index) for index in range(101)]
+    cli = FakeCli("service", ids)
+    with fake_daemon(cli) as client:
+        services = client.stack.services("alpha")
+        assert [service.id for service in services] == ids
+        assert cli.inspects() == []
+        spec = services[0].spec
+        assert spec is not None and spec.name == "ser-0000"
+
+    truncated = [identity[:12] for identity in ids]
+    assert cli.lists() == [["docker-test", "stack", "services", "--quiet", "alpha"]]
+    assert cli.resolves() == [truncated[:100], truncated[100:]]
+    assert cli.inspects() == [[ids[0]]]
+    assert len(cli.launches) == 4
+
+
+@pytest.mark.parametrize("stage", ["resolution", "inspection"])
+def test_stack_services_skips_vanished_services_in_the_affected_chunk(
+    stage: str,
+) -> None:
+    ids = [identity_of("service", index) for index in range(6)]
+    cli = FakeCli("service", ids)
+    cli.reorder = True
+    if stage == "resolution":
+        cli.vanish_on_list = {ids[4]}
+    else:
+        cli.vanish_on_resolve = {ids[4]}
+
+    with fake_daemon(cli, chunk_size=3) as client:
+        stack = Stack(client.client_config, "alpha")
+        services = stack.services(filters={"mode": "global"}, hydrate=True)
+        assert [service.id for service in services] == [*ids[:4], ids[5]]
+        assert [
+            service.spec.name for service in services if service.spec is not None
+        ] == ["ser-0000", "ser-0001", "ser-0002", "ser-0003", "ser-0005"]
+
+    truncated = [identity[:12] for identity in ids]
+    if stage == "resolution":
+        assert cli.resolves() == [
+            truncated[:3],
+            truncated[3:],
+            truncated[3:4],
+            truncated[4:],
+            truncated[4:5],
+            truncated[5:],
+        ]
+        assert cli.inspects() == [ids[:3], [ids[3], ids[5]]]
+    else:
+        assert cli.resolves() == [truncated[:3], truncated[3:]]
+        assert cli.inspects() == [
+            ids[:3],
+            ids[3:],
+            ids[3:4],
+            ids[4:],
+            ids[4:5],
+            ids[5:],
+        ]
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "stack",
+            "services",
+            "--quiet",
+            "--filter",
+            "mode=global",
+            "alpha",
+        ]
+    ]
+    assert len(cli.launches) == 9
+
+
+@pytest.mark.parametrize("formatted", [True, False], ids=["resolution", "inspection"])
+@pytest.mark.parametrize("failure", list(INSPECT_FAILURES))
+def test_stack_services_propagates_other_failures(
+    failure: str, formatted: bool
+) -> None:
+    ids = [identity_of("service", index) for index in range(3)]
+    cli = FakeCli("service", ids)
+    expected = INSPECT_FAILURES[failure]
+    with (
+        fake_daemon(cli) as client,
+        patch(
+            "subprocess.run",
+            side_effect=cli.failing({"inspect"}, failure, formatted=formatted),
+        ),
+        pytest.raises(expected) as caught,
+    ):
+        client.stack.services("alpha", hydrate=not formatted)
+
+    assert type(caught.value) is expected
+    assert cli.resolves() == [[identity[:12] for identity in ids]]
+    assert cli.inspects() == ([] if formatted else [ids])

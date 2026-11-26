@@ -126,14 +126,21 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
         )
 
     def ps(
-        self, *, filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None
+        self,
+        *,
+        filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Return task handles listed by Docker for this node.
 
         See [`docker.node.ps`](../sub-commands/node.md#ps) for the `filters`
         argument.
+
+        Args:
+            filters: Docker task filters forwarded to the listing.
+            hydrate: Pin task inspection snapshots and omit vanished tasks.
         """
-        return NodeCLI(self.client_config).ps(self, filters=filters)
+        return NodeCLI(self.client_config).ps(self, filters=filters, hydrate=hydrate)
 
 
 ValidNode = Node | str
@@ -317,6 +324,7 @@ class NodeCLI(DockerCLICaller):
         x: ValidNode | Iterable[ValidNode] | None = None,
         *,
         filters: Mapping[str, str] | Iterable[NodePsFilter] | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more nodes.
 
@@ -329,9 +337,12 @@ class NodeCLI(DockerCLICaller):
                 and repeated keys, and an iterator is read once. The documented
                 keys are `desired-state`, `id`, `label`, and `name`. None adds
                 no filter.
+            hydrate: Pin task inspection snapshots in bounded batches, omitting
+                tasks that vanish before inspection.
 
         Returns:
-            Task handles in CLI output order, including any task history Docker lists.
+            Task handles in CLI output order, including any task history Docker
+            lists. Handles are lazy unless hydrated.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
@@ -350,13 +361,9 @@ class NodeCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "node", "ps", "--quiet", "--no-trunc"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd += command_args
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.task.cli_wrapper.Task(
-                self.client_config, id_, is_immutable_id=True
-            )
-            for id_ in ids
-        ]
+        return pywhales.components.task.cli_wrapper._listed_tasks(
+            self.client_config, run(full_cmd).splitlines(), hydrate=hydrate
+        )
 
     def remove(self, x: ValidNode | Iterable[ValidNode], force: bool = False) -> None:
         """Remove one or more nodes from the Swarm.

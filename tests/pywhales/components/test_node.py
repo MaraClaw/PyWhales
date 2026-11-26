@@ -311,6 +311,35 @@ def _node_ids(count: int) -> list[str]:
     return [identity_of("node", index) for index in range(count)]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["current-node", "handle"])
+def test_node_ps_hydrates_tasks_without_changing_selection(as_handle: bool) -> None:
+    ids = [identity_of("task", index) for index in range(3)]
+    cli = FakeCli("task", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        if as_handle:
+            node = Node(client.client_config, "worker", is_immutable_id=True)
+            tasks = node.ps(filters={"name": "api"}, hydrate=True)
+        else:
+            tasks = client.node.ps(filters={"name": "api"}, hydrate=True)
+        assert [task.id for task in tasks] == ids
+        assert [task.name for task in tasks] == ["task-0000", "task-0001", "task-0002"]
+
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "node",
+            "ps",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "name=api",
+            *(["worker"] if as_handle else []),
+        ]
+    ]
+    assert cli.inspects() == [ids[:2], ids[2:]]
+    assert len(cli.launches) == 3
+
+
 def test_hydrated_node_list_costs_one_listing_plus_one_launch_per_chunk() -> None:
     ids = _node_ids(5)
     cli = FakeCli("node", ids)

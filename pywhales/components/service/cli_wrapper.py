@@ -156,15 +156,16 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         return self._get_inspect_result().update_status
 
     def ps(
-        self, *, filters: Iterable[ServicePsFilter] | None = None
+        self, *, filters: Iterable[ServicePsFilter] | None = None, hydrate: bool = False
     ) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Return task handles associated with this service.
 
         Args:
             filters: Docker filter pairs such as `("desired-state", "running")`
                 forwarded to `docker.service.ps`, or None for no filter.
+            hydrate: Pin task inspection snapshots and omit vanished tasks.
         """
-        return ServiceCLI(self.client_config).ps(self, filters=filters)
+        return ServiceCLI(self.client_config).ps(self, filters=filters, hydrate=hydrate)
 
     def remove(self) -> None:
         """Remove this service from the Swarm.
@@ -1044,6 +1045,7 @@ class ServiceCLI(DockerCLICaller):
         x: ValidService | Iterable[ValidService],
         *,
         filters: Iterable[ServicePsFilter] | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more services.
 
@@ -1053,9 +1055,12 @@ class ServiceCLI(DockerCLICaller):
             filters: Docker filter pairs such as `("desired-state", "running")`,
                 forwarded in order with duplicates kept; None applies no filter.
                 A mapping is rejected.
+            hydrate: Pin task inspection snapshots in bounded batches, omitting
+                tasks that vanish before inspection.
 
         Returns:
-            Task handles in CLI output order, including any task history Docker lists.
+            Task handles in CLI output order, including any task history Docker
+            lists. Handles are lazy unless hydrated.
 
         Raises:
             TypeError: If filters is a mapping.
@@ -1071,13 +1076,9 @@ class ServiceCLI(DockerCLICaller):
             "--filter", (f"{key}={value}" for key, value in filters or ())
         )
         full_cmd.extend(services)
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.task.cli_wrapper.Task(
-                self.client_config, id_, is_immutable_id=True
-            )
-            for id_ in ids
-        ]
+        return pywhales.components.task.cli_wrapper._listed_tasks(
+            self.client_config, run(full_cmd).splitlines(), hydrate=hydrate
+        )
 
     def remove(self, services: ValidService | Iterable[ValidService]) -> None:
         """Remove one or more Swarm services.

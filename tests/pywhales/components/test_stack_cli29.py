@@ -349,6 +349,32 @@ def test_handle_ps_forwards_filters(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_stack_ps_hydrates_tasks_with_one_additional_launch(
+    tmp_path: Path, as_handle: bool
+) -> None:
+    client, log = make_fake_cli(
+        tmp_path,
+        [
+            Rule(match=("ps",), stdout="t2\nt1\n"),
+            Rule(
+                match=("inspect", "--type", "task"),
+                stdout='[{"ID":"t1","Slot":1},{"ID":"t2","Slot":2}]',
+            ),
+        ],
+    )
+    with patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 0):
+        if as_handle:
+            tasks = Stack(client.client_config, "alpha").ps(hydrate=True)
+        else:
+            tasks = client.stack.ps("alpha", hydrate=True)
+        assert [(task.id, task.slot) for task in tasks] == [("t2", 2), ("t1", 1)]
+    assert calls(log) == [
+        ["stack", "ps", "--quiet", "--no-trunc", "alpha"],
+        ["inspect", "--type", "task", "t2", "t1"],
+    ]
+
+
 def test_services_forward_filter_pairs_before_the_stack(tmp_path: Path) -> None:
     client, log = make_fake_cli(tmp_path)
     assert (
@@ -428,3 +454,14 @@ def test_listing_filters_are_keyword_only_with_a_none_default(
     parameter = inspect.signature(method).parameters["filters"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is None
+
+
+@pytest.mark.parametrize(
+    "method", [StackCLI.ps, StackCLI.services, Stack.ps, Stack.services]
+)
+def test_stack_listing_hydration_is_keyword_only_and_opt_in(
+    method: Callable[..., object],
+) -> None:
+    parameter = inspect.signature(method).parameters["hydrate"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False

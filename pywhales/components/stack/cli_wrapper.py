@@ -12,7 +12,9 @@ import pywhales.components.service.cli_wrapper
 import pywhales.components.task.cli_wrapper
 from pywhales._environment import validate_interpolation_environment
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.components._hydration import hydrate_handles, resolve_identities
 from pywhales.enums import ImageResolutionModeInput
+from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
     ValidPath,
     format_filters_for_cli,
@@ -66,14 +68,21 @@ class Stack:
         StackCLI(self.client_config).remove(self, detach=detach)
 
     def ps(
-        self, *, filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None
+        self,
+        *,
+        filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Return task handles associated with this stack.
 
         See [`docker.stack.ps`](../sub-commands/stack.md#ps) for the `filters`
         argument.
+
+        Args:
+            filters: Docker task filters forwarded to the listing.
+            hydrate: Pin task inspection snapshots and omit vanished tasks.
         """
-        return StackCLI(self.client_config).ps(self, filters=filters)
+        return StackCLI(self.client_config).ps(self, filters=filters, hydrate=hydrate)
 
     def services(
         self,
@@ -81,13 +90,24 @@ class Stack:
         filters: Mapping[str, str]
         | Iterable[pywhales.components.service.cli_wrapper.ServiceListFilter]
         | None = None,
+        hydrate: bool = False,
     ) -> list[pywhales.components.service.cli_wrapper.Service]:
         """Return service handles associated with this stack.
 
         See [`docker.stack.services`](../sub-commands/stack.md#services) for the
         `filters` argument.
+
+        Args:
+            filters: Docker service filters forwarded to the listing.
+            hydrate: Pin service inspection snapshots after batched ID resolution.
+
+        Returns:
+            Lazy handles unless hydrated. Services that vanish during resolution
+            or hydration are omitted.
         """
-        return StackCLI(self.client_config).services(self, filters=filters)
+        return StackCLI(self.client_config).services(
+            self, filters=filters, hydrate=hydrate
+        )
 
 
 ValidStack = str | Stack
@@ -216,6 +236,7 @@ class StackCLI(DockerCLICaller):
         x: ValidStack,
         *,
         filters: Mapping[str, str] | Iterable[StackPsFilter] | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with a stack.
 
@@ -226,9 +247,12 @@ class StackCLI(DockerCLICaller):
                 and repeated keys, and an iterator is read once. The documented
                 keys are `desired-state`, `id`, `name`, and `node`. Docker
                 combines repeated filters as an OR. None adds no filter.
+            hydrate: Pin task inspection snapshots in bounded batches, omitting
+                tasks that vanish before inspection.
 
         Returns:
-            Task handles in CLI output order, including any task history Docker lists.
+            Task handles in CLI output order, including any task history Docker
+            lists. Handles are lazy unless hydrated.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
@@ -240,13 +264,9 @@ class StackCLI(DockerCLICaller):
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(x)
 
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.task.cli_wrapper.Task(
-                self.client_config, id_, is_immutable_id=True
-            )
-            for id_ in ids
-        ]
+        return pywhales.components.task.cli_wrapper._listed_tasks(
+            self.client_config, run(full_cmd).splitlines(), hydrate=hydrate
+        )
 
     def remove(
         self, x: ValidStack | Iterable[ValidStack], *, detach: bool | None = None
@@ -274,6 +294,7 @@ class StackCLI(DockerCLICaller):
         filters: Mapping[str, str]
         | Iterable[pywhales.components.service.cli_wrapper.ServiceListFilter]
         | None = None,
+        hydrate: bool = False,
     ) -> builtins.list[pywhales.components.service.cli_wrapper.Service]:
         """List the services present in the stack.
 
@@ -284,10 +305,13 @@ class StackCLI(DockerCLICaller):
                 order and repeated keys, and an iterator is read once. The
                 supported keys are `id`, `label`, `mode`, and `name`. Docker
                 combines repeated filters as an OR. None adds no filter.
+            hydrate: Pin service inspection snapshots in bounded batches after
+                resolving the listed IDs.
 
         Returns:
-            Service handles in CLI output order, inspected individually to resolve
-            their full IDs.
+            Service handles in CLI output order, with full IDs resolved in
+            bounded batches. Handles are lazy unless hydrated. Services that
+            vanish during resolution or hydration are omitted.
 
         Raises:
             TypeError: If filters is a string, bytes, or an iterable containing
@@ -298,11 +322,35 @@ class StackCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_cmd, "stack", "services", "--quiet"])
         full_cmd.add_args_iterable("--filter", filter_args)
         full_cmd.append(stack)
-        ids = run(full_cmd).splitlines()
-        return [
-            pywhales.components.service.cli_wrapper.Service(self.client_config, id_)
-            for id_ in ids
+        full_ids = resolve_identities(
+            run(full_cmd).splitlines(),
+            lambda ids: run(
+                Command(
+                    [
+                        *self.docker_cmd,
+                        "service",
+                        "inspect",
+                        *ids,
+                        "--format",
+                        "{{.ID}}",
+                    ]
+                )
+            ),
+            NoSuchService,
+        )
+        services = [
+            pywhales.components.service.cli_wrapper.Service(
+                self.client_config, id_, is_immutable_id=True
+            )
+            for id_ in full_ids
         ]
+        if not hydrate:
+            return services
+        return hydrate_handles(
+            services,
+            lambda ids: run(Command([*self.docker_cmd, "service", "inspect", *ids])),
+            NoSuchService,
+        )
 
 
 def _add_tristate_flag(command: Command, flag: str, value: bool | None) -> None:

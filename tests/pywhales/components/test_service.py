@@ -696,6 +696,35 @@ def _service_ids(count: int) -> list[str]:
     return [identity_of("service", index) for index in range(count)]
 
 
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_service_ps_hydrates_tasks_with_existing_filters(as_handle: bool) -> None:
+    ids = [identity_of("task", index) for index in range(3)]
+    cli = FakeCli("task", ids)
+    with fake_daemon(cli, chunk_size=2) as client:
+        service = Service(client.client_config, "api", is_immutable_id=True)
+        if as_handle:
+            tasks = service.ps(filters=[("name", "api")], hydrate=True)
+        else:
+            tasks = client.service.ps(service, filters=[("name", "api")], hydrate=True)
+        assert [task.id for task in tasks] == ids
+        assert [task.name for task in tasks] == ["task-0000", "task-0001", "task-0002"]
+
+    assert cli.lists() == [
+        [
+            "docker-test",
+            "service",
+            "ps",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "name=api",
+            "api",
+        ]
+    ]
+    assert cli.inspects() == [ids[:2], ids[2:]]
+    assert len(cli.launches) == 3
+
+
 def _truncated(ids: list[str]) -> list[str]:
     return [identity[:12] for identity in ids]
 

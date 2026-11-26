@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Literal, overload, override
 
@@ -12,9 +13,11 @@ import pywhales.components.service.cli_wrapper
 from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
     ClientConfig,
+    Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pywhales.components._hydration import hydrate_handles
 from pywhales.components.service._logs import logs_command
 from pywhales.components.task.models import (
     AssignedGenericResources,
@@ -24,6 +27,7 @@ from pywhales.components.task.models import (
     TaskStatus,
 )
 from pywhales.enums import TaskState
+from pywhales.exceptions import DockerException
 from pywhales.utils import (
     ProcessStream,
     run,
@@ -111,19 +115,65 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
 ValidTask = str | Task
 
 
+class _TaskGone(DockerException):
+    """Signal a vanished task within listing hydration only."""
+
+
+def _listed_tasks(
+    client_config: ClientConfig, identities: Sequence[str], *, hydrate: bool
+) -> list[Task]:
+    """Build task handles in listing order, optionally pinning their snapshots.
+
+    Args:
+        client_config: Settings of the client that listed the tasks.
+        identities: Full task IDs from the listing.
+        hydrate: Inspect in bounded batches and omit tasks that have vanished.
+
+    Returns:
+        Task handles in listing order.
+    """
+    tasks = [
+        Task(client_config, identity, is_immutable_id=True) for identity in identities
+    ]
+    if not hydrate:
+        return tasks
+
+    def inspect_json(ids: Sequence[str]) -> str:
+        try:
+            return run(
+                Command([*client_config.docker_cmd, "inspect", "--type", "task", *ids])
+            )
+        except DockerException as error:
+            stderr = error.stderr
+            if type(error) is DockerException and stderr is not None and stderr != "":
+                missing_lines = {
+                    f"Error response from daemon: task {id_} not found" for id_ in ids
+                }
+                if missing_lines.issuperset(stderr.splitlines()):
+                    raise _TaskGone(error.docker_command, error.return_code) from error
+            raise
+
+    return hydrate_handles(tasks, inspect_json, _TaskGone)
+
+
 class TaskCLI(DockerCLICaller):
     """Task-inspection commands retaining the originating client configuration."""
 
-    def list(self) -> builtins.list[Task]:
+    def list(self, *, hydrate: bool = False) -> builtins.list[Task]:
         """List tasks associated with the services listed in the Swarm.
 
+        Args:
+            hydrate: Pin inspection snapshots in bounded batches across all
+                listed services, omitting tasks that vanish before inspection.
+
         Returns:
-            Task handles from a service-list call followed by service ps.
+            Task handles in output order from one service ps call when there
+            are services to list. Handles are lazy unless hydrated.
         """
         service_cli = pywhales.components.service.cli_wrapper.ServiceCLI(
             self.client_config
         )
-        return service_cli.ps(service_cli.list())
+        return service_cli.ps(service_cli.list(), hydrate=hydrate)
 
     @overload
     def inspect(self, x: str) -> Task: ...
