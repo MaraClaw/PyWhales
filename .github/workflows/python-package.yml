@@ -216,7 +216,7 @@ jobs:
         with:
           version: "0.13.6"
           python-version: "3.14.10"
-      - run: uv build --no-sources --sdist --wheel
+      - run: uv build --no-sources --sdist --wheel --build-constraints scripts/delivery/build-constraints.txt --require-hashes
       - name: Isolate-install both exact distributions
         run: uv run --locked python -m scripts.delivery smoke
       - id: dist
