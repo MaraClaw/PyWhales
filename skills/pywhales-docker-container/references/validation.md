@@ -28,8 +28,9 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes source APIs for project version 1.3.2.
-An installed version string alone isn't proof of support. Check Docker CLI 29
+The guidance describes source APIs for project version 1.4.0.
+An installed version string alone isn't proof of support. Check the client's captured-output cap and strict interpolation environment,
+Swarm task hydration, the `pywhales[ecr]` extra, Docker CLI 29
 additions (the checkpoint group, raw-text flags, Buildx history and policy,
 Compose stats and wait), inherited
 environment selection, archive stderr allowances, Swarm hydrated listings,
@@ -44,6 +45,7 @@ before copying their examples:
 ```python
 from annotationlib import Format, get_annotations
 from dataclasses import fields
+from importlib.util import find_spec
 from inspect import signature
 from typing import get_args, get_overloads
 
@@ -123,6 +125,16 @@ print(signature(DockerClient).parameters["inherit_environment"])  # bool = True
 print({f.name: f.default for f in fields(ClientConfig)}["inherit_environment"])
 print(signature(DockerClient).parameters["inherited_environment_names"])  # None
 print({f.name: f.default for f in fields(ClientConfig)}["inherited_environment_names"])
+client_parameters = signature(DockerClient).parameters
+print(client_parameters["max_captured_output_bytes"])  # int | None = None
+print(client_parameters["strict_interpolation_environment"])  # bool = False
+print({f.name: f.default for f in fields(ClientConfig)}["max_captured_output_bytes"])
+print("hydrate" in signature(docker.service.ps).parameters)  # True
+print("hydrate" in signature(docker.node.ps).parameters)  # True
+print("hydrate" in signature(docker.stack.ps).parameters)  # True
+print("hydrate" in signature(docker.task.list).parameters)  # True
+print("hydrate" in signature(docker.stack.services).parameters)  # True
+print(find_spec("botocore") is not None)  # True only with pywhales[ecr]
 print(signature(DockerClient).parameters["strict_workload_errors"])  # bool = False
 print({f.name: f.default for f in fields(ClientConfig)}["strict_workload_errors"])
 print(signature(AdmissionOwner, annotation_format=Format.STRING))  # both owner caps
@@ -277,6 +289,20 @@ Look for `completion_services: tuple[str, ...] = ()` on `capture_compose`, and
   blocks convergence without creating a new terminal failure reason.
 - `strict_env_transport: bool = False` on `DockerClient` and on `ClientConfig`
   (import the latter from `pywhales.client_config`, not the package root).
+- `max_captured_output_bytes: int | None = None` on `DockerClient` and as the last
+  `ClientConfig` field, and `strict_interpolation_environment: bool = False` on both.
+  A signature proves the keyword exists, not behavior: the cap applies only to
+  captured output outside `observation()`, overflowing with
+  `ObservationLimitError` reason `response`, and the strict flag affects only
+  `stack.deploy()` and `buildx.bake()` overlays. See
+  [Cap captured output](client-and-errors.md#cap-captured-output).
+- Keyword-only `hydrate: bool = False` on `service.ps`, `node.ps`, `stack.ps`,
+  `task.list` and `stack.services`, and on the matching `Service`, `Node` and
+  `Stack` handle methods. See
+  [Swarm tasks and stack services](client-and-errors.md#swarm-tasks-and-stack-services).
+- `importlib.util.find_spec("botocore")` is not `None` before calling
+  `docker.login_ecr`; install `pywhales[ecr]` otherwise. `boto3` is no longer
+  required.
 - `strict_workload_errors: bool = False` on both client types. Confirm matching
   installed documentation describes attached workload failures, not every CLI
   error; detached and preflight specialization remains separate.

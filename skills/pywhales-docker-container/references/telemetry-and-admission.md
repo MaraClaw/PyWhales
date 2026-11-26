@@ -92,6 +92,11 @@ and a close without a selected stop have `None`. Launch and admission decision
 records have no stop-reason field. This adds attribution without changing the
 existing outcome categories or launch/refusal correlation.
 
+A client-level `max_captured_output_bytes` overflow outside an observation scope
+raises `ObservationLimitError` with reason `response` and records one `limit`
+completion with stop reason `response`. It adds no stop reason or schema field.
+See [Cap captured output](client-and-errors.md#cap-captured-output).
+
 Archive diagnostic overflow raises `ObservationLimitError` with reason
 `total_archive_stderr`, but records and exporter counters use existing
 `other_limit`. The allowance adds no telemetry reason or schema field. It counts
