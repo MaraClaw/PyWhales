@@ -11,7 +11,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14.10"
 dependencies = [
-    "pydantic>=2.14.3",
+    "pydantic>=2.14.4",
     "typing_extensions>=4.16.0",
     "boto3>=1.44.5",
     "s3transfer>=0.19.3",
@@ -20,23 +20,23 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ruff>=0.17.5",
-    "ty>=0.0.106",
+    "ruff>=0.17.6",
+    "ty>=0.0.111",
     "pytest>=9.2.0",
     "pytest-mock>=3.17.0",
     "pytz>=2026.6",
     "astunparse==1.6.3",
     "griffe==2.4.1",
-    "markdown==3.11.3",
+    "markdown==3.11.4",
     "markupsafe==3.0.4",
     "mkdocs==1.6.1",
     "mkdocs-autorefs==1.4.5",
     "mkdocs-get-deps==0.2.2",
-    "mkdocs-material==9.8.1",
+    "mkdocs-material==9.8.2",
     "mkdocstrings==1.0.8",
     "mkdocstrings-python==2.0.11",
-    "pymdown-extensions==13.1",
-    "coverage>=7.17.3",
+    "pymdown-extensions==13.1.2",
+    "coverage>=7.17.5",
     "pytest-asyncio>=1.5.0",
 ]
 
