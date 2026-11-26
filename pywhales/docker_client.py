@@ -13,6 +13,7 @@ import pydantic
 
 from pywhales._json import loads_compat
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.checkpoint.cli_wrapper import CheckpointCLI
 from pywhales.components.compose.cli_wrapper import ComposeCLI
@@ -359,11 +360,13 @@ class DockerClient(DockerCLICaller):
         Raises:
             ClientNotFoundError: If the configured executable cannot be found.
             DockerException: If the version command fails.
-            json.JSONDecodeError: If command output is not valid JSON.
-            pydantic.ValidationError: If the JSON fails version-model validation.
+            ParsingError: If command output cannot be decoded as version metadata.
         """
         full_cmd = Command([*self.docker_cmd, "version", "-f", "{{json .}}"])
-        return Version(**loads_compat(run(full_cmd)))
+        output = run(full_cmd)
+        return JsonOutputParser("version", self.client_config.raw_diagnostics).parse(
+            lambda text: Version(**loads_compat(text)), output
+        )
 
     def login(
         self,

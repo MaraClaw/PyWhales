@@ -9,15 +9,18 @@ import json
 import os
 import sys
 import tarfile
+import traceback
 from collections.abc import Generator, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, assert_never
 from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import pywhales.components.buildx.cli_wrapper
 from pywhales import DockerClient, docker
+from pywhales.client_config import ParsingError
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.test_utils import set_cache_validity_period
 from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
@@ -577,6 +580,46 @@ def change_cwd() -> Generator[None]:
     os.chdir(bake_test_dir)
     yield
     os.chdir(old_cwd)
+
+
+@pytest.mark.parametrize("only_print", [True, False], ids=["print", "follow-up"])
+@pytest.mark.parametrize("raw", [False, True], ids=["safe", "raw"])
+@pytest.mark.parametrize(
+    ("payload", "error_type"),
+    [
+        ('{"args":{"TOKEN":"bake-arg-secret"}', "json_invalid"),
+        ('{"target":{"app":[{"args":{"TOKEN":"bake-arg-secret"}}]}}', "dict_type"),
+        ("[" * 100_000 + '"bake-arg-secret"', "json_invalid"),
+    ],
+    ids=["invalid-json", "invalid-model", "deep-json"],
+)
+def test_bake_config_parse_error_respects_diagnostics_policy(
+    only_print: bool, raw: bool, payload: str, error_type: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "engine"], raw_diagnostics=raw)
+    responses = [payload] if only_print else ["build output", payload]
+    with (
+        patch(
+            "pywhales.components.buildx.cli_wrapper.run", side_effect=responses
+        ) as run,
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.buildx.bake(print=only_print)
+
+    assert run.call_count == len(responses)
+    error = raised.value
+    assert str(error) == "Invalid buildx bake JSON response"
+    if raw:
+        cause = error.__cause__
+        assert isinstance(cause, ValidationError)
+        detail = cause.errors()[0]
+        assert detail["type"] == error_type
+        assert "bake-arg-secret" in repr(detail["input"])
+    else:
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        rendered = str(error) + repr(error) + "".join(traceback.format_exception(error))
+        assert "bake-arg-secret" not in rendered
 
 
 @pytest.mark.usefixtures("with_docker_driver")

@@ -583,22 +583,26 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
             json_str: Captured scalar inspect response.
 
         Raises:
-            ParsingError: If the response is malformed or not a singleton object array.
+            ParsingError: If the response is malformed, too deeply nested to
+                decode, or not a singleton object array.
             pydantic.ValidationError: If the object contains invalid JSON values.
         """
         try:
             result = loads_compat(json_str)
-        except JSONDecodeError as err:
+        except (JSONDecodeError, RecursionError) as err:
             if self.client_config.raw_diagnostics:
                 raise ParsingError("Invalid inspect JSON response") from err
-            raise ParsingError("Invalid inspect JSON response") from None
-        if (
-            not isinstance(result, list)
-            or len(result) != 1
-            or not isinstance(result[0], dict)
-        ):
-            raise ParsingError("Expected one inspect JSON object")
-        return utils.custom_parse_object_as(dict[str, pydantic.JsonValue], result[0])
+        else:
+            if (
+                not isinstance(result, list)
+                or len(result) != 1
+                or not isinstance(result[0], dict)
+            ):
+                raise ParsingError("Expected one inspect JSON object")
+            return utils.custom_parse_object_as(
+                dict[str, pydantic.JsonValue], result[0]
+            )
+        raise ParsingError("Invalid inspect JSON response") from None
 
     def _fetch_inspect_result_json(self, reference: ReferenceT) -> JsonObject:
         """Define the subclass hook for fetching one JSON inspection object.

@@ -39,6 +39,7 @@ from pywhales.client_config import (
 )
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._hydration import hydrate_handles, release_pins
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.container.models import (
     ContainerConfig,
     ContainerGraphDriver,
@@ -2855,6 +2856,9 @@ class ContainerCLI(DockerCLICaller):
 
         Returns:
             Parsed usage records in CLI output order.
+
+        Raises:
+            ParsingError: If a CLI output line cannot be decoded as a usage record.
         """
         containers_list = to_list(containers) if containers else []
         if len(containers_list) == 0 and containers is not None and not all:
@@ -2876,7 +2880,11 @@ class ContainerCLI(DockerCLICaller):
             full_cmd.extend(containers_list)
 
         stats_output = run(full_cmd)
-        return [ContainerStats(loads_compat(x)) for x in stats_output.splitlines()]
+        parser = JsonOutputParser("container stats", self.client_config.raw_diagnostics)
+        return [
+            parser.parse(lambda text: ContainerStats(loads_compat(text)), line)
+            for line in stats_output.splitlines()
+        ]
 
     def stop(
         self,

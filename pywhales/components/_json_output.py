@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from pywhales.client_config import ParsingError
 
-_SHAPE_ERRORS = (ValueError, LookupError, TypeError, AttributeError)
+_SHAPE_ERRORS = (ValueError, LookupError, TypeError, AttributeError, RecursionError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +39,9 @@ class JsonOutputParser:
         Raises:
             ParsingError: If `parse` raises a decoding, validation, or shape
                 error (`ValueError`, `LookupError`, `TypeError`,
-                `AttributeError`). Safe mode withholds the payload and leaves
-                neither a cause nor a context; raw mode chains the original.
+                `AttributeError`), or exceeds the recursion limit (`RecursionError`).
+                Safe mode withholds the payload and leaves neither a cause nor
+                a context; raw mode chains the original.
         """
         try:
             return parse(output)

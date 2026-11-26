@@ -14,6 +14,7 @@ from pywhales import DockerClient, Image
 from pywhales.client_config import ClientConfig
 from pywhales.components.container.models import PortBinding
 from pywhales.components.top import ContainerTopResult
+from pywhales.docker_client import Version
 from pywhales.exceptions import DockerException
 
 
@@ -172,6 +173,30 @@ def test_version(ctr_client: DockerClient) -> None:
     assert version_info.server is not None
     assert version_info.server.version is not None
     assert re.match(r"\d+\.\d+", version_info.server.version)
+
+
+def test_version_parses_client_and_server_with_compatible_aliases() -> None:
+    client = DockerClient(client_call=[sys.executable, "engine"])
+    output = (
+        '{"Client":{"Version":"29.9.3","ApiVersion":"1.54","BuiltTime":"client-time"},'
+        '"Server":{"Version":"29.9.2","APIVersion":"1.53","BuildTime":"server-time"}}'
+    )
+    with patch("pywhales.docker_client.run", return_value=output):
+        result = client.version()
+
+    assert isinstance(result, Version)
+    assert result.client is not None
+    assert result.server is not None
+    assert (
+        result.client.version,
+        result.client.api_version,
+        result.client.build_time,
+    ) == ("29.9.3", "1.54", "client-time")
+    assert (
+        result.server.version,
+        result.server.api_version,
+        result.server.build_time,
+    ) == ("29.9.2", "1.53", "server-time")
 
 
 def _isolated_auth_client(

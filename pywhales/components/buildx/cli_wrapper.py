@@ -607,6 +607,7 @@ class BuildxCLI(DockerCLICaller):
             DockerTimeout: A local CLI exceeds its deadline; the CLI is killed
                 and reaped without guaranteeing cancellation of the build.
             DockerException: A local CLI exits unsuccessfully.
+            ParsingError: The printed Bake configuration cannot be decoded.
         """
         validate_timeout(timeout)
         report = call in ("check", "outline", "targets") or list is not None
@@ -653,9 +654,10 @@ class BuildxCLI(DockerCLICaller):
         targets = to_list(targets)
         env = dict(variables)
         if print:
-            return _BAKE_RESULT_ADAPTER.validate_json(
-                run([*full_cmd, *targets], env=env, timeout=timeout)
-            )
+            output = run([*full_cmd, *targets], env=env, timeout=timeout)
+            return JsonOutputParser(
+                "buildx bake", self.client_config.raw_diagnostics
+            ).parse(_BAKE_RESULT_ADAPTER.validate_json, output)
         elif stream_logs:
             return stream_buildx_logs([*full_cmd, *targets], env=env, timeout=timeout)
         else:
@@ -668,9 +670,10 @@ class BuildxCLI(DockerCLICaller):
             if report:
                 return output
             if return_config:
-                return _BAKE_RESULT_ADAPTER.validate_json(
-                    run([*full_cmd, "--print", *targets], env=env, timeout=timeout)
-                )
+                config = run([*full_cmd, "--print", *targets], env=env, timeout=timeout)
+                return JsonOutputParser(
+                    "buildx bake", self.client_config.raw_diagnostics
+                ).parse(_BAKE_RESULT_ADAPTER.validate_json, config)
 
     @overload
     def build(

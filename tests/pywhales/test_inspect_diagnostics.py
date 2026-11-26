@@ -58,18 +58,23 @@ SCALAR_RESOURCES = [
 @pytest.mark.parametrize("resource_type", SCALAR_RESOURCES)
 @pytest.mark.parametrize("raw", [False, True])
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "cause_type"),
     [
-        "[]",
-        '[{"sentinel": "scalar-secret"}, {}]',
-        '["scalar-secret"]',
-        '{"sentinel": "scalar-secret"}',
-        '[{"sentinel": "scalar-secret"}',
+        ("[]", None),
+        ('[{"sentinel": "scalar-secret"}, {}]', None),
+        ('["scalar-secret"]', None),
+        ('{"sentinel": "scalar-secret"}', None),
+        ('[{"sentinel": "scalar-secret"}', json.JSONDecodeError),
+        ("[" * 1_000_000 + '"scalar-secret"', RecursionError),
     ],
-    ids=["empty", "multiple", "non-object", "non-array", "invalid-json"],
+    ids=["empty", "multiple", "non-object", "non-array", "invalid-json", "deep-json"],
 )
 def test_scalar_inspect_rejects_malformed_response(
-    resource_type: ResourceType, raw: bool, payload: str, tmp_path: Path
+    resource_type: ResourceType,
+    raw: bool,
+    payload: str,
+    cause_type: type[Exception] | None,
+    tmp_path: Path,
 ) -> None:
     config = ClientConfig(raw_diagnostics=raw, _client_call_with_path=["mock-cli"])
     with (
@@ -82,9 +87,22 @@ def test_scalar_inspect_rejects_malformed_response(
     ):
         resource_type(config, "reference")
 
-    if not raw:
-        assert "scalar-secret" not in "".join(traceback.format_exception(raised.value))
-        assert raised.value.__cause__ is None
+    error = raised.value
+    assert str(error) == (
+        "Expected one inspect JSON object"
+        if cause_type is None
+        else "Invalid inspect JSON response"
+    )
+    if raw and cause_type is not None:
+        cause = error.__cause__
+        assert isinstance(cause, cause_type)
+        if isinstance(cause, json.JSONDecodeError):
+            assert cause.doc == payload
+    else:
+        assert error.__cause__ is None
+        assert error.__context__ is None
+        rendered = str(error) + repr(error) + "".join(traceback.format_exception(error))
+        assert "scalar-secret" not in rendered
     assert list(tmp_path.iterdir()) == []
 
 
